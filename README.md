@@ -4,8 +4,8 @@ NovelAI 生图、画师库、例图、角色、衣柜、聊天生图与共享。
 
 ## 固定下载地址
 
-- [完整酒馆助手脚本 JSON](https://raw.githubusercontent.com/jiuyi777/zhiku-tavern-helper/main/zhiku.script.json)
-- [完整 JavaScript 源码](https://raw.githubusercontent.com/jiuyi777/zhiku-tavern-helper/main/zhiku.js)
+- [完整酒馆助手脚本 JSON](https://raw.githubusercontent.com/ruoege49-ship-it/zhiku-tavern-helper/main/zhiku.script.json)
+- [完整 JavaScript 源码](https://raw.githubusercontent.com/ruoege49-ship-it/zhiku-tavern-helper/main/zhiku.js)
 
 将 JSON 导入酒馆助手脚本库，替换原来的智库脚本。后续更新继续使用同一地址；链接指向 main 最新版本，GitHub 缓存可能有短暂延迟。此完整脚本本身不新增自动更新机制。
 
