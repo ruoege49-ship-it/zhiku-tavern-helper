@@ -10,7 +10,7 @@ const msg={mes:'before image###sunset### middle image###sea### after',swipe_id:0
 const c={chat:[msg],chatId:'one',extensionSettings:{'st-chatu8':{startTag:'image###',endTag:'###'},regex:[{id:'unrelated'}]},saveSettingsDebounced(){},async saveChat(){saves++;},updateMessageBlock(){}};
 const controller=createMarkerController({context:()=>c,getData:()=>data,generate:async prompt=>{count++;active++;peak=Math.max(peak,active);try{if(block)await block;if(fail)throw Error('test backend failure');return 'data:image/png;base64,test';}finally{active--;}},upload:async()=>({url:'/user/images/test.png'}),notify:(...a)=>notices.push(a)});
 controller.syncRegex();controller.syncRegex();
-assert.equal(c.extensionSettings.regex.length,2);
+assert.equal(c.extensionSettings.regex.length,3);
 let rule=c.extensionSettings.regex.find(r=>r.id===MARKER_REGEX_ID);
 assert(rule.promptOnly&&!rule.markdownOnly&&!rule.runOnEdit);assert.deepEqual(rule.placement,[1,2]);
 const regex=()=>new RegExp(rule.findRegex.slice(1,-2),'g');

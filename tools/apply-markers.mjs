@@ -1,12 +1,22 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 export function applyMarkers(source) {
+    function presentation(s) {
+        if(!s.includes('__mod_marker.decorateAll();'))s=s.replace('function addMesButtons() {','function addMesButtons() {\n    __mod_marker.decorateAll();');
+        if(!s.includes('__mod_marker.refresh();'))s=s.replace('    __mod_marker.syncRegex();','    __mod_marker.syncRegex();\n    setTimeout(() => __mod_marker.refresh(), 0);');
+        s=s.replace('<span class="pc-menu-seal"></span><span>智库</span>', '<span class="pc-menu-picture" aria-hidden="true">🖼️</span><span>智库</span>');
+        if(!s.includes('pc-marker-ui-style'))s=s.replace('    injectCss();',`    injectCss();
+    const markerStyle=DOC.createElement('style');markerStyle.id='pc-marker-ui-style';
+    markerStyle.textContent='.pc-marker-slot{display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap;margin:10px 0;padding:12px;border-radius:12px;background:var(--SmartThemeBlurTintColor,rgba(0,0,0,.15));border:1px solid var(--SmartThemeBorderColor,rgba(128,128,128,.35))}.pc-marker-slot details{flex:1;min-width:120px}.pc-marker-slot summary{cursor:pointer;font-size:14px}.pc-marker-slot pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;font-size:13px;margin:10px 0 0;scrollbar-width:none}.pc-marker-slot pre::-webkit-scrollbar{display:none}.pc-marker-generate{cursor:pointer;padding:6px 12px;border-radius:8px;color:inherit;background:var(--SmartThemeBlurTintColor,transparent);border:1px solid var(--SmartThemeBorderColor,#888);font:inherit}.pc-marker-generate:disabled{opacity:.6;cursor:wait}#pc-menu-btn .pc-menu-picture{display:inline-flex;align-items:center;justify-content:center;font-size:22px;width:26px;line-height:1}';
+    DOC.head.appendChild(markerStyle);cleanups.push(()=>markerStyle.remove());`);
+        return s;
+    }
     const logic=fs.readFileSync(new URL('../src/marker-generation.js',import.meta.url),'utf8').replace(/^export /gm,'');
     if(source.includes('const MARKER_REGEX_ID =')) {
         const start=source.indexOf('// Marker-triggered generation');
         const end=source.indexOf('const __mod_marker=',start);
         assert(start>=0&&end>start);
-        return source.slice(0,start)+logic+'\n'+source.slice(end);
+        return presentation(source.slice(0,start)+logic+'\n'+source.slice(end));
     }
     let s=source;
     function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,90));s=s.replace(a,()=>b);}
@@ -40,5 +50,5 @@ export function applyMarkers(source) {
     patch('[event_types.USER_MESSAGE_RENDERED, onRendered]', '[event_types.USER_MESSAGE_RENDERED, onUserRendered]');
     patch('[event_types.MESSAGE_UPDATED, onRendered]', '[event_types.MESSAGE_UPDATED, onEdited]');
     patch('[event_types.MORE_MESSAGES_LOADED, onRendered]', '[event_types.MORE_MESSAGES_LOADED, onRendered], [event_types.GENERATION_ENDED, () => { const id=SillyTavern.getContext().chat.length-1; setTimeout(() => { void __mod_marker.process(id); }, 0); }]');
-    return s;
+    return presentation(s);
 }

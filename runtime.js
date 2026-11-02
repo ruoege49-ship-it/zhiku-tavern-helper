@@ -8,7 +8,7 @@ function setTimeout(fn, delay, ...args) {
     timers.add(id); return id;
 }
 function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
-// 智库 · 原生扩展版 v0.8.0（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.1（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -25,7 +25,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.0';
+globalThis.__PC_VERSION = '0.8.1';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -2100,6 +2100,7 @@ return { avatarUrl, stCards, stPersonas, currentPersonaKey, getChar, saveChar, d
 // ───── ui.js ─────
 // Marker-triggered generation and prompt-only filtering. No chat LLM request.
 const MARKER_REGEX_ID = '72c57f73-46af-46ac-a28e-bf31b131332a';
+const MARKER_DISPLAY_ID = '6ba93a8e-cabb-494c-a7e8-6c9dfcf5fb80';
 function escapeMarker(value) { return value.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'); }
 function markerPattern(start, end) { return escapeMarker(start) + '[\\s\\S]*?' + escapeMarker(end); }
 function parseImageMarkers(text, start, end) {
@@ -2112,7 +2113,7 @@ function parseImageMarkers(text, start, end) {
     }
     return result;
 }
-function createMarkerController({context,getData,generate,upload,notify}) {
+function createMarkerController({context,getData,generate,upload,notify,document:doc=globalThis.document}) {
     let queue=Promise.resolve(), stopped=false;
     const pending=new WeakMap(), failed=new WeakMap();
     function settings() {
@@ -2128,23 +2129,58 @@ function createMarkerController({context,getData,generate,upload,notify}) {
         const c=context(), {start,end}=settings();
         const rule={id:MARKER_REGEX_ID,scriptName:'智库 · 生图标记不发送',findRegex:start&&end?'/'+markerPattern(start,end)+'/g':'/(?!)/g',replaceString:'',trimStrings:[],placement:[1,2],disabled:false,markdownOnly:false,promptOnly:true,runOnEdit:false,substituteRegex:0,minDepth:null,maxDepth:null};
         const rules=c.extensionSettings.regex ||= [];
-        const index=rules.findIndex(r=>r.id===MARKER_REGEX_ID);
-        if(index>=0 && JSON.stringify(rules[index])===JSON.stringify(rule))return;
-        if(index<0)rules.push(rule);else rules[index]=rule;
-        c.saveSettingsDebounced();
+        const display={...rule,id:MARKER_DISPLAY_ID,scriptName:'智库 · 生图标记折叠',findRegex:start&&end?'/'+escapeMarker(start)+'(?!\\s*'+escapeMarker(end)+')[\\s\\S]*?'+escapeMarker(end)+'/g':'/(?!)/g',markdownOnly:true,promptOnly:false,replaceString:'<div class="pc-marker-slot"><details><summary>图片提示词</summary></details><button type="button" class="pc-marker-generate">生成图片</button></div>'};
+        let changed=false;
+        for(const item of [rule,display]) {
+            const index=rules.findIndex(r=>r.id===item.id);
+            if(index>=0 && JSON.stringify(rules[index])===JSON.stringify(item))continue;
+            if(index<0)rules.push(item);else rules[index]=item;
+            changed=true;
+        }
+        if(changed)c.saveSettingsDebounced();
+    }
+    function decorate(id) {
+        if(!doc || stopped)return;
+        const cfg=settings(),msg=context().chat?.[id];
+        if(!msg)return;
+        const tokens=parseImageMarkers(msg.mes,cfg.start,cfg.end);
+        const slots=doc.querySelectorAll(`.mes[mesid="${Number(id)}"] .mes_text .pc-marker-slot`);
+        slots.forEach((slot,index)=>{
+            const token=tokens[index];if(!token)return;
+            if(slot.dataset.pcReady===token.raw) { const b=slot.querySelector('button');if(b){b.disabled=pending.has(msg);b.textContent=b.disabled?'生成中…':failed.get(msg)===String(msg.mes)?'重试生成':'生成图片';}return; }
+            slot.dataset.pcReady=token.raw;
+            slot.replaceChildren();
+            const details=doc.createElement('details'),summary=doc.createElement('summary'),pre=doc.createElement('pre'),button=doc.createElement('button');
+            summary.textContent='图片提示词';pre.textContent=token.prompt;
+            details.append(summary,pre);button.type='button';button.className='pc-marker-generate';
+            button.disabled=pending.has(msg);button.textContent=button.disabled?'生成中…':'生成图片';
+            button.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();void process(Number(id),{manual:true,tokenIndex:index});});
+            slot.append(details,button);
+        });
+    }
+    function decorateAll() { if(doc)for(const el of doc.querySelectorAll('.mes[mesid]'))decorate(Number(el.getAttribute('mesid'))); }
+    function refresh() {
+        if(!doc || stopped)return;
+        const cfg=settings();
+        for(const el of doc.querySelectorAll('.mes[mesid]')) {
+            const id=Number(el.getAttribute('mesid')),msg=context().chat?.[id];
+            if(msg && parseImageMarkers(msg.mes,cfg.start,cfg.end).length)context().updateMessageBlock(id,msg);
+        }
+        decorateAll();
     }
     const chatKey=c=>String(c.getCurrentChatId?.() ?? c.chatId ?? '')+'|'+String(c.characterId ?? '')+'|'+String(c.groupId ?? '');
-    async function process(id,{manual=false}={}) {
+    async function process(id,{manual=false,tokenIndex=null}={}) {
         const c=context(), msg=c.chat?.[id], cfg=settings();
         if(stopped || !msg || msg.is_system || (!manual && !cfg.auto))return 0;
         const source=String(msg.mes || ''), swipe=msg.swipe_id;
-        const tokens=parseImageMarkers(source,cfg.start,cfg.end);
+        const allTokens=parseImageMarkers(source,cfg.start,cfg.end);
+        const tokens=tokenIndex===null?allTokens:allTokens.filter((_,i)=>i===tokenIndex);
         if(!tokens.length) { if(manual)notify(`没有完整生图标记，请使用 ${cfg.start}提示词${cfg.end}`,'info');return 0; }
         if(pending.has(msg))return pending.get(msg);
         if(!manual && failed.get(msg)===source)return 0;
         const key=chatKey(c);
         const job=queue.then(async()=>{
-            let expected=source, count=0;
+            let expected=source, count=0, offset=0;
             const current=()=>!stopped && chatKey(context())===key && context().chat?.[id]===msg && msg.swipe_id===swipe && String(msg.mes || '')===expected;
             if(!current())return 0;
             try {
@@ -2155,7 +2191,9 @@ function createMarkerController({context,getData,generate,upload,notify}) {
                     const {url}=await upload(image,'marker_'+Date.now());
                     if(!current())break;
                     const safeUrl=String(url).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
-                    const next=expected.replace(token.raw,()=>`<img src="${safeUrl}" alt="智库生成" class="pc-chat-img">`);
+                    const replacement=`<img src="${safeUrl}" alt="智库生成" class="pc-chat-img">`;
+                    const position=token.index+offset;
+                    const next=expected.slice(0,position)+replacement+expected.slice(position+token.raw.length);
                     const previous=expected;
                     msg.mes=next;
                     const swipes=Array.isArray(msg.swipes) && Number.isInteger(swipe) ? msg.swipes : null;
@@ -2163,8 +2201,8 @@ function createMarkerController({context,getData,generate,upload,notify}) {
                     if(swipes)swipes[swipe]=next;
                     try { await context().saveChat(); }
                     catch(e) { if(context().chat?.[id]===msg && msg.mes===next) { msg.mes=previous;if(swipes)swipes[swipe]=previousSwipe; } throw e; }
-                    expected=next;count++;
-                    if(chatKey(context())===key && context().chat?.[id]===msg) context().updateMessageBlock(id,msg);
+                    offset+=next.length-expected.length;expected=next;count++;
+                    if(chatKey(context())===key && context().chat?.[id]===msg) { context().updateMessageBlock(id,msg);decorate(id); }
                 }
                 if(count)notify(`已按标记生成 ${count} 张图片`,'success');
                 failed.delete(msg);
@@ -2172,10 +2210,11 @@ function createMarkerController({context,getData,generate,upload,notify}) {
             } catch(e) { failed.set(msg,String(msg.mes || ''));notify(e.message || String(e),'error');return count; }
         });
         pending.set(msg,job);
+        decorate(id);
         queue=job.catch(()=>{});
-        try {return await job;} finally {pending.delete(msg);}
+        try {return await job;} finally {pending.delete(msg);decorate(id);}
     }
-    return {settings,syncRegex,process,stop(){stopped=true;},idle(){return queue;}};
+    return {settings,syncRegex,process,decorate,decorateAll,refresh,stop(){stopped=true;},idle(){return queue;}};
 }
 
 const __mod_marker=createMarkerController({
@@ -5087,6 +5126,7 @@ function injectCss() {
 
 // 聊天里每一楼加一个「生图」小按钮
 function addMesButtons() {
+    __mod_marker.decorateAll();
     DOC.querySelectorAll('#chat .mes').forEach(mes => {
         const box = mes.querySelector('.extraMesButtons') || mes.querySelector('.mes_buttons');
         if (!box || box.querySelector('.pc-mes-gen')) return;
@@ -5128,7 +5168,7 @@ function addMenuButton() {
     item.id = 'pc-menu-btn';
     item.className = 'list-group-item flex-container flexGap5 interactable';
     item.tabIndex = 0;
-    item.innerHTML = '<span class="pc-menu-seal"></span><span>智库</span>';
+    item.innerHTML = '<span class="pc-menu-picture" aria-hidden="true">🖼️</span><span>智库</span>';
     item.addEventListener('click', () => UI.openWindow());
     menu.appendChild(item);
     cleanups.push(() => item.remove());
@@ -5141,9 +5181,14 @@ async function start() {
     for (const id of ['pc-root', 'pc-stub', 'pc-chip', 'pc-menu-btn']) DOC.getElementById(id)?.remove();
 
     injectCss();
+    const markerStyle=DOC.createElement('style');markerStyle.id='pc-marker-ui-style';
+    markerStyle.textContent='.pc-marker-slot{display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap;margin:10px 0;padding:12px;border-radius:12px;background:var(--SmartThemeBlurTintColor,rgba(0,0,0,.15));border:1px solid var(--SmartThemeBorderColor,rgba(128,128,128,.35))}.pc-marker-slot details{flex:1;min-width:120px}.pc-marker-slot summary{cursor:pointer;font-size:14px}.pc-marker-slot pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;font-size:13px;margin:10px 0 0;scrollbar-width:none}.pc-marker-slot pre::-webkit-scrollbar{display:none}.pc-marker-generate{cursor:pointer;padding:6px 12px;border-radius:8px;color:inherit;background:var(--SmartThemeBlurTintColor,transparent);border:1px solid var(--SmartThemeBorderColor,#888);font:inherit}.pc-marker-generate:disabled{opacity:.6;cursor:wait}#pc-menu-btn .pc-menu-picture{display:inline-flex;align-items:center;justify-content:center;font-size:22px;width:26px;line-height:1}';
+    DOC.head.appendChild(markerStyle);cleanups.push(()=>markerStyle.remove());
     await loadData();
     if (getData().options.markerAuto === undefined) getData().options.markerAuto = true;
     __mod_marker.syncRegex();
+    setTimeout(() => __mod_marker.refresh(), 0);
+    setTimeout(() => __mod_marker.refresh(), 0);
     cleanups.push(() => __mod_marker.stop());
     // 第一次用：装过智绘姬的话，把 NovelAI key 和画师搬过来
     const ns = N.settings();
