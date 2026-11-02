@@ -29,6 +29,71 @@ patch('async function encodeVibe(imageB64, infoExtracted = 1, model = settings()
         <div class="pc-actions wrap"><a class="pc-btn dark" href="https://github.com/ruoege49-ship-it/zhiku-tavern-helper" target="_blank" rel="noopener">仓库 / 更新</a><a class="pc-btn" href="https://github.com/damoshen123/st-chatu8" target="_blank" rel="noopener">智绘姬原仓库</a></div></div>
       <div class="pc-about-note">看图提取需要能识图的模型 · 原脚本 AFPL v9，署名保留</div>\`);`);
 }
+// 只用一次 / 每张换一个：聊天里出一张图之后才生效（以前没接上）
+patch(`function setActive(ref, { oneShot = false } = {}) {`,`/** 聊天里生成一张后：「只用一次」换回原来的；「每生成一张就换一个」换下一个 */
+function afterChatImage() {
+    const d = getData();
+    if (d.oneShot) {
+        const back = d.previousActive && M.resolveTicket(d, d.previousActive) ? d.previousActive : null;
+        setActive(back);
+        toastr.info(back ? \`只用一次：已换回「\${M.ticketName(d, back)}」\` : '只用一次：已取消画师串', '智库', { timeOut: 2000 });
+        return;
+    }
+    if (d.rotate && d.rotate !== 'off') {
+        const next = M.nextInRotation(d);
+        if (next) setActive(next);
+    }
+}
+
+function setActive(ref, { oneShot = false } = {}) {`);
+patch('return { runtime, stSettings, extras, composeStudio,','return { afterChatImage, runtime, stSettings, extras, composeStudio,');
+// 绑定：离开绑定的角色卡时换回原来的画师串（以前会一直留着上一个角色的）
+patch('        previousActive: null,','        previousActive: null,\n        bindingActive: false,\n        beforeBinding: null,');
+{
+  const a=s.indexOf('function bindCurrentCharacter(ref) {');
+  const b=s.indexOf('\n\n\nconst ctx = () => SillyTavern.getContext();',a);
+  assert(a>0&&b>a);
+  patch(s.slice(a,b),`function bindCurrentCharacter(ref) {
+    const key = currentCharacterKey();
+    if (!key) return false;
+    const d = getData();
+    if (ref) {
+        d.bindings[key] = ref;
+        if (!d.bindingActive) {
+            // 绑定前在用的那串（选的时候已经换成 ref 了，就从最近用过里找上一串）
+            d.beforeBinding = !M.sameRef(d.active, ref) ? d.active : (d.recent.find(r => !M.sameRef(r, ref)) || null);
+            d.bindingActive = true;
+        }
+    } else delete d.bindings[key];
+    commit();
+    return true;
+}
+function boundTicketForCurrent() {
+    const key = currentCharacterKey();
+    return key ? getData().bindings[key] || null : null;
+}
+function applyBindingOnChatChange() {
+    const d = getData();
+    const ref = boundTicketForCurrent();
+    if (ref && M.resolveTicket(d, ref)) {
+        if (!d.bindingActive) { d.beforeBinding = d.active; d.bindingActive = true; }
+        if (!M.sameRef(ref, d.active)) {
+            setActive(ref);
+            toastr.info(\`这个角色卡绑定了画师串「\${M.ticketName(d, ref)}」，已自动切换\`, '智库', { timeOut: 2500 });
+        } else commit({ silent: true });
+        return;
+    }
+    if (d.bindingActive) {
+        const back = d.beforeBinding && M.resolveTicket(d, d.beforeBinding) ? d.beforeBinding : null;
+        d.bindingActive = false;
+        d.beforeBinding = null;
+        if (!(back ? M.sameRef(back, d.active) : !d.active)) {
+            setActive(back);
+            toastr.info(back ? \`离开绑定的角色卡，换回「\${M.ticketName(d, back)}」\` : '离开绑定的角色卡，已取消画师串', '智库', { timeOut: 2500 });
+        } else commit({ silent: true });
+    }
+}`);
+}
 const oldButtons=s.slice(s.indexOf('    // 酒馆助手的脚本按钮（输入框下方）'),s.indexOf("    if (N.isReady()) toastr.success('打开方式：输入框下方"));
 assert(oldButtons.length>100);
 patch(oldButtons,`    // Native settings entry; no Tavern Helper globals.

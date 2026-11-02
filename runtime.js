@@ -75,6 +75,8 @@ function emptyData() {
         active: null,     // { type: 'group'|'artist', id }
         oneShot: false,
         previousActive: null,
+        bindingActive: false,
+        beforeBinding: null,
         rotate: 'off',    // off | seq | random
         rotatePool: 'recent', // recent | fav | collection:<id>
         bindings: {},     // characterKey -> { type, id }
@@ -1277,6 +1279,21 @@ async function generateSample({ fixed, template, neg = '' }) {
 
 // ───────────── 切换 ─────────────
 
+/** 聊天里生成一张后：「只用一次」换回原来的；「每生成一张就换一个」换下一个 */
+function afterChatImage() {
+    const d = getData();
+    if (d.oneShot) {
+        const back = d.previousActive && M.resolveTicket(d, d.previousActive) ? d.previousActive : null;
+        setActive(back);
+        toastr.info(back ? `只用一次：已换回「${M.ticketName(d, back)}」` : '只用一次：已取消画师串', '智库', { timeOut: 2000 });
+        return;
+    }
+    if (d.rotate && d.rotate !== 'off') {
+        const next = M.nextInRotation(d);
+        if (next) setActive(next);
+    }
+}
+
 function setActive(ref, { oneShot = false } = {}) {
     const d = getData();
     if (oneShot) {
@@ -1309,7 +1326,14 @@ function bindCurrentCharacter(ref) {
     const key = currentCharacterKey();
     if (!key) return false;
     const d = getData();
-    if (ref) d.bindings[key] = ref; else delete d.bindings[key];
+    if (ref) {
+        d.bindings[key] = ref;
+        if (!d.bindingActive) {
+            // 绑定前在用的那串（选的时候已经换成 ref 了，就从最近用过里找上一串）
+            d.beforeBinding = !M.sameRef(d.active, ref) ? d.active : (d.recent.find(r => !M.sameRef(r, ref)) || null);
+            d.bindingActive = true;
+        }
+    } else delete d.bindings[key];
     commit();
     return true;
 }
@@ -1318,10 +1342,24 @@ function boundTicketForCurrent() {
     return key ? getData().bindings[key] || null : null;
 }
 function applyBindingOnChatChange() {
+    const d = getData();
     const ref = boundTicketForCurrent();
-    if (ref && M.resolveTicket(getData(), ref) && !M.sameRef(ref, getData().active)) {
-        setActive(ref);
-        toastr.info(`这个角色卡绑定了画师串「${M.ticketName(getData(), ref)}」，已自动切换`, '智库', { timeOut: 2500 });
+    if (ref && M.resolveTicket(d, ref)) {
+        if (!d.bindingActive) { d.beforeBinding = d.active; d.bindingActive = true; }
+        if (!M.sameRef(ref, d.active)) {
+            setActive(ref);
+            toastr.info(`这个角色卡绑定了画师串「${M.ticketName(d, ref)}」，已自动切换`, '智库', { timeOut: 2500 });
+        } else commit({ silent: true });
+        return;
+    }
+    if (d.bindingActive) {
+        const back = d.beforeBinding && M.resolveTicket(d, d.beforeBinding) ? d.beforeBinding : null;
+        d.bindingActive = false;
+        d.beforeBinding = null;
+        if (!(back ? M.sameRef(back, d.active) : !d.active)) {
+            setActive(back);
+            toastr.info(back ? `离开绑定的角色卡，换回「${M.ticketName(d, back)}」` : '离开绑定的角色卡，已取消画师串', '智库', { timeOut: 2500 });
+        } else commit({ silent: true });
     }
 }
 
@@ -1458,7 +1496,7 @@ async function inpaint({ image, mask, pos, neg, width, height, strength }) {
     return N.inpaint({ image: image.split(',')[1], mask: mask.split(',')[1], prompt: positive, negative, width, height, strength });
 }
 
-return { runtime, stSettings, extras, composeStudio, vibeRefs, charRefs, generate, generateFull, generateSample, setActive, currentCharacterKey, currentCharacterName, bindCurrentCharacter, boundTicketForCurrent, applyBindingOnChatChange, saveImageTo, makeSampleFor, createBatch, insertIntoLastMessage, canOpenVibeEditor, qualityPresets, inpaint };
+return { afterChatImage, runtime, stSettings, extras, composeStudio, vibeRefs, charRefs, generate, generateFull, generateSample, setActive, currentCharacterKey, currentCharacterName, bindCurrentCharacter, boundTicketForCurrent, applyBindingOnChatChange, saveImageTo, makeSampleFor, createBatch, insertIntoLastMessage, canOpenVibeEditor, qualityPresets, inpaint };
 })();
 
 // ───── translate.js ─────
@@ -2327,7 +2365,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
 
 const __mod_marker=createMarkerController({
         context:()=>SillyTavern.getContext(),getData:__mod_store.getData,document:DOC,
-        generate:prompt=>{const d=__mod_store.getData();return __mod_engine.generate({pos:__mod_model.mergeTags(d.active?__mod_model.ticketString(d,d.active):'',prompt),neg:[d.active?__mod_model.ticketNeg(d,d.active):'',d.options.chatNegative||''].filter(Boolean).join(', ')});},
+        generate:async prompt=>{const d=__mod_store.getData();const {positive,negative}=__mod_engine.composeStudio({pos:__mod_model.mergeTags(d.active?__mod_model.ticketString(d,d.active):'',prompt),neg:[d.active?__mod_model.ticketNeg(d,d.active):'',d.options.chatNegative||''].filter(Boolean).join(', ')});const bound=[...new Set(__mod_chars.currentCast().filter(x=>x.on).map(x=>x.char.charRef).filter(id=>id&&d.charRefGroups?.[id]))];const image=await __mod_engine.generateFull({positive,negative,director:bound.length?await __mod_engine.charRefs(bound):undefined});__mod_engine.afterChatImage();return image;},
         upload:__mod_store.uploadImage,notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
     });
 const __mod_ui = (() => {

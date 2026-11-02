@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 export function applyMarkers(source) {
     function presentation(s) {
+        // 标记生图：出场角色绑定的角色参考优先；生成后处理「只用一次 / 每张换一个」
+        s=s.replace("generate:prompt=>{const d=__mod_store.getData();return __mod_engine.generate({pos:__mod_model.mergeTags(d.active?__mod_model.ticketString(d,d.active):'',prompt),neg:[d.active?__mod_model.ticketNeg(d,d.active):'',d.options.chatNegative||''].filter(Boolean).join(', ')});},",()=>"generate:async prompt=>{const d=__mod_store.getData();const {positive,negative}=__mod_engine.composeStudio({pos:__mod_model.mergeTags(d.active?__mod_model.ticketString(d,d.active):'',prompt),neg:[d.active?__mod_model.ticketNeg(d,d.active):'',d.options.chatNegative||''].filter(Boolean).join(', ')});const bound=[...new Set(__mod_chars.currentCast().filter(x=>x.on).map(x=>x.char.charRef).filter(id=>id&&d.charRefGroups?.[id]))];const image=await __mod_engine.generateFull({positive,negative,director:bound.length?await __mod_engine.charRefs(bound):undefined});__mod_engine.afterChatImage();return image;},");
         if(!s.includes('const __naiGate=')){
             const gate=fs.readFileSync(new URL('../src/nai-gate.js',import.meta.url),'utf8').replace(/^export /gm,'');
             s=s.replace('async function generate(opts) {',gate+"\nconst __naiGate=createNaiGate({notice:message=>toastr.info(message,'智库 · 生图排队')});\nfunction generate(opts){return __naiGate.run(()=>generateRequest(opts));}\nasync function generateRequest(opts) {");
@@ -46,7 +48,15 @@ export function applyMarkers(source) {
     function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,90));s=s.replace(a,()=>b);}
     patch('const __mod_ui = (() => {',logic+`\nconst __mod_marker=createMarkerController({
         context:()=>SillyTavern.getContext(),getData:__mod_store.getData,
-        generate:prompt=>{const d=__mod_store.getData();return __mod_engine.generate({pos:__mod_model.mergeTags(d.active?__mod_model.ticketString(d,d.active):'',prompt),neg:[d.active?__mod_model.ticketNeg(d,d.active):'',d.options.chatNegative||''].filter(Boolean).join(', ')});},
+        generate:async prompt=>{
+            const d=__mod_store.getData();
+            const {positive,negative}=__mod_engine.composeStudio({pos:__mod_model.mergeTags(d.active?__mod_model.ticketString(d,d.active):'',prompt),neg:[d.active?__mod_model.ticketNeg(d,d.active):'',d.options.chatNegative||''].filter(Boolean).join(', ')});
+            // 出场角色绑定的角色参考优先；没有就用全局在用的那组
+            const bound=[...new Set(__mod_chars.currentCast().filter(x=>x.on).map(x=>x.char.charRef).filter(id=>id&&d.charRefGroups?.[id]))];
+            const image=await __mod_engine.generateFull({positive,negative,director:bound.length?await __mod_engine.charRefs(bound):undefined});
+            __mod_engine.afterChatImage();
+            return image;
+        },
         upload:__mod_store.uploadImage,notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
     });\nconst __mod_ui = (() => {`);
     const start=s.indexOf("    const chat = setFold('chat', '聊天里生图'");
