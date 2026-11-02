@@ -8,7 +8,7 @@ function setTimeout(fn, delay, ...args) {
     timers.add(id); return id;
 }
 function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
-// 智库 · 原生扩展版 v0.8.6（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.7（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -25,7 +25,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.6';
+globalThis.__PC_VERSION = '0.8.7';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -1195,13 +1195,24 @@ const joinTags = arr => arr.map(x => stripNotes(x).trim().replace(/^,+|,+$/g, ''
  * 正面 = 正面提示词 + 质量词
  * 负面 = 负面预设 + 负面提示词
  */
-function composeStudio({ pos = '', neg = '' }, s = N.settings()) {
+/** 去掉 text 里已经在前面出现过的词（不看权重），质量词、固定提示词不会和正面重复 */
+function dropRepeats(text, ...before) {
+    const seen = new Set(M.tokenize(before.filter(Boolean).join(', ')).map(t => t.text.toLowerCase()));
+    return M.tokenize(text).filter(t => { const k = t.text.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; })
+        .map(t => t.raw || (Math.abs(t.weight - 1) < 0.001 ? t.text : `${M.fmtWeight(t.weight)}::${t.text}::`)).join(', ');
+}
+/**
+ * 正面 = 正面提示词 + 固定提示词 + 质量词（后两个去掉和前面重复的）
+ * 负面 = 负面预设 + 负面提示词
+ */
+function composeStudio({ pos = '', neg = '', scene = '' }, s = N.settings()) {
     const { aqt, ucp } = extras(s);
     const fur = String(s.addFurryDataset) === 'true' ? 'fur dataset' : '';
     let negative = joinTags([ucp, neg]);
     const tags = negative.split(',').map(t => t.trim()).filter(Boolean);
     if (tags.some(t => t.toLowerCase() === 'nsfw')) negative = ['nsfw', ...tags.filter(t => t.toLowerCase() !== 'nsfw')].join(', ');
-    return { positive: joinTags([fur, pos, aqt]), negative, aqt, ucp };
+    const sc = dropRepeats(scene, pos);
+    return { positive: joinTags([fur, pos, sc, dropRepeats(aqt, pos, sc)]), negative, aqt, ucp };
 }
 
 /** 当前氛围组 → 请求里的参考数据；没开或不支持就返回 null */
@@ -1232,10 +1243,10 @@ async function vibeRefs() {
 }
 
 /** 当前角色参考组 → 请求里的数据 */
-/** groupIds 不填就用角色参考页选中的那组 */
+/** groupIds：角色页里给出场角色绑定的组；不给就不用角色参考 */
 async function charRefs(groupIds) {
     const d = getData();
-    const groups = (groupIds || [d.charRefActive]).map(id => d.charRefGroups?.[id]).filter(g => g?.refs?.length);
+    const groups = (groupIds || []).map(id => d.charRefGroups?.[id]).filter(g => g?.refs?.length);
     if (!groups.length || !N.charRefSupported()) return null;
     const out = [];
     for (const r of groups.flatMap(g => g.refs)) {
@@ -1625,9 +1636,15 @@ ${PAIRS}
 
 /** 用户自己写的一句（中文也行）→ 一个或几个标签 */
 async function textToPairs(text) {
-    if (!hasChinese(text)) return text.split(/[,，]/).map(t => t.trim()).filter(Boolean).map(en => ({ en, zh: '' }));
-    const j = pickJson(await askLLM(`把用户写的外貌或衣服描述翻成 NovelAI 标签。${PAIRS}只输出 JSON：{"tags": [...]}`, text, { maxTokens: 300 }));
-    return (j.tags || []).map(x => ({ en: String(x.en || '').trim(), zh: String(x.zh || '').trim() })).filter(x => x.en && !hasChinese(x.en));
+    // 整套粘贴：逗号、顿号、分号、换行都算分隔；英文的直接用，只有带中文的那几项才问 AI
+    const parts = String(text || '').split(/[,，、;；\r\n]+/).map(t => t.trim().replace(/^(?:[-*•·]\s*|\d+[.)）]\s+)/, '').trim()).filter(Boolean);
+    const out = parts.map(p => hasChinese(p) ? null : { en: p, zh: '' });
+    const zh = parts.filter(hasChinese);
+    if (!zh.length) return out;
+    const j = pickJson(await askLLM(`把用户写的外貌或衣服描述翻成 NovelAI 标签，每一行都要翻。${PAIRS}只输出 JSON：{"tags": [...]}`, zh.join('\n'), { maxTokens: Math.min(2400, 300 + zh.length * 80) }));
+    const got = (j.tags || []).map(x => ({ en: String(x.en || '').trim(), zh: String(x.zh || '').trim() })).filter(x => x.en && !hasChinese(x.en));
+    const at = out.indexOf(null);
+    return [...out.slice(0, at).filter(Boolean), ...got, ...out.slice(at).filter(Boolean)];
 }
 
 /**
@@ -1995,9 +2012,9 @@ async function generateForMessage(mesId, { onStep } = {}) {
     rest.forEach((ch, i) => picks.push({ char: ch, tags: '', x: (i + 1) / (rest.length + 1), y: 0.5 }));
     const prompt = buildChatPrompt(sc.scene, picks);
     onStep?.('NovelAI 正在画…');
-    // 角色绑了角色参考组的，用这些角色的；都没绑就用角色参考页选中的
+    // 只用出场角色在角色页里绑的角色参考
     const bound = [...new Set(picks.map(p => p.char.charRef).filter(id => id && getData().charRefGroups?.[id]))];
-    const director = await E.charRefs(bound.length ? bound : undefined);
+    const director = bound.length ? await E.charRefs(bound) : null;
     const image = await E.generateFull({ ...prompt, director });
     await insertImage(mesId, image);
     return image;
@@ -2390,7 +2407,8 @@ const ui = {
     bookTab: 'groups',       // groups | artists
     bookFilter: 'all',       // all | fav | <collectionId>
     search: '',
-    studio: { loaded: false, pos: '', neg: '', lastExtra: '', prompt: '', promptEn: '', transErr: '', expand: true, busy: false, result: null, sent: null, open: {} },
+    strOpen: {},
+    studio: { loaded: false, pos: '', neg: '', lastExtra: '', prompt: '', promptEn: '', transErr: '', expand: true, scene: '', sceneOn: true, sceneEn: '', sceneSrc: '', sceneExpand: false, sceneBusy: false, busy: false, result: null, sent: null, open: {} },
     naiTest: null,
     setOpen: {},
     castTab: 'char', castSearch: '', castTop: 'chars', wardFilter: 'all', wardSearch: '', outfit: null, charKey: '', charBusy: '', addText: { app: '', out: '' },
@@ -2435,7 +2453,9 @@ function openWindow(view) {
         root.addEventListener('change', onChangeEv);
         root.addEventListener('pointerdown', onPointerDown);
         root.addEventListener('keydown', ev => {
-            const m = ev.key === 'Enter' && ev.target.dataset?.enter?.match(/^addpair-(\w+)$/);
+            // 电脑：回车加、Shift+回车换行；手机（触屏）：回车就是换行，点「加」才加
+            const touch = P.matchMedia?.('(pointer: coarse)').matches;
+            const m = ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing && !touch && ev.target.dataset?.enter?.match(/^addpair-(\w+)$/);
             if (m) { ev.preventDefault(); charAction('addpair', { dataset: { where: m[1] } }); }
         });
         for (const t of ['pointerup', 'pointercancel', 'pointermove', 'scroll']) root.addEventListener(t, cancelLongPress, true);
@@ -2526,11 +2546,17 @@ function loadStudio() {
     st.neg = saved.neg ?? '';
     st.lastExtra = saved.lastExtra || '';
     st.lastNeg = saved.lastNeg || '';
+    st.scene = saved.scene || '';
+    st.sceneOn = saved.sceneOn !== false;
+    st.sceneEn = saved.sceneEn || '';
+    st.sceneSrc = saved.sceneSrc || '';
+    st.sceneExpand = !!saved.sceneExpand;
     st.loaded = true;
 }
 function saveStudio() {
     const d = getData();
-    d.studio = { pos: ui.studio.pos, neg: ui.studio.neg, lastExtra: ui.studio.lastExtra, lastNeg: ui.studio.lastNeg || '' };
+    const st = ui.studio;
+    d.studio = { pos: st.pos, neg: st.neg, lastExtra: st.lastExtra, lastNeg: st.lastNeg || '', scene: st.scene || '', sceneOn: st.sceneOn !== false, sceneEn: st.sceneEn || '', sceneSrc: st.sceneSrc || '', sceneExpand: !!st.sceneExpand };
     commit({ silent: true });
 }
 function applyArtistToStudio(ref) {
@@ -2546,10 +2572,30 @@ function applyArtistToStudio(ref) {
     st.lastNeg = neg;
     saveStudio();
 }
-function studioParts() { return { pos: ui.studio.pos, neg: ui.studio.neg }; }
+/** 固定提示词：有中文的先让 AI 转成标签，转过一次就记住，中文改了才重新转 */
+function sceneZh() { return T.hasChinese(ui.studio.scene || ''); }
+function sceneReady() { const st = ui.studio; return !sceneZh() || !!(String(st.sceneEn || '').trim() && st.sceneSrc === String(st.scene || '').trim()); }
+function sceneStateText() { return sceneReady() ? '有中文，实际发的是下面 AI 转好的英文标签。' : ui.studio.sceneEn ? '中文改过了：生成时会先用 AI 重新转成标签。' : '有中文，NovelAI 看不懂：生成时会先用 AI 转成标签，转一次就记住。'; }
+function sceneTags() {
+    const st = ui.studio;
+    if (st.sceneOn === false || !String(st.scene || '').trim()) return '';
+    if (!sceneZh()) return st.scene;
+    return sceneReady() ? st.sceneEn : '';
+}
+async function translateScene() {
+    const st = ui.studio;
+    st.sceneBusy = true; render();
+    try {
+        st.sceneEn = await T.translateToTags(st.scene, { expand: !!st.sceneExpand });
+        st.sceneSrc = String(st.scene || '').trim();
+        saveStudio();
+    } finally { st.sceneBusy = false; }
+}
+function studioParts() { return { pos: ui.studio.pos, neg: ui.studio.neg, scene: sceneTags() }; }
 function previewHtml(s) {
     const c = E.composeStudio(studioParts(), s);
-    return { pos: esc(c.positive), neg: esc(c.negative), aqt: c.aqt, ucp: c.ucp };
+    const wait = ui.studio.sceneOn !== false && String(ui.studio.scene || '').trim() && !sceneReady();
+    return { pos: esc(c.positive) + (wait ? '<br><i class="pc-dim">＋ 固定提示词（有中文，生成时先转成标签，放在质量词前面）</i>' : ''), neg: esc(c.negative), aqt: c.aqt, ucp: c.ucp };
 }
 
 function ucpOptions(s) {
@@ -2654,22 +2700,24 @@ function viewStudio(d) {
         <div class="pc-label">负面</div><p class="pc-quote small mono">${esc(st.sent.negative)}</p></details>` : ''}
     </section>` : ''}
 
-    ${fold('ai', '用中文写，让 AI 转成标签', '写好后插进正面', `
-      <div class="pc-row-between"><span class="pc-dim small">用哪个 AI</span></div>${apiChips(true)}
-      <textarea id="pc-prompt" class="pc-textarea small" data-bind="studio.prompt" placeholder="比如：男的，坐在窗边喝咖啡，外面下雨">${esc(st.prompt)}</textarea>
-      <label class="pc-switch"><input type="checkbox" data-bind-check="studio.expand" ${st.expand ? 'checked' : ''}><span></span>让 AI 补全细节<small>外貌、衣服、动作、场景、光线、构图都写全。关掉就只翻译你写的。</small></label>
-      <button class="pc-btn" data-act="translatenow">转成标签</button>
-      ${st.transErr ? `<div class="pc-warn">${esc(st.transErr)}</div>` : ''}
-      ${st.promptEn ? `<label class="pc-label">AI 写的（可以先改）</label>
-      <textarea class="pc-textarea small mono" data-bind="studio.promptEn">${esc(st.promptEn)}</textarea>
-      <div class="pc-actions wrap"><button class="pc-btn dark" data-act="insertai">插进正面</button><button class="pc-btn" data-act="replaceai">替换正面（保留画师）</button></div>` : ''}`)}
+    ${fold('scene', '固定提示词', st.sceneOn === false ? '不发送' : !String(st.scene || '').trim() ? '跟着发送 · 还没写' : !sceneReady() ? '跟着发送 · 生成时转成标签' : `跟着发送 · ${M.tokenize(sceneTags()).length} 个词`, `
+      <label class="pc-switch"><input type="checkbox" data-scene-on ${st.sceneOn !== false ? 'checked' : ''}><span></span>每次生成都带上<small>接在正面提示词后面、质量词前面一起发。不改你的正面提示词，也不进画师串。</small></label>
+      <textarea id="pc-scene" class="pc-textarea small" data-bind="studio.scene" placeholder="中文英文都行。比如：坐在窗边喝咖啡，外面下雨 / 1boy, sitting, window, rain">${esc(st.scene || '')}</textarea>
+      <div id="pc-scene-ai" ${sceneZh() ? '' : 'hidden'}>
+        <div class="pc-dim small pc-mt-s" id="pc-scene-state">${sceneStateText()}</div>
+        <div class="pc-row-between pc-mt-s"><span class="pc-dim small">用哪个 AI 转</span></div>${apiChips(true)}
+        <label class="pc-switch"><input type="checkbox" data-bind-check="studio.sceneExpand" ${st.sceneExpand ? 'checked' : ''}><span></span>让 AI 补全细节<small>外貌、衣服、动作、场景、光线、构图都写全。关掉就只翻译你写的。</small></label>
+        <button class="pc-btn" data-act="scenetrans" ${st.sceneBusy ? 'disabled' : ''}>${st.sceneBusy ? '<span class="pc-busy">转换中</span>' : sceneReady() ? '重新转换' : '现在转换'}</button>
+        ${st.sceneEn ? `<label class="pc-label">AI 转好的（实际发这段，可以直接改）</label>
+        <textarea class="pc-textarea small mono" data-bind="studio.sceneEn">${esc(st.sceneEn)}</textarea>` : ''}
+      </div>`)}
     ${fold('extra', '自动加的词', `质量词 ${pv.aqt ? '开' : '关'} · 负面预设 ${(ucpOptions(s).find(o => o[0] === ucpVal) || [0, '自定义'])[1].replace(/（.*）/, '')}`, `
       <label class="pc-switch"><input type="checkbox" data-aqt ${String(s.AQT_novelai ?? '') !== '' ? 'checked' : ''}><span></span>质量词（加在正面最后）<small>${pv.aqt ? esc(pv.aqt) : '现在不加'}</small></label>
       <label class="pc-field"><span>负面预设（加在负面最前面）</span>
         <select data-st="UCP_novelai">${ucpOptions(s).map(([v, t]) => `<option value="${esc(v)}" ${v === ucpVal ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
       ${pv.ucp ? `<p class="pc-quote small mono">${esc(pv.ucp)}</p>` : ''}`)}
     ${fold('params', '更多参数', `步数 ${s.novelai_steps} · 种子 ${Number(s.novelai_seed) > 0 ? s.novelai_seed : '随机'} · ${w}×${h}`, paramFields(s, { withSize: true }))}
-    ${fold('preview', '将会发送的内容', '正面 + 质量词，负面预设 + 负面', `
+    ${fold('preview', '将会发送的内容', '正面 + 固定提示词 + 质量词，负面预设 + 负面', `
       <div class="pc-label" style="margin-top:0">正面</div><p class="pc-quote small mono" id="pc-pv-pos">${pv.pos || '（空）'}</p>
       <div class="pc-label">负面</div><p class="pc-quote small mono" id="pc-pv-neg">${pv.neg || '（空）'}</p>`)}`;
 }
@@ -2786,7 +2834,7 @@ function listCard(d, ref) {
     const imgs = (it.images || []).slice(0, 6);
     return `<article class="pc-li ${isActive ? 'active' : ''}">
       <div class="pc-row-between">${ui.selecting ? `<button class="pc-selbox static ${ui.picked.has(ref.id) ? 'on' : ''}" data-act="selpick" ${refAttr(ref)}>${ui.picked.has(ref.id) ? '✓' : ''}</button>` : ''}<button class="pc-li-name pc-grow" data-act="open" ${refAttr(ref)}>${esc(M.ticketName(d, ref))} ›</button>${ui.selecting ? '' : useBtn(d, ref)}</div>
-      <div class="pc-li-str mono">${markStr(d, M.ticketString(d, ref))}</div>
+      ${(() => { const full = M.ticketString(d, ref); const key = ref.type + ':' + ref.id; const long = full.length > 110; const open = !!ui.strOpen[key]; return `<div class="pc-li-str mono ${long && !open ? 'clamp' : ''}">${markStr(d, full)}</div>${long ? `<button class="pc-strtoggle" data-act="strtoggle" data-key="${esc(key)}">${open ? '收起' : `展开全部 · ${M.tokenize(full).length} 个词`}</button>` : ''}`; })()}
       ${imgs.length ? `<div class="pc-li-imgs">${imgs.map(i => `<img src="${esc(imgUrl(i))}" loading="lazy" alt="" data-act="viewimg" data-src="${esc(imgUrl(i))}">`).join('')}</div>` : ''}
       <div class="pc-chips wrap">${tagChips(d, ref, { small: true })}</div>
       <textarea class="pc-textarea tiny" ${ref.type === 'group' ? `data-bind-group="${it.id}" data-field="note"` : `data-bind-artist="${it.id}"`} placeholder="写点备注…">${esc(it.note)}</textarea>
@@ -3240,9 +3288,8 @@ function viewOutfit(d) {
       ${u.busy === 'read' ? '<em class="pc-outhero-busy"><span class="pc-busy">AI 正在看图</span></em>' : ''}
       <label class="pc-outhero-btn">换一张<input type="file" accept="image/*" data-outimg hidden></label></div>
     <section class="pc-card pc-pad pc-mt">
-      <div class="pc-row-between"><b>${o.tags.length ? `${o.tags.length} 件` : '还没有标签'}</b><span class="pc-dim small">点标签改，× 删</span></div>
-      <div class="pc-pairs">${pairChips(o.tags, 'ward')}</div>
-      <div class="pc-addrow"><input data-bind="addText.ward" value="${esc(ui.addText.ward || '')}" placeholder="加一件，中文也行" data-enter="addpair-ward"><button class="pc-btn dark" data-act="addpair" data-where="ward">${u.busy === 'add' ? '…' : '加'}</button></div>
+      <div class="pc-row-between"><b>${o.tags.length ? `${o.tags.length} 件` : '还没有标签'}</b>${o.tags.length ? `<button class="pc-pill dashed tiny" data-act="copytext" data-text="${esc(C.tagText(o.tags))}">复制整套</button>` : ''}</div>
+      ${outfitSections(o.tags, 'ward', { busy: u.busy === 'add', busyKey: u.addKey })}
     </section>
     <section class="pc-card pc-pad pc-mt">
       <b>${owner ? `穿在：${esc(owner.name)}` : u.draft ? '存到哪里' : '给谁穿'}</b>
@@ -3301,6 +3348,43 @@ function viewCast(d) {
     <div style="height:24px"></div>`;
 }
 
+/** 配饰：眼镜、首饰、帽子、发饰这类。没手动分过的按词猜 */
+const ACC_RE = /(glasses|eyewear|monocle|goggles|earring|piercing|necklace|pendant|choker|bracelet|wristband|wristwatch|\bwatch\b|\brings?\b|anklet|brooch|jewelry|\bhat\b|\bcap\b|beret|beanie|crown|tiara|veil|hairclip|hairpin|hair ornament|hair ribbon|hair bow|hairband|headband|scrunchie|\bbow\b|ribbon|scarf|gloves?|mittens|\bbag\b|handbag|backpack|\bbelt\b|bandana|\bmask\b|eyepatch|flower|corsage|tie clip|cufflinks|眼镜|耳钉|耳环|耳饰|项链|吊坠|颈圈|手链|手环|手表|戒指|脚链|胸针|首饰|帽|皇冠|头纱|发夹|发卡|发饰|发带|头箍|蝴蝶结|丝带|围巾|手套|包|腰带|面具|眼罩)/i;
+const isAcc = p => p.acc ?? ACC_RE.test(`${p.en} ${p.zh || ''}`);
+/** 一套衣服：整体和配饰分开显示，下标仍是原列表里的 */
+function outfitSections(list, where, { busy = false, busyKey = '', disabled = '' } = {}) {
+    const chips = acc => list.map((t, i) => [t, i]).filter(([t]) => isAcc(t) === acc).map(([t, i]) => `<span class="pc-pair"><button data-act="editpair" data-where="${where}" data-i="${i}"><span class="mono">${esc(t.en)}</span>${t.zh ? `<em>${esc(t.zh)}</em>` : ''}</button><button class="pc-pair-x" data-act="movepair" data-where="${where}" data-i="${i}" aria-label="${acc ? '移到整体' : '移到配饰'}" title="${acc ? '移到整体' : '移到配饰'}">${acc ? '↑' : '↓'}</button><button class="pc-pair-x" data-act="delpair" data-where="${where}" data-i="${i}" aria-label="删掉">×</button></span>`).join('');
+    const row = (acc, ph) => { const k = where + (acc ? 'acc' : ''); return `<div class="pc-addrow"><textarea rows="1" data-bind="addText.${k}" placeholder="${ph}" data-enter="addpair-${k}">${esc(ui.addText[k] || '')}</textarea><button class="pc-btn dark" data-act="addpair" data-where="${k}" ${disabled}>${busy && busyKey === k ? '…' : '加'}</button></div>`; };
+    const n = list.filter(t => !isAcc(t)).length, m = list.length - n;
+    return `<div class="pc-outsec"><div class="pc-outsec-h"><b>整体</b><small>${n ? n + ' 件' : '上衣、裤裙、鞋袜、外套'}</small></div>
+        <div class="pc-pairs">${chips(false) || '<span class="pc-dim small">还没有</span>'}</div>
+        ${row(false, '加一件，或整套粘贴进来，配饰会自动分到下面')}</div>
+      <div class="pc-outsec"><div class="pc-outsec-h"><b>配饰</b><small>${m ? m + ' 件' : '眼镜、首饰、帽子、发饰、包'}</small></div>
+        <div class="pc-pairs">${chips(true) || '<span class="pc-dim small">还没有</span>'}</div>
+        ${row(true, '加配饰，比如：黑框眼镜、银耳钉')}</div>
+      <div class="pc-dim small">点标签改，↓↑ 换到另一栏，× 删掉</div>`;
+}
+/** 往一套里加：配饰栏加的都算配饰；整体栏加的按词猜，猜成配饰的会自动分过去 */
+function addToOutfit(list, pairs, toAcc) {
+    for (const p of pairs) {
+        if (toAcc) p.acc = true;
+        const old = list.find(x => x.en.toLowerCase() === p.en.toLowerCase());
+        if (old) { if (toAcc) old.acc = true; } else list.push(p);
+    }
+}
+function newOutfitBox(defName) {
+    return new Promise(resolve => {
+        const box = modal(`<h3 class="pc-h3">自己写一套</h3>
+          <label class="pc-field"><span>整套衣服（整套粘贴也行，逗号、换行隔开，中文也行）</span><textarea class="pc-textarea" data-v placeholder="white shirt, navy blazer, red necktie, black pants, loafers, 黑框眼镜"></textarea></label>
+          <label class="pc-field"><span>名字（可以不填）</span><input class="pc-input" data-n placeholder="${esc(defName)}"></label>
+          <div class="pc-dim small">配饰会自动分出来，建好后还能改。</div>
+          <div class="pc-actions"><button class="pc-btn" data-m="no">算了</button><button class="pc-btn dark" data-m="ok">建好</button></div>`);
+        const done = v => { box.closeModal(); resolve(v); };
+        box.addEventListener('click', ev => { const m = ev.target.closest('[data-m]')?.dataset.m; if (m === 'ok') done({ text: box.querySelector('[data-v]').value.trim(), name: box.querySelector('[data-n]').value.trim() || defName }); if (m === 'no') done(null); });
+        box.parentElement.addEventListener('click', ev => { if (ev.target === box.parentElement) resolve(null); });
+    });
+}
+
 function pairChips(list, where) {
     return list.map((t, i) => `<span class="pc-pair"><button data-act="editpair" data-where="${where}" data-i="${i}"><span class="mono">${esc(t.en)}</span>${t.zh ? `<em>${esc(t.zh)}</em>` : ''}</button><button class="pc-pair-x" data-act="delpair" data-where="${where}" data-i="${i}" aria-label="删掉">×</button></span>`).join('');
 }
@@ -3323,7 +3407,7 @@ function viewCharEdit(d) {
       <div class="pc-row-between"><b>固定外貌</b><span class="pc-chips" style="margin:0">${c.kind !== 'side' && c.kind !== 'free' ? `<button class="pc-pill dashed tiny" data-act="readcard" ${busy ? 'disabled' : ''}>${busy === 'read' ? '读取中…' : c.kind === 'user' ? '从人设读' : '从角色卡读'}</button>` : ''}<label class="pc-pill dashed tiny">${busy === 'look' ? '<span class="pc-busy">看图中</span>' : '从图片读'}<input type="file" accept="image/*" data-lookimg hidden></label></span></div>
       <div class="pc-dim small">头发、眼睛、脸、身材这类不会变的。第一个写 1boy 或 1girl。点标签可以改，× 删掉。</div>
       <div class="pc-pairs">${pairChips(c.appearance, 'app') || '<span class="pc-dim small">还没有</span>'}</div>
-      <div class="pc-addrow"><input data-bind="addText.app" value="${esc(ui.addText.app)}" placeholder="自己加，中文也行，比如：左耳有耳钉" data-enter="addpair-app"><button class="pc-btn dark" data-act="addpair" data-where="app" ${busy ? 'disabled' : ''}>${busy === 'app' ? '…' : '加'}</button></div>
+      <div class="pc-addrow"><textarea rows="1" data-bind="addText.app" placeholder="自己加，中文也行，可以一次粘贴好几个" data-enter="addpair-app">${esc(ui.addText.app)}</textarea><button class="pc-btn dark" data-act="addpair" data-where="app" ${busy ? 'disabled' : ''}>${busy === 'app' ? '…' : '加'}</button></div>
     </section>
 
     <section class="pc-card pc-pad pc-mt">
@@ -3338,9 +3422,8 @@ function viewCharEdit(d) {
         ${c.kind !== 'user' ? `<button class="pc-btn" data-act="storyout" ${busy ? 'disabled' : ''}>${busy === 'storyout' ? '<span class="pc-busy">读剧情中</span>' : '从剧情里读现在穿的'}</button>` : ''}
       </div>
       ${out ? `<div class="pc-outbox">
-        <div class="pc-row-between"><b>${esc(out.name)}</b><span class="pc-chips" style="margin:0"><button class="pc-pill dashed tiny" data-act="renameout">改名</button><button class="pc-pill dashed tiny" data-act="shareout">分享</button><button class="pc-pill dashed tiny danger" data-act="delout">删掉</button></span></div>
-        <div class="pc-pairs">${pairChips(out.tags, 'out') || '<span class="pc-dim small">这套还是空的</span>'}</div>
-        <div class="pc-addrow"><input data-bind="addText.out" value="${esc(ui.addText.out)}" placeholder="加一件，比如：黑框眼镜" data-enter="addpair-out"><button class="pc-btn dark" data-act="addpair" data-where="out" ${busy ? 'disabled' : ''}>${busy === 'out' ? '…' : '加'}</button></div>
+        <div class="pc-row-between"><b>${esc(out.name)}</b><span class="pc-chips" style="margin:0">${out.tags.length ? `<button class="pc-pill dashed tiny" data-act="copytext" data-text="${esc(C.tagText(out.tags))}">复制整套</button>` : ''}<button class="pc-pill dashed tiny" data-act="renameout">改名</button><button class="pc-pill dashed tiny" data-act="shareout">分享</button><button class="pc-pill dashed tiny danger" data-act="delout">删掉</button></span></div>
+        ${outfitSections(out.tags, 'out', { busy: !!busy, busyKey: busy, disabled: busy ? 'disabled' : '' })}
         <button class="pc-btn pc-mt-s" data-act="outtest" ${busy ? 'disabled' : ''}>${busy === 'outtest' ? '<span class="pc-busy">生成中</span>' : '穿这套生成一张看看'}</button>
         ${ui.outTestImg ? `<img class="pc-outimg" src="${esc(ui.outTestImg)}" alt="" data-act="viewimg" data-src="${esc(ui.outTestImg)}">` : ''}
       </div>` : ''}
@@ -3348,10 +3431,19 @@ function viewCharEdit(d) {
 
     <section class="pc-card pc-pad pc-mt">
       <b>长相参考</b>
-      <div class="pc-dim small">绑一组角色参考图，聊天生图带上${esc(c.name)}时，就照着这组图画出同一个人。只有 NAI 4.5 能用。</div>
-      <div class="pc-chips wrap"><button class="pc-pill ${!c.charRef ? 'on' : 'dashed'}" data-act="charrefpick" data-id="">不用</button>${Object.values(d.charRefGroups || {}).map(g => `<button class="pc-pill ${c.charRef === g.id ? 'on' : 'dashed'}" data-act="charrefpick" data-id="${g.id}">${esc(g.name)}</button>`).join('')}
-        <label class="pc-pill dashed">＋ 上传一张<input type="file" accept="image/*" data-charrefup hidden></label></div>
-      ${c.charRef && d.charRefGroups?.[c.charRef] ? `<div class="pc-li-imgs">${d.charRefGroups[c.charRef].refs.map(r => `<img src="${esc('/' + r.path)}" alt="">`).join('')}</div>` : ''}
+      <div class="pc-dim small">绑一组角色参考图，聊天生图带上${esc(c.name)}时，就照着这组图画出同一个人。只有 NAI 4.5 能用；用上时那张图不加氛围（NovelAI 不能两个一起用）。</div>
+      ${!N.charRefSupported() ? '<div class="pc-warn pc-mt-s">现在用不了：要选 NAI 4.5 模型，而且不能是「用酒馆里的 key」。</div>' : ''}
+      ${(() => {
+        const g = c.charRef && d.charRefGroups?.[c.charRef];
+        const TYPES = [['character', '只参考长相'], ['both', '长相和画风'], ['style', '只参考画风']];
+        return `<div class="pc-chips wrap"><button class="pc-pill ${!g ? 'on' : 'dashed'}" data-act="charrefpick" data-id="">不用</button>${Object.values(d.charRefGroups || {}).map(x => `<button class="pc-pill ${g && g.id === x.id ? 'on' : 'dashed'}" data-act="charrefpick" data-id="${x.id}" data-lp="crgroup">${esc(x.name)}</button>`).join('')}
+        <label class="pc-pill dashed">＋ 新的一组<input type="file" accept="image/*" data-charrefup hidden></label></div>
+        ${g ? `<div class="pc-row-between pc-mt-s"><span class="pc-dim small">「${esc(g.name)}」· ${g.refs.length} 张</span><label class="pc-pill dashed tiny">＋ 加图<input type="file" accept="image/*" multiple data-cradd="${g.id}" hidden></label></div>
+        ${g.refs.map((r, i) => `<div class="pc-vrow"><div class="pc-vthumb"><img src="${esc('/' + r.path)}" alt=""></div>
+          <div class="pc-grow"><div class="pc-row-between"><select class="pc-mini-select" data-crtype="${g.id}:${i}">${TYPES.map(([v, t]) => `<option value="${v}" ${v === (r.type || 'character') ? 'selected' : ''}>${t}</option>`).join('')}</select><button class="pc-x" data-act="crdel" data-g="${g.id}" data-i="${i}" aria-label="删掉">×</button></div>
+          <label class="pc-slider"><span>像不像</span><input type="range" min="0" max="1" step="0.01" value="${Number(r.strength ?? 0.6)}" data-crstr="${g.id}:${i}"><b>${Number(r.strength ?? 0.6).toFixed(2)}</b></label></div></div>`).join('') || '<div class="pc-dim small pc-mt-s">这组还没有图，点「＋ 加图」。最好是单人、看得清脸和衣服。</div>'}
+        <div class="pc-hint">「像不像」越大越像参考图，太大会不听提示词，一般 0.5 到 0.8。长按组名可以改名或删除。</div>` : ''}`;
+      })()}
     </section>
 
     ${castRow ? `<section class="pc-card pc-pad pc-mt"><div class="pc-row-between"><b>这次聊天</b>${sw2(castRow.on, `data-cast="${esc(c.key)}"`)}</div><div class="pc-dim small">开着 = 聊天里生图时带上${esc(c.name)}</div></section>` : ''}
@@ -3450,10 +3542,11 @@ async function charAction(act, el) {
         }
     }
     const wardList = () => curOutfit()?.tags;
-    if (['addpair', 'editpair', 'delpair'].includes(act) && el.dataset.where === 'ward') {
+    if (['addpair', 'editpair', 'delpair', 'movepair'].includes(act) && ['ward', 'wardacc'].includes(el.dataset.where)) {
         const list = wardList();
         if (!list) return true;
         if (act === 'delpair') { list.splice(Number(el.dataset.i), 1); saveOutfit(); return true; }
+        if (act === 'movepair') { const t = list[Number(el.dataset.i)]; if (t) t.acc = !isAcc(t); saveOutfit(); return true; }
         if (act === 'editpair') {
             const t = list[Number(el.dataset.i)];
             const en = await promptText(`改这个标签${t.zh ? `（${t.zh}）` : ''}`, t.en);
@@ -3464,10 +3557,11 @@ async function charAction(act, el) {
             saveOutfit();
             return true;
         }
-        const text = (ui.addText.ward || '').trim();
+        const key = el.dataset.where;
+        const text = (ui.addText[key] || '').trim();
         if (!text) return true;
-        ui.outfit.busy = 'add'; render();
-        try { for (const p of await T.textToPairs(text)) if (!list.some(x => x.en === p.en)) list.push(p); ui.addText.ward = ''; }
+        ui.outfit.busy = 'add'; ui.outfit.addKey = key; render();
+        try { addToOutfit(list, await T.textToPairs(text), key === 'wardacc'); ui.addText[key] = ''; }
         catch (e) { toastr.error(e.message, '加不进去'); }
         ui.outfit.busy = ''; saveOutfit();
         return true;
@@ -3491,13 +3585,13 @@ async function charAction(act, el) {
         }
         case 'addpair': {
             const where = el.dataset.where;
-            const text = ui.addText[where].trim();
+            const text = (ui.addText[where] || '').trim();
             if (!text) return true;
             ui.charBusy = where; render();
             try {
                 const pairs = await T.textToPairs(text);
-                const list = where === 'app' ? c.appearance : C.currentOutfit(c)?.tags;
-                if (list) for (const p of pairs) if (!list.some(x => x.en === p.en)) list.push(p);
+                if (where === 'app') { for (const p of pairs) if (!c.appearance.some(x => x.en === p.en)) c.appearance.push(p); }
+                else { const list = C.currentOutfit(c)?.tags; if (list) addToOutfit(list, pairs, where === 'outacc'); }
                 ui.addText[where] = '';
             } catch (e) { toastr.error(e.message, '加不进去'); }
             ui.charBusy = ''; save();
@@ -3521,6 +3615,7 @@ async function charAction(act, el) {
             save();
             return true;
         }
+        case 'movepair': { const t = C.currentOutfit(c)?.tags[Number(el.dataset.i)]; if (t) t.acc = !isAcc(t); save(); return true; }
         case 'outmode': c.outfitMode = el.dataset.v; save(); return true;
         case 'charrefpick': c.charRef = el.dataset.id; save(); return true;
         case 'pickout': c.outfitId = el.dataset.id; ui.outTestImg = ''; save(); return true;
@@ -3565,10 +3660,20 @@ async function charAction(act, el) {
             return true;
         }
         case 'newout': {
-            const name = await promptText('这套衣服叫什么？', '');
-            if (!name) return true;
-            const o = { id: M.uid('o_'), name: name.slice(0, 20), tags: [] };
-            c.outfits.push(o); c.outfitId = o.id; save();
+            // 一步建好：整套粘进去，名字可以不填（默认「第 N 套」）
+            let n = c.outfits.length + 1;
+            while (c.outfits.some(o => o.name === `第 ${n} 套`)) n++;
+            const r = await newOutfitBox(`第 ${n} 套`);
+            if (!r) return true;
+            const o = { id: M.uid('o_'), name: r.name.slice(0, 20), tags: [] };
+            c.outfits.push(o); c.outfitId = o.id; ui.outTestImg = '';
+            if (r.text) {
+                ui.charBusy = 'out'; save();
+                try { addToOutfit(o.tags, await T.textToPairs(r.text), false); }
+                catch (e) { ui.addText.out = r.text; toastr.error(e.message + '（写的内容留在输入框里了）', '加不进去'); }
+                ui.charBusy = '';
+            }
+            save();
             return true;
         }
         case 'renameout': { const o = C.currentOutfit(c); const n = o && await promptText('新名字', o.name); if (n) { o.name = n.slice(0, 20); save(); } return true; }
@@ -3663,7 +3768,7 @@ function viewBatch(d) {
 
 const vibeThumbCache = new Map();
 function vibeTabs() {
-    return `<div class="pc-seg"><button class="${ui.vibeTab !== 'char' ? 'on' : ''}" data-act="vibetab" data-v="vibe">氛围</button><button class="${ui.vibeTab === 'char' ? 'on' : ''}" data-act="vibetab" data-v="char">角色参考</button></div>`;
+    return '';
 }
 
 function viewCharRef(d) {
@@ -3701,7 +3806,7 @@ function viewCharRef(d) {
 }
 
 function viewVibe(d) {
-    if (ui.vibeTab === 'char') return viewCharRef(d);
+
     const groups = Object.values(d.vibeGroups || {});
     const cur = d.vibeGroups?.[d.vibeActive];
     const show = d.vibeGroups?.[ui.vibeShow] || cur || groups[0];
@@ -3710,10 +3815,9 @@ function viewVibe(d) {
         ${mosaic(g)}<button class="pc-use ${g.id === d.vibeActive ? 'on' : ''}" data-act="vibeuse" data-id="${g.id}" aria-label="用这组">${g.id === d.vibeActive ? SYM.check : SYM.swap}</button>
         <div class="pc-ticket-text"><b>${esc(g.name)}</b><small>${g.vibes.length} 张</small></div></article>`;
     return `${vibeTabs()}
-    ${d.charRefActive && d.charRefGroups?.[d.charRefActive] ? '<div class="pc-card pc-pad pc-mt pc-warn-card">现在开着角色参考，氛围暂时不生效（NovelAI 不能两个一起用）。</div>' : ''}
-    <section class="pc-card pc-pad pc-row-between pc-mt">
+    <section class="pc-card pc-pad pc-row-between">
       <div class="pc-grow"><b class="pc-big">正在用：${cur ? esc(cur.name) : '不用氛围'}</b>
-        <div class="pc-dim small">氛围就是参考图：照着这几张图的色调、光线、质感去画，不会照抄里面的人和构图。</div></div>
+        <div class="pc-dim small">氛围就是参考图：照着这几张图的色调、光线、质感去画，不会照抄里面的人和构图。角色长相参考在「角色」里给每个角色单独绑。</div></div>
       <button class="pc-add" data-act="vibenew" aria-label="新建氛围组">＋</button>
     </section>
     ${!N.vibeSupported() ? '<div class="pc-card pc-pad pc-mt pc-warn-card">现在的连接方式或模型用不了氛围（「用酒馆里的 key」和 NAI 3 不支持）。</div>' : ''}
@@ -3886,6 +3990,7 @@ function openLobbySheet(p) {
       <div class="pc-sheet-grip" aria-hidden="true"></div>
       <div class="pc-row-between"><h3 class="pc-h3" style="margin:0">${esc(p.name)}</h3><span class="pc-dim small">${esc(p.nickname)} · ${KIND_NAME[p.kind] || p.kind}</span></div>
       ${p.content?.artistString ? `<div class="pc-dim small mono" style="word-break:break-all">${markStr(getData(), p.content.artistString)}</div>${banWarn(getData(), p.content.artistString)}` : ''}
+      ${p.content?.negative ? `<div class="pc-dim small mono" style="word-break:break-all;margin-top:6px">负面：${esc(p.content.negative)}</div>` : ''}
       <div class="pc-hscroll pc-mt-s">${p.images.map(i => `<img class="pc-sheet-img" src="${esc(L.lobbyImgUrl(i.url))}" alt="" data-act="viewimg" data-src="${esc(L.lobbyImgUrl(i.url))}">`).join('')}</div>
       ${p.note ? `<p class="pc-quote small">${esc(p.note)}</p>` : ''}
       <div class="pc-chips wrap">${p.tags.map(t => `<span class="pc-tagchip ${t === 'NSFW' ? 'nsfw' : ''}">${esc(t)}</span>`).join('')}</div>
@@ -4133,6 +4238,7 @@ async function onClick(ev, outside = false) {
                 break;
             }
             case 'clearresult': ui.studio.result = null; ui.studio.sent = null; render(); break;
+            case 'strtoggle': ui.strOpen[el.dataset.key] = !ui.strOpen[el.dataset.key]; render(); break;
             case 'addprefix': {
                 const names = el.dataset.name ? [el.dataset.name] : guessBareArtists(d, ui.studio.pos);
                 ui.studio.pos = addArtistPrefix(ui.studio.pos, names);
@@ -4266,6 +4372,12 @@ async function onClick(ev, outside = false) {
                 break;
             }
             case 'generate': await doGenerate(); break;
+            case 'scenetrans': {
+                if (!String(ui.studio.scene || '').trim()) { toastr.info('先写一点固定提示词', '固定提示词'); break; }
+                try { await translateScene(); } catch (e) { toastr.error('转换失败：' + e.message, '固定提示词'); }
+                render();
+                break;
+            }
             case 'translatenow': {
                 if (!ui.studio.prompt.trim()) { toastr.info('先写一点画面描述', '翻译'); break; }
                 el.disabled = true; el.textContent = '转换中…';
@@ -4544,7 +4656,8 @@ function onInput(ev) {
         setPath(ui, el.dataset.bind, el.value);
         if (el.dataset.bind === 'studio.pos') { const w = root.querySelector('#pc-pos-ban'); if (w) w.innerHTML = banWarn(getData(), el.value); }
         if (el.dataset.bind === 'batch.text') { const w = root.querySelector('#pc-batch-ban'); if (w) w.innerHTML = batchBanWarn(getData(), el.value); }
-        if (el.dataset.bind === 'studio.pos' || el.dataset.bind === 'studio.neg') { updateStudioPreview(); clearTimeout(onInput.ss); onInput.ss = setTimeout(saveStudio, 600); }
+        if (['studio.pos', 'studio.neg', 'studio.scene', 'studio.sceneEn'].includes(el.dataset.bind)) { updateStudioPreview(); clearTimeout(onInput.ss); onInput.ss = setTimeout(saveStudio, 600); }
+        if (el.dataset.bind === 'studio.scene') { const box = root.querySelector('#pc-scene-ai'); if (box) box.hidden = !sceneZh(); const s2 = root.querySelector('#pc-scene-state'); if (s2) s2.textContent = sceneStateText(); }
         if (el.dataset.bind === 'search') { clearTimeout(onInput.t); onInput.t = setTimeout(() => { render(); const i = root.querySelector('[data-bind="search"]'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }, 250); }
         return;
     }
@@ -4572,6 +4685,8 @@ function onInput(ev) {
 async function onChangeEv(ev) {
     const el = ev.target;
     const d = getData();
+    if (el.dataset.sceneOn !== undefined) { ui.studio.sceneOn = el.checked; saveStudio(); render(); return; }
+    if (el.dataset.bindCheck === 'studio.sceneExpand') { ui.studio.sceneExpand = el.checked; saveStudio(); }
     if (el.dataset.bindGroup || el.dataset.bindArtist) { commit(); return; }
     if (el.dataset.cast) { C.setCastOn(el.dataset.cast, el.checked); render(); return; }
     if (el.dataset.crtype) { const [g, i] = el.dataset.crtype.split(':'); d.charRefGroups[g].refs[Number(i)].type = el.value; commit({ silent: true }); return; }
@@ -4625,9 +4740,12 @@ async function onChangeEv(ev) {
                 const du = await fitCharRef(await fileToDataUrl(f));
                 const { path } = await uploadImage(du, `charref_${M.uid('')}`);
                 const id = M.uid('r_');
-                d.charRefGroups[id] = { id, name: c.name, refs: [{ id: M.uid('cr_'), path, type: 'character', strength: 0.6 }] };
+                const names = new Set(Object.values(d.charRefGroups || {}).map(g => g.name));
+                let name = c.name.slice(0, 20), k = 2;
+                while (names.has(name)) name = `${c.name.slice(0, 16)} ${k++}`;
+                d.charRefGroups[id] = { id, name, refs: [{ id: M.uid('cr_'), path, type: 'character', strength: 0.6 }] };
                 c.charRef = id; C.saveChar(c); commit();
-                toastr.success(`已绑定。在「氛围 → 角色参考」里能调「像不像」。`, '角色');
+                toastr.success(`建好「${name}」并绑定了，下面能加图、调「像不像」。`, '角色');
             } catch (e) { toastr.error(e.message, '上传失败'); }
         }
         el.value = '';
@@ -4713,7 +4831,11 @@ async function doGenerate() {
     if (!N.isReady()) { toastr.warning('先到设置里填 NovelAI key', '生成图片'); ui.view = 'settings'; render(); return; }
     if (!st.pos.trim()) { toastr.warning('正面提示词是空的', '生成图片'); return; }
     if (T.hasChinese(st.pos.replace(/（[^（）]*）/g, ''))) {
-        if (!(await confirmBox('正面提示词里有中文，NovelAI 看不懂中文。还是要生成吗？（可以用「用中文写，让 AI 转成标签」）', { ok: '照样生成', cancel: '先不' }))) return;
+        if (!(await confirmBox('正面提示词里有中文，NovelAI 看不懂中文。还是要生成吗？（中文描述可以写进下面的「固定提示词」，会自动转成标签）', { ok: '照样生成', cancel: '先不' }))) return;
+    }
+    if (st.sceneOn !== false && String(st.scene || '').trim() && !sceneReady()) {
+        try { await translateScene(); }
+        catch (e) { render(); toastr.error('固定提示词转标签失败：' + e.message, '生成图片', { timeOut: 8000 }); return; }
     }
     saveStudio();
     st.busy = true; render();
@@ -4795,20 +4917,99 @@ function startBatch() {
 
 // ═════════════════════ 大堂动作 ═════════════════════
 
+/** 图片里存的提示词：NovelAI 原图（PNG 文字块 / 透明通道隐写）或 WebUI 的 parameters */
+function promptFromTexts(t) {
+    if (!t) return null;
+    let j = null;
+    try { j = typeof t.Comment === 'string' ? JSON.parse(t.Comment) : (t.Comment || null); } catch { j = null; }
+    if (j) {
+        const pos = j.prompt || j.v4_prompt?.caption?.base_caption || t.Description || '';
+        const neg = j.uc || j.v4_negative_prompt?.caption?.base_caption || '';
+        if (pos) return { positive: String(pos).trim(), negative: String(neg).trim() };
+    }
+    if (t.parameters) {
+        const s = String(t.parameters);
+        const ni = s.indexOf('\nNegative prompt:'), si = s.search(/\nSteps:/);
+        const pos = s.slice(0, ni >= 0 ? ni : si >= 0 ? si : undefined).trim();
+        const neg = ni >= 0 ? s.slice(ni + 17, si > ni ? si : undefined).trim() : '';
+        if (pos) return { positive: pos, negative: neg };
+    }
+    if (t.Description) return { positive: String(t.Description).trim(), negative: '' };
+    return null;
+}
+const inflateBytes = async (bytes, fmt) => new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream(fmt))).arrayBuffer());
+/** NovelAI 的透明通道隐写（stealth_pngcomp）：按列读 alpha 最低位 */
+async function readStealthTexts(file) {
+    const url = URL.createObjectURL(file);
+    try {
+        const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = url; });
+        const w = img.naturalWidth, h = img.naturalHeight;
+        if (!w || !h || w * h > 40e6) return null;
+        const cv = DOC.createElement('canvas'); cv.width = w; cv.height = h;
+        const g = cv.getContext('2d', { willReadFrequently: true });
+        g.drawImage(img, 0, 0);
+        const px = g.getImageData(0, 0, w, h).data;
+        const total = w * h;
+        let i = 0;
+        const bit = () => { const x = Math.floor(i / h), y = i % h; i++; return px[(y * w + x) * 4 + 3] & 1; };
+        const bytes = n => { const out = new Uint8Array(n); for (let k = 0; k < n; k++) { let v = 0; for (let b = 0; b < 8; b++) v = (v << 1) | bit(); out[k] = v; } return out; };
+        const magic = 'stealth_pngcomp';
+        if (total < 200 || new TextDecoder().decode(bytes(magic.length)) !== magic) return null;
+        let len = 0;
+        for (let b = 0; b < 32; b++) len = len * 2 + bit();
+        if (!len || i + len > total) return null;
+        return JSON.parse(new TextDecoder().decode(await inflateBytes(bytes(Math.floor(len / 8)), 'gzip')));
+    } catch { return null; } finally { URL.revokeObjectURL(url); }
+}
+async function readImagePrompt(file) {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    const utf8 = b => new TextDecoder('utf-8').decode(b);
+    const texts = {};
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+        const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+        for (let p = 8; p + 8 <= buf.length;) {
+            const len = dv.getUint32(p), type = String.fromCharCode(...buf.subarray(p + 4, p + 8));
+            const data = buf.subarray(p + 8, p + 8 + len);
+            p += 12 + len;
+            if (type === 'IEND') break;
+            if (!['tEXt', 'iTXt', 'zTXt'].includes(type)) continue;
+            const z = data.indexOf(0);
+            if (z < 0) continue;
+            const key = utf8(data.subarray(0, z));
+            try {
+                if (type === 'tEXt') texts[key] = utf8(data.subarray(z + 1));
+                else if (type === 'zTXt') texts[key] = utf8(await inflateBytes(data.subarray(z + 2), 'deflate'));
+                else {
+                    let q = data.indexOf(0, z + 3);
+                    q = data.indexOf(0, q + 1);
+                    const body = data.subarray(q + 1);
+                    texts[key] = utf8(data[z + 1] ? await inflateBytes(body, 'deflate') : body);
+                }
+            } catch { /* 坏块跳过 */ }
+        }
+    }
+    let r = promptFromTexts(texts);
+    if (!r && /png|webp/i.test(file.type || file.name)) r = promptFromTexts(await readStealthTexts(file));
+    return r;
+}
+
 function openSharedUpload() {
     const d = getData();
     const box = modal(`<form data-share-form>
       <h3 class="pc-h3">上传画师串</h3>
       <label class="pc-field"><span>名称</span><input class="pc-input" name="title" maxlength="200" required placeholder="给这串起个名字"></label>
       <label class="pc-field"><span>署名</span><input class="pc-input" name="signature" maxlength="24" required value="${esc(d.lobby.nickname || '')}" placeholder="显示在共享卡片上的名字"></label>
-      <label class="pc-field"><span>画师串</span><textarea class="pc-textarea mono" name="artistString" maxlength="20000" required placeholder="artist:aaa, 0.8::artist:bbb::"></textarea></label>
-      <label class="pc-field"><span>标签（可选，逗号隔开）</span><input class="pc-input" name="tags" maxlength="800" placeholder="BL, 厚涂, 柔和"></label>
-      <label class="pc-field"><span>说明（可选）</span><textarea class="pc-textarea" name="note" maxlength="5000" placeholder="适合的画面、使用建议或来源"></textarea></label>
-      <label class="pc-field"><span>例图（可选，最多 6 张）</span><input name="images" type="file" accept="image/png,image/jpeg,image/webp" multiple></label>
+      <div class="pc-field"><span>例图（可选，最多 6 张）</span><label class="pc-pill dashed pc-share-pick">＋ 选图<input name="images" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden></label>
+        <small class="pc-dim" style="display:block;margin-top:4px">选 NovelAI 原图，会自动读出正面和负面填到下面</small></div>
       <div data-share-previews style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0"></div>
       <button class="pc-pill dashed" type="button" data-share-clear hidden>清空例图</button>
-      <label class="pc-field"><span><input type="checkbox" name="nsfw"> 含 NSFW 内容</span></label>
-      <p class="pc-tip" data-share-status role="status" aria-live="polite"></p>
+      <p class="pc-dim small" data-share-meta role="status" aria-live="polite"></p>
+      <label class="pc-field"><span>画师串（正面）</span><textarea class="pc-textarea mono" name="artistString" maxlength="20000" required placeholder="artist:aaa, 0.8::artist:bbb::"></textarea></label>
+      <label class="pc-field"><span>负面（可选）</span><textarea class="pc-textarea mono" name="negative" maxlength="20000" placeholder="lowres, bad anatomy …"></textarea></label>
+      <label class="pc-field"><span>标签（可选，逗号隔开）</span><input class="pc-input" name="tags" maxlength="800" placeholder="BL, 厚涂, 柔和"></label>
+      <label class="pc-field"><span>说明（可选）</span><textarea class="pc-textarea" name="note" maxlength="5000" placeholder="适合的画面、使用建议或来源"></textarea></label>
+      <label class="pc-switch"><input type="checkbox" name="nsfw"><span></span>含 NSFW 内容</label>
+      <p class="pc-dim small" data-share-status role="status" aria-live="polite"></p>
       <div class="pc-actions"><button class="pc-btn" type="button" data-share-cancel>取消</button><button class="pc-btn dark" type="submit">发布到共享</button></div>
     </form>`);
     box.style.maxHeight = '90dvh';
@@ -4824,7 +5025,26 @@ function openSharedUpload() {
     const previews = box.querySelector('[data-share-previews]');
     let busy = false, previewVersion = 0;
     const say = message => { status.textContent = message; };
-    clear.addEventListener('click', () => { ++previewVersion; files.value = ''; previews.replaceChildren(); clear.hidden = true; say(''); });
+    const metaBox = box.querySelector('[data-share-meta]');
+    const fillFromImageMeta = async version => {
+        let meta = null;
+        for (const file of files.files) {
+            try { meta = await readImagePrompt(file); } catch (e) { console.warn('[智库] 读图片里的提示词', e); }
+            if (version !== previewVersion || !box.isConnected) return;
+            if (meta?.positive) break;
+        }
+        metaBox.replaceChildren();
+        if (!meta?.positive) { if (files.files.length) metaBox.textContent = '例图里没读到提示词（不是 NovelAI 原图，或者被压缩、截图过）。'; return; }
+        const pos = form.elements.namedItem('artistString'), neg = form.elements.namedItem('negative');
+        const apply = () => { pos.value = meta.positive; neg.value = meta.negative || ''; metaBox.textContent = `已从例图读出正面${meta.negative ? '和负面' : ''}，可以再改。`; };
+        if (!pos.value.trim() && !neg.value.trim()) { apply(); return; }
+        if (pos.value.trim() === meta.positive && neg.value.trim() === (meta.negative || '')) return;
+        const b = DOC.createElement('button');
+        b.type = 'button'; b.className = 'pc-pill dashed tiny'; b.textContent = '例图里有提示词，用它替换下面的';
+        b.addEventListener('click', apply);
+        metaBox.appendChild(b);
+    };
+    clear.addEventListener('click', () => { ++previewVersion; files.value = ''; previews.replaceChildren(); metaBox.replaceChildren(); clear.hidden = true; say(''); });
     files.addEventListener('change', async () => {
         const version = ++previewVersion;
         previews.replaceChildren(); clear.hidden = !files.files.length;
@@ -4839,6 +5059,7 @@ function openSharedUpload() {
                 img.style.cssText = 'width:72px;height:88px;object-fit:cover;border-radius:8px'; previews.appendChild(img);
             } catch { say('有一张例图无法读取，请重新选择。'); }
         }
+        if (version === previewVersion && box.isConnected) await fillFromImageMeta(version);
     });
     box.querySelector('[data-share-cancel]').addEventListener('click', () => { if (!busy) box.closeModal(); });
     box.parentElement.addEventListener('click', ev => { if (busy && ev.target === box.parentElement) ev.stopImmediatePropagation(); }, true);
@@ -4846,7 +5067,7 @@ function openSharedUpload() {
         ev.preventDefault();
         if (busy) return;
         const value = name => form.elements.namedItem(name).value.trim();
-        const name = value('title'), nickname = value('signature'), artistString = value('artistString');
+        const name = value('title'), nickname = value('signature'), artistString = value('artistString'), negative = value('negative');
         const { members } = M.parseArtistString(artistString);
         if (!name || !nickname) { say('请填写名称和署名。'); return; }
         if (!members.length) { say('请填写带 artist: 的画师串，例如 artist:aaa。'); return; }
@@ -4867,7 +5088,13 @@ function openSharedUpload() {
                 images.push({ data, nsfw });
             }
             say('正在发布…');
-            await L.createPost({ nickname, name, kind: members.length === 1 ? 'artist' : 'group', note, tags, nsfw, content: { artistString, members }, images });
+            const post = { nickname, name, kind: members.length === 1 ? 'artist' : 'group', note, tags, nsfw, content: { artistString, members, ...(negative ? { negative } : {}) }, images };
+            try { await L.createPost(post); }
+            catch (e) {
+                // 服务器不认负面字段时，把负面写进说明再发一次
+                if (!negative || [401, 403, 413, 429].includes(e?.status)) throw e;
+                await L.createPost({ ...post, note: [note, '负面：' + negative].filter(Boolean).join('\n\n').slice(0, 5000), content: { artistString, members } });
+            }
             d.lobby.nickname = nickname;
             if (nsfw) d.options.lobbyShowNsfw = true;
             commit();
@@ -4929,7 +5156,7 @@ async function copyFromLobby(p, btn) {
             if (p.note && !a.note) a.note = p.note;
             ref = { type: 'artist', id: a.id };
         } else {
-            ref = M.createFromString(d, { name: p.name, text: p.content.artistString, note: p.note });
+            ref = M.createFromString(d, { name: p.name, text: p.content.artistString, note: p.note, neg: p.content.negative || '' });
         }
         if (!ref) throw new Error('这一条里没有画师');
         for (const img of p.images) {
@@ -5301,6 +5528,19 @@ function injectCss() {
     const style = DOC.createElement('style');
     style.id = 'pc-css';
     style.textContent = "/*\n * 画师票册 · 旅馆票卡风\n * 开着「旅馆票卡」美化时直接用它的颜色和字体变量，没开时用下面的默认值。\n */\n@import url(\"https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;500;700&display=swap\");\n\n:root {\n    --pc-mist: var(--tk-accent, #7ea29c);\n    --pc-ink: var(--tk-ink, #3a2a22);\n    --pc-ink-soft: var(--tk-ink-soft, #6e5a4d);\n    --pc-paper: var(--tk-paper, #f4efe4);\n    --pc-paper-2: var(--cl-paper, #ebe4d2);\n    --pc-paper-user: var(--tk-paper-user, #f1e8d3);\n    --pc-gold: var(--tk-gold, #c98a3e);\n    --pc-danger: var(--cl-danger, #9b4f45);\n    --pc-dash: var(--tk-dash, rgba(58, 42, 34, .55));\n    --pc-font: \"Noto Serif SC\", \"Source Han Serif SC\", \"Songti SC\", \"SimSun\", serif;\n    --pc-font-name: \"Noto Serif SC\", \"Source Han Serif SC\", \"Songti SC\", serif;\n    --pc-font-label: ui-monospace, \"SFMono-Regular\", Menlo, Consolas, \"Noto Sans Mono\", monospace;\n    --pc-shadow: 0 4px 0 rgba(26, 22, 18, .22);\n    --pc-wax: var(--pc-gold);\n}\n\n/* ───────── 外框 ───────── */\nbody.pc-lock { overflow: hidden; }\n.pc-overlay {\n    position: fixed; inset: 0; z-index: 30000; display: none;\n    background-color: var(--pc-mist);\n    background-image: radial-gradient(rgba(28, 34, 38, .22) 1px, transparent 1.5px);\n    background-size: 7px 7px;\n    color: var(--pc-ink); font-family: var(--pc-font); font-size: 15px; line-height: 1.6;\n}\n.pc-overlay.open { display: block; }\n.pc-overlay *, .pc-sheet *, .pc-modal * { box-sizing: border-box; }\n.pc-overlay ::-webkit-scrollbar, .pc-sheet ::-webkit-scrollbar, .pc-modal ::-webkit-scrollbar { display: none; }\n.pc-overlay *, .pc-sheet *, .pc-modal * { scrollbar-width: none; }\n\n.pc-shell { height: 100%; max-width: 620px; margin: 0 auto; display: flex; flex-direction: column; }\n.pc-head { padding: max(12px, env(safe-area-inset-top)) 12px 0; flex-shrink: 0; }\n.pc-head-card {\n    position: relative; display: flex; align-items: center; gap: 10px;\n    padding: 10px 12px 10px 16px; background: var(--pc-paper);\n    border: 1.5px solid var(--pc-ink); border-radius: 18px; box-shadow: var(--pc-shadow);\n}\n.pc-title { font-family: var(--pc-font-name); font-weight: 700; font-size: 24px; letter-spacing: 4px; line-height: 1.2; }\n.pc-head-ticket { flex: 1; min-width: 0; display: grid; grid-template-columns: auto auto; grid-template-rows: auto auto; justify-content: end; align-items: center; column-gap: 4px; text-align: right; font-size: 13px; border: 0; background: transparent; color: var(--pc-ink); font-family: var(--pc-font); cursor: pointer; padding: 4px; }\n.pc-head-ticket span:not(.pc-seal) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n.pc-head-lab { grid-column: 1 / 3; font-size: 10px; letter-spacing: .12em; color: var(--pc-ink-soft); }\n.pc-head-ticket > span { font-weight: 600; max-width: 34vw; }\n.pc-head-caret { font-size: 10px; color: var(--pc-ink-soft); font-weight: 400; }\n.pc-head-ticket em { font-style: normal; font-size: 11px; color: var(--pc-ink-soft); }\n.pc-nav { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px; margin-top: 10px; }\n.pc-nav .pc-pill { padding: 0 4px; }\n.pc-body { flex: 1; overflow-y: auto; padding: 12px 12px 120px; -webkit-overflow-scrolling: touch; }\n\n/* ───────── 基础件 ───────── */\n.pc-label { font-size: 12px; color: var(--pc-ink-soft); margin-top: 10px; display: block; }\n.pc-label:first-child { margin-top: 0; }\n.pc-h2 { margin: 2px 0 6px; font-family: var(--pc-font-name); font-weight: 700; font-size: 22px; letter-spacing: 3px; }\n.pc-h3 { margin: 2px 0 10px; font-family: var(--pc-font-name); font-weight: 700; font-size: 19px; letter-spacing: 2px; }\n.mono, .pc-h2.mono { font-family: var(--pc-font-label); letter-spacing: 0; }\n.pc-dim { color: var(--pc-ink-soft); }\n.small { font-size: 12px; }\n.pc-hint { font-size: 12px; color: var(--pc-ink-soft); margin-top: 6px; }\n.pc-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }\n.pc-mt { margin-top: 14px; }\n.pc-mt-s { margin-top: 10px; }\n.pc-grow { flex: 1; min-width: 0; }\n.span2 { grid-column: span 2; }\n.pc-row-between { display: flex; justify-content: space-between; align-items: center; gap: 8px; }\n\n.pc-card { position: relative; background: var(--pc-paper); border: 1.5px solid var(--pc-ink); border-radius: 18px; box-shadow: var(--pc-shadow); }\n.pc-pad { padding: 14px 16px; }\n.pc-pad-s { padding: 10px 12px; }\n.pc-badge { padding: 4px 12px; border-radius: 999px; background: var(--pc-paper); border: 1.5px solid var(--pc-ink); font-size: 13px; }\n\n.pc-pill, .pc-btn, .pc-icon-btn, .pc-back, .pc-linkish, #pc-chip, .pc-seg button, .pc-stepper button {\n    font-family: var(--pc-font); color: var(--pc-ink); cursor: pointer; -webkit-tap-highlight-color: transparent;\n}\n.pc-pill {\n    flex-shrink: 0; min-height: 36px; padding: 0 14px; border-radius: 999px; font-size: 14px;\n    border: 1.5px solid var(--pc-ink); background: var(--pc-paper);\n}\n.pc-pill.dashed { border-style: dashed; border-color: var(--pc-dash); background: rgba(244, 239, 228, .7); }\n.pc-pill.on { background: var(--pc-ink); color: var(--pc-paper); border-style: solid; border-color: var(--pc-ink); }\n.pc-pill.gold { border: 0; background: rgba(201, 138, 62, .2); }\n.pc-pill.nsfw { border-color: var(--pc-danger); color: #7a3a32; font-family: var(--pc-font-label); }\n.pc-pill.nsfw.on { background: var(--pc-danger); color: #fbf8f0; }\n.pc-nav .pc-pill { width: 100%; }\n\n.pc-btn {\n    display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 0 16px;\n    border: 1.5px solid var(--pc-ink); border-radius: 999px; background: var(--pc-paper); font-size: 14px;\n    box-shadow: var(--pc-shadow); text-decoration: none;\n}\n.pc-btn.dark { background: var(--pc-ink); color: var(--pc-paper); }\n.pc-btn.big { width: 100%; min-height: 54px; font-size: 17px; }\n.pc-btn.wide { width: 100%; }\n.pc-btn.small { min-height: 32px; padding: 0 12px; font-size: 12px; box-shadow: none; }\n.pc-btn.danger { border-color: var(--pc-danger); color: var(--pc-danger); box-shadow: none; }\n.pc-btn:disabled { opacity: .6; cursor: default; }\n.pc-btn:active, .pc-pill:active { transform: translateY(2px); box-shadow: none; }\n\n.pc-icon-btn {\n    flex-shrink: 0; width: 40px; height: 40px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;\n    border: 1.5px dashed var(--pc-dash); background: rgba(244, 239, 228, .9); font-size: 16px;\n}\n.pc-icon-btn.small { width: 30px; height: 30px; border: 0; background: transparent; }\n.pc-icon-btn.gold { border: 0; background: var(--pc-wax); color: #fbf8f0; font-family: var(--pc-font-name); font-weight: 700; }\n.pc-back {\n    display: inline-flex; align-items: center; gap: 4px; min-height: 40px; padding: 0 14px;\n    border: 1.5px dashed var(--pc-dash); border-radius: 999px; background: rgba(244, 239, 228, .9); font-size: 14px;\n}\n.pc-linkish { border: 0; background: transparent; padding: 4px 0; font-size: 14px; color: #26352f; }\n.pc-card .pc-linkish { color: var(--pc-ink); }\n.pc-linkish.strong { font-weight: 700; color: var(--pc-ink); }\n\n/* 蜡封：贯穿整个插件的记号 */\n.pc-seal {\n    flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;\n    background: var(--pc-wax);\n    color: #fbf8f0; font-family: var(--pc-font-name); font-weight: 700; font-size: 11px; line-height: 1;\n}\n.pc-head-ticket .pc-seal, .pc-current .pc-seal { width: 30px; height: 30px; font-size: 12px; }\n.pc-on-seam { position: absolute; left: 50%; top: 104px; margin-left: -15px; width: 30px; height: 30px; font-size: 13px; z-index: 2; }\n\n/* 票根缺口分隔：虚线两头各挖一个半圆 */\n.pc-notch { position: relative; height: 0; margin: 12px -16px; border-top: 1.5px dashed rgba(58, 42, 34, .45); }\n.pc-notch i { position: absolute; top: -10px; width: 18px; height: 18px; border-radius: 50%; background: var(--pc-mist); border: 1.5px solid var(--pc-ink); }\n.pc-notch i:first-child { left: -10px; clip-path: inset(0 0 0 50%); }\n.pc-notch i:last-child { right: -10px; clip-path: inset(0 50% 0 0); }\n\n/* 输入 */\n.pc-textarea, .pc-input, .pc-field input, .pc-field select, .pc-title-input {\n    width: 100%; border: 0; border-radius: 12px; background: var(--pc-paper-2); color: var(--pc-ink);\n    font-family: var(--pc-font); font-size: 14px; padding: 10px 12px; outline: none; margin-top: 4px;\n}\n.pc-textarea { min-height: 92px; resize: vertical; line-height: 1.6; }\n.pc-textarea.small { min-height: 64px; }\n.pc-textarea.mono, .pc-input.mono { font-family: var(--pc-font-label); font-size: 13px; }\n.pc-title-input { background: transparent; font-family: var(--pc-font-name); font-weight: 700; font-size: 22px; letter-spacing: 3px; padding: 0; margin: 0; }\n.pc-textarea:focus, .pc-input:focus, .pc-field input:focus, .pc-field select:focus { box-shadow: 0 0 0 2px var(--pc-ink); }\n.pc-overlay ::placeholder, .pc-modal ::placeholder { color: #7c6a5d; opacity: 1; }\n.pc-field { display: block; font-size: 12px; color: var(--pc-ink-soft); }\n.pc-field input, .pc-field select { margin-top: 2px; font-family: var(--pc-font-label); font-size: 13px; color: var(--pc-ink); }\n.pc-grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 6px; }\n.pc-grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 12px; }\n.pc-grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }\n.pc-details summary { cursor: pointer; color: var(--pc-ink-soft); font-size: 13px; margin-top: 8px; }\n.pc-search { display: flex; align-items: center; gap: 8px; margin-top: 12px; height: 46px; padding: 0 16px; border: 1.5px dashed var(--pc-dash); border-radius: 999px; background: var(--pc-paper); color: var(--pc-ink); }\n.pc-search input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; font-family: var(--pc-font); font-size: 14px; color: var(--pc-ink); }\n\n.pc-switch { display: flex; align-items: center; gap: 10px; min-height: 42px; font-size: 14px; cursor: pointer; flex-wrap: wrap; }\n.pc-switch small { flex-basis: 100%; padding-left: 56px; margin-top: -6px; font-size: 11px; color: var(--pc-ink-soft); }\n.pc-switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }\n.pc-switch > span { flex-shrink: 0; position: relative; width: 46px; height: 26px; border-radius: 999px; background: rgba(58, 42, 34, .18); }\n.pc-switch > span::after { content: \"\"; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--pc-wax); transition: left .15s; }\n.pc-switch input:checked + span { background: var(--pc-ink); }\n.pc-switch input:checked + span::after { left: 23px; }\n.pc-switch input:focus-visible + span { box-shadow: 0 0 0 2px var(--pc-gold); }\n\n.pc-slider { display: grid; grid-template-columns: 56px 1fr 40px; align-items: center; gap: 8px; font-size: 12px; color: var(--pc-ink-soft); }\n.pc-slider b { font-family: var(--pc-font-label); font-weight: 400; color: var(--pc-ink); }\n.pc-slider input { -webkit-appearance: none; appearance: none; width: 100%; height: 8px; border-radius: 999px; background: rgba(58, 42, 34, .14); outline: none; }\n.pc-slider input::-webkit-slider-thumb { -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%; background: var(--pc-wax); cursor: pointer; }\n.pc-slider input::-moz-range-thumb { width: 22px; height: 22px; border: 0; border-radius: 50%; background: var(--pc-gold); cursor: pointer; }\n\n.pc-chips { display: flex; gap: 6px; overflow-x: auto; margin-top: 10px; padding-bottom: 2px; }\n.pc-chips.wrap { flex-wrap: wrap; overflow: visible; margin-top: 6px; }\n.pc-chips.tiny { margin-top: 4px; }\n.pc-tagchip { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px dashed var(--pc-dash); }\n.pc-tagchip.nsfw { border-color: var(--pc-danger); color: #7a3a32; font-family: var(--pc-font-label); }\n.pc-quote { margin: 6px 0 0; padding: 10px 12px; border-radius: 12px; background: rgba(201, 138, 62, .16); font-size: 14px; line-height: 1.7; word-break: break-word; }\n.pc-quote.small { font-size: 12px; background: rgba(58, 42, 34, .07); color: var(--pc-ink-soft); }\n.pc-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }\n.pc-actions.wrap { flex-wrap: wrap; justify-content: flex-start; }\n.pc-seg { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 4px; border-radius: 999px; background: rgba(244, 239, 228, .6); }\n.pc-seg button { min-height: 36px; border: 1.5px solid transparent; border-radius: 999px; background: transparent; font-size: 14px; }\n.pc-seg button.on { border-color: var(--pc-ink); background: var(--pc-paper); font-weight: 700; }\n.pc-empty { padding: 26px 16px; text-align: center; border: 1.5px dashed var(--pc-dash); border-radius: 16px; background: rgba(244, 239, 228, .6); display: flex; flex-direction: column; gap: 4px; }\n.pc-empty span { font-size: 13px; color: var(--pc-ink-soft); }\n\n/* 底部常驻按钮条，下面淡出到雾青底 */\n.pc-bottom-bar {\n    position: fixed; left: 0; right: 0; bottom: 0; z-index: 2; display: flex; gap: 8px; justify-content: center;\n    padding: 40px max(12px, calc(50vw - 298px)) max(18px, env(safe-area-inset-bottom));\n    background: linear-gradient(to bottom, rgba(126, 162, 156, 0), var(--pc-mist) 55%); pointer-events: none;\n}\n.pc-bottom-bar > * { pointer-events: auto; flex: 1; max-width: 320px; }\n\n/* ───────── 票卡（画师 / 画师组） ───────── */\n.pc-ticket { position: relative; min-width: 0; background: var(--pc-paper); border: 1.5px solid var(--pc-ink); border-radius: 16px; box-shadow: var(--pc-shadow); cursor: pointer; }\n.pc-ticket.active { box-shadow: 0 0 0 3px var(--pc-gold), var(--pc-shadow); }\n.pc-ticket-img { height: 120px; border-radius: 14.5px 14.5px 0 0; overflow: hidden; background: #cdbfa8; -webkit-mask-image: linear-gradient(#000 72%, transparent); mask-image: linear-gradient(#000 72%, transparent); display: flex; align-items: center; justify-content: center; }\n.pc-ticket-img img { width: 100%; height: 100%; object-fit: cover; }\n.pc-ticket-img span { font-size: 12px; color: var(--pc-ink-soft); }\n.pc-ticket .pc-notch { margin: 4px 0 0; }\n.pc-ticket-text { padding: 12px 12px 12px; display: flex; flex-direction: column; gap: 3px; min-width: 0; }\n.pc-ticket-text b { font-family: var(--pc-font-name); font-size: 16px; overflow-wrap: anywhere; }\n.pc-ticket-text small { font-size: 12px; line-height: 1.5; color: var(--pc-ink-soft); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all; }\n.pc-ticket-text em { font-style: normal; font-size: 11px; color: var(--pc-ink-soft); }\n\n.pc-thumbs { display: flex; gap: 8px; overflow-x: auto; margin-top: 10px; padding: 2px; }\n.pc-thumb-wrap { position: relative; flex-shrink: 0; }\n.pc-thumb { position: relative; flex-shrink: 0; width: 92px; height: 120px; border-radius: 12px; border: 1.5px solid var(--pc-ink); overflow: hidden; background: #cdbfa8; cursor: zoom-in; display: flex; align-items: center; justify-content: center; }\n.pc-thumbs.small .pc-thumb { width: 64px; height: 84px; border-radius: 10px; }\n.pc-thumb img { width: 100%; height: 100%; object-fit: cover; }\n.pc-thumb-add { border-style: dashed; border-color: var(--pc-dash); background: transparent; cursor: pointer; font-size: 12px; text-align: center; line-height: 1.4; color: var(--pc-ink); font-family: var(--pc-font); }\n.pc-thumb-empty { cursor: default; }\n.pc-tag-mini { position: absolute; left: 5px; bottom: 5px; padding: 0 6px; border-radius: 999px; background: rgba(244, 239, 228, .92); font-family: var(--pc-font-label); font-size: 9px; color: var(--pc-ink); }\n.pc-nsfw-hide { border-style: dashed; border-color: var(--pc-danger); background: rgba(244, 239, 228, .6); }\n.pc-nsfw-note { font-size: 11px; color: #7a3a32; text-align: center; padding: 4px; }\n.pc-thumb-del { position: absolute; right: -6px; top: -6px; width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid var(--pc-ink); background: var(--pc-paper); color: var(--pc-ink); font-size: 13px; line-height: 1; cursor: pointer; }\n.pc-stepper { display: flex; align-items: center; gap: 2px; border: 1px dashed var(--pc-dash); border-radius: 999px; padding: 2px; flex-shrink: 0; }\n.pc-stepper button { width: 30px; height: 30px; border: 0; border-radius: 50%; background: transparent; font-size: 16px; }\n.pc-stepper span { min-width: 34px; text-align: center; font-family: var(--pc-font-label); font-size: 13px; }\n\n.pc-ticket-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0 4px; }\n.pc-stub-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 4px 0 6px; border-radius: 999px; background: rgba(201, 138, 62, .2); font-size: 14px; }\n.pc-x { width: 26px; height: 26px; border: 0; border-radius: 50%; background: transparent; color: var(--pc-ink-soft); font-size: 16px; cursor: pointer; }\n.pc-result img { display: block; width: 100%; border-radius: 16.5px 16.5px 0 0; cursor: zoom-in; }\n.pc-result .pc-actions { padding: 0 12px 12px; flex-wrap: wrap; }\n\n/* 批量 */\n.pc-batch-cell { position: relative; height: 150px; border-radius: 12px; border: 1.5px dashed var(--pc-dash); background: rgba(244, 239, 228, .6); overflow: hidden; display: flex; align-items: center; justify-content: center; font-size: 12px; color: var(--pc-ink-soft); }\n.pc-batch-cell.done { border-style: solid; border-color: var(--pc-ink); }\n.pc-batch-cell.error { border-color: var(--pc-danger); color: #7a3a32; }\n.pc-batch-cell img { width: 100%; height: 100%; object-fit: cover; }\n.pc-batch-name { position: absolute; left: 5px; right: 5px; bottom: 5px; display: flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; background: rgba(244, 239, 228, .94); font-family: var(--pc-font-label); font-size: 10px; color: var(--pc-ink); white-space: nowrap; overflow: hidden; }\n\n/* 氛围 */\n.pc-hscroll { display: flex; gap: 10px; overflow-x: auto; padding: 4px 2px 8px; margin-top: 10px; }\n.pc-vibe-set { flex-shrink: 0; width: 120px; padding: 8px 8px 10px; border-radius: 14px; background: var(--pc-paper); border: 1.5px dashed var(--pc-dash); display: flex; flex-direction: column; gap: 3px; text-align: left; cursor: pointer; color: var(--pc-ink); font-family: var(--pc-font); }\n.pc-vibe-set.on { border: 1.5px solid var(--pc-ink); box-shadow: var(--pc-shadow); }\n.pc-vibe-set.add { align-items: center; justify-content: center; text-align: center; min-height: 130px; background: rgba(244, 239, 228, .6); }\n.pc-vibe-set small { font-family: var(--pc-font-label); font-size: 10px; color: var(--pc-ink-soft); }\n.pc-mosaic { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px; height: 72px; }\n.pc-mosaic i { border-radius: 6px; background: #b8b0a2 center/cover no-repeat; }\n.pc-vibe-row { display: flex; gap: 12px; align-items: center; }\n.pc-vibe-row .pc-thumb { width: 64px; height: 64px; border-radius: 10px; }\n\n/* 大堂：票根横版 */\n.pc-list { display: flex; flex-direction: column; gap: 12px; }\n.pc-lobby-card { position: relative; display: flex; min-height: 136px; background: var(--pc-paper); border: 1.5px solid var(--pc-ink); border-radius: 16px; box-shadow: var(--pc-shadow); }\n.pc-lobby-img { position: relative; width: 104px; flex-shrink: 0; border-radius: 14.5px 0 0 14.5px; overflow: hidden; background: #cdbfa8; display: flex; align-items: center; justify-content: center; cursor: zoom-in; }\n.pc-lobby-img img { width: 100%; height: 100%; object-fit: cover; }\n.pc-lobby-img span { font-size: 12px; color: var(--pc-ink-soft); }\n.pc-lobby-img em { position: absolute; right: 6px; bottom: 6px; font-style: normal; font-family: var(--pc-font-label); font-size: 10px; padding: 0 6px; border-radius: 999px; background: rgba(244, 239, 228, .9); color: var(--pc-ink); }\n.pc-lobby-perf { position: relative; width: 0; border-left: 1.5px dashed rgba(58, 42, 34, .45); }\n.pc-lobby-perf::before, .pc-lobby-perf::after { content: \"\"; position: absolute; left: -9.5px; width: 16px; height: 16px; border-radius: 50%; background: var(--pc-mist); border: 1.5px solid var(--pc-ink); }\n.pc-lobby-perf::before { top: -10px; clip-path: inset(50% 0 0 0); }\n.pc-lobby-perf::after { bottom: -10px; clip-path: inset(0 0 50% 0); }\n.pc-lobby-text { flex: 1; min-width: 0; padding: 8px 12px 10px 14px; display: flex; flex-direction: column; gap: 3px; }\n.pc-lobby-text b { font-family: var(--pc-font-name); font-size: 16px; }\n.pc-lobby-text small { font-size: 12px; color: var(--pc-ink-soft); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all; }\n\n/* ───────── 输入框上方的「当前票」 ───────── */\n#pc-chip {\n    display: inline-flex; align-items: center; gap: 8px; max-width: calc(100% - 16px); margin: 0 8px 6px; height: 34px; padding: 0 12px 0 6px;\n    border: 1.5px solid var(--pc-ink); border-radius: 999px; background: var(--pc-paper); box-shadow: 0 3px 0 rgba(26, 22, 18, .2);\n    font-size: 13px; align-self: flex-start;\n}\n#pc-chip span:not(.pc-seal) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n#pc-chip b { font-weight: 400; color: var(--pc-ink-soft); }\n.pc-menu-seal { display: inline-block; width: 14px; height: 14px; border-radius: 50%; background: var(--pc-wax); }\n\n/* ───────── 换票抽屉 / 弹窗 / 看大图 ───────── */\n.pc-sheet-backdrop, .pc-modal-backdrop { position: fixed; inset: 0; z-index: 30010; background: rgba(28, 34, 38, .4); display: flex; color: var(--pc-ink); font-family: var(--pc-font); }\n.pc-sheet-backdrop { align-items: flex-end; justify-content: center; }\n.pc-sheet {\n    width: 100%; max-width: 620px; max-height: 88vh; overflow-y: auto; padding: 8px 18px max(20px, env(safe-area-inset-bottom));\n    background: var(--pc-paper); border: 1.5px solid var(--pc-ink); border-bottom: 0; border-radius: 24px 24px 0 0;\n    display: flex; flex-direction: column; gap: 6px; animation: pc-up .2s ease-out;\n}\n@keyframes pc-up { from { transform: translateY(30px); opacity: .4; } }\n.pc-sheet-grip { width: 44px; height: 5px; border-radius: 3px; background: rgba(58, 42, 34, .3); margin: 2px auto 6px; }\n.pc-current { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 14px; background: rgba(201, 138, 62, .18); }\n.pc-current b { display: block; font-family: var(--pc-font-name); }\n.pc-current small { display: block; font-size: 12px; color: var(--pc-ink-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n.pc-mini-stub { flex-shrink: 0; width: 112px; padding: 0; border-radius: 14px; background: var(--pc-paper); border: 1.5px dashed var(--pc-dash); display: flex; flex-direction: column; overflow: hidden; cursor: pointer; text-align: left; color: var(--pc-ink); font-family: var(--pc-font); }\n.pc-mini-stub.active { border: 1.5px solid var(--pc-ink); }\n.pc-mini-stub.picked { border: 2.5px solid var(--pc-gold); box-shadow: 0 4px 0 rgba(201, 138, 62, .4); }\n.pc-mini-img { display: block; height: 96px; background: #cdbfa8; }\n.pc-mini-img img { width: 100%; height: 100%; object-fit: cover; }\n.pc-mini-stub b { font-family: var(--pc-font-name); font-size: 13px; padding: 6px 8px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n.pc-mini-stub small { font-family: var(--pc-font-label); font-size: 10px; color: var(--pc-ink-soft); padding: 0 8px 8px; }\n\n.pc-modal-backdrop { align-items: center; justify-content: center; padding: 16px; }\n.pc-modal { width: 100%; max-width: 480px; max-height: 90vh; overflow-y: auto; padding: 16px 18px; background: var(--pc-paper); border: 1.5px solid var(--pc-ink); border-radius: 18px; box-shadow: var(--pc-shadow); }\n.pc-confirm { margin: 0; font-size: 15px; line-height: 1.7; }\n.pc-choose { display: flex; flex-direction: column; gap: 8px; }\n.pc-viewer { position: fixed; inset: 0; z-index: 30020; background: rgba(20, 18, 16, .88); display: flex; align-items: center; justify-content: center; padding: 12px; cursor: zoom-out; }\n.pc-viewer img { max-width: 100%; max-height: calc(100% - 70px); object-fit: contain; border-radius: 12px; border: 1.5px solid var(--pc-paper); cursor: default; }\n.pc-viewer-x { position: absolute; top: 14px; right: 14px; width: 42px; height: 42px; border-radius: 50%; border: 1.5px solid var(--pc-paper) !important; background: rgba(20,18,16,.6) !important; color: var(--pc-paper) !important; display: grid; place-items: center; cursor: pointer; }\n.pc-viewer-nav { position: absolute; top: 50%; transform: translateY(-50%); width: 40px; height: 56px; border-radius: 20px; border: 0 !important; background: rgba(243,238,226,.18) !important; color: var(--pc-paper) !important; font-size: 26px; cursor: pointer; }\n.pc-viewer-nav.l { left: 8px; } .pc-viewer-nav.r { right: 8px; }\n.pc-viewer-n { position: absolute; bottom: 22px; left: 20px; color: var(--pc-paper); font-size: 13px; letter-spacing: .1em; }\n.pc-viewer-dl { position: absolute; bottom: 14px; right: 16px; padding: 8px 18px; border-radius: 999px; border: 1.5px solid var(--pc-paper); color: var(--pc-paper) !important; text-decoration: none; font-size: 13px; }\n\n@media (max-width: 420px) {\n    .pc-grid4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }\n    .pc-grid3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }\n    .pc-head-ticket span:not(.pc-seal) { max-width: 30vw; }\n    .pc-title { font-size: 21px; letter-spacing: 2px; }\n}\n\n/* ═════════ 智绘姬原有设置面板：换成票卡样子 ═════════ */\n#st-chatu8-settings .st-chatu8-modal-backdrop {\n    background-color: var(--pc-mist) !important;\n    background-image: radial-gradient(rgba(28, 34, 38, .22) 1px, transparent 1.5px) !important;\n    background-size: 7px 7px !important;\n}\n#st-chatu8-settings .st-chatu8-modal-content {\n    background: var(--pc-paper) !important; border: 1.5px solid var(--pc-ink) !important; border-radius: 18px !important;\n    box-shadow: var(--pc-shadow) !important; font-family: var(--pc-font); color: var(--pc-ink);\n}\n#st-chatu8-settings .st-chatu8-modal-header h2 { font-family: var(--pc-font-name); letter-spacing: 3px; color: var(--pc-ink) !important; }\n#st-chatu8-settings .st-chatu8-ai-heart-icon,\n#st-chatu8-ai-trigger { display: none !important; }\n#st-chatu8-settings .st-chatu8-nav-link { border-radius: 999px !important; border: 1.5px dashed var(--pc-dash); font-family: var(--pc-font); }\n#st-chatu8-settings .st-chatu8-nav-link.active { background: var(--pc-ink) !important; color: var(--pc-paper) !important; border-style: solid; border-color: var(--pc-ink); }\n#st-chatu8-settings .st-chatu8-settings-section {\n    background: var(--pc-paper) !important; border: 1.5px solid var(--pc-ink) !important; border-radius: 16px !important; box-shadow: var(--pc-shadow) !important;\n}\n#st-chatu8-settings .st-chatu8-settings-section h3 { font-family: var(--pc-font-name); letter-spacing: 2px; border-bottom: 1.5px dashed rgba(58, 42, 34, .45) !important; }\n#st-chatu8-settings .st-chatu8-btn, #st-chatu8-settings .st-chatu8-sidebar-btn {\n    border-radius: 999px !important; border: 1.5px solid var(--pc-ink) !important; background: var(--pc-paper) !important; color: var(--pc-ink) !important;\n    box-shadow: 0 3px 0 rgba(26, 22, 18, .2) !important; font-family: var(--pc-font);\n}\n#st-chatu8-settings .st-chatu8-text-input, #st-chatu8-settings .st-chatu8-select, #st-chatu8-settings textarea {\n    border-radius: 12px !important; border: 0 !important; background: var(--pc-paper-2) !important; color: var(--pc-ink) !important; font-family: var(--pc-font);\n}\n#st-chatu8-settings .st-chatu8-slider { background: rgba(58, 42, 34, .18) !important; }\n#st-chatu8-settings input:checked + .st-chatu8-slider { background: var(--pc-ink) !important; }\n#st-chatu8-settings .st-chatu8-slider::before { background: var(--pc-paper) !important; }\n#st-chatu8-settings input:checked + .st-chatu8-slider::before { background: var(--pc-gold) !important; }\n#st-chatu8-settings ::-webkit-scrollbar { display: none; }\n#st-chatu8-settings * { scrollbar-width: none; }\n\n/* ───────── 界面上的小票根（入口） ───────── */\n#pc-stub {\n    position: fixed; right: 0; z-index: 3000; display: flex; flex-direction: column; align-items: center; gap: 2px;\n    width: 46px; padding: 10px 4px 10px 8px; border: 1.5px solid var(--pc-ink); border-right: 0; border-radius: 12px 0 0 12px;\n    background: var(--pc-paper); color: var(--pc-ink); font-family: var(--pc-font); box-shadow: -2px 3px 0 rgba(26, 22, 18, .2);\n    touch-action: none; cursor: pointer; -webkit-tap-highlight-color: transparent;\n}\n#pc-stub::before {\n    content: \"\"; position: absolute; left: 4px; top: 8px; bottom: 8px; border-left: 1.5px dashed rgba(58, 42, 34, .45);\n}\n#pc-stub .pc-stub-label { font-size: 10px; color: var(--pc-ink-soft); writing-mode: vertical-rl; letter-spacing: 2px; }\n#pc-stub b { font-family: var(--pc-font-name); font-size: 13px; writing-mode: vertical-rl; max-height: 7.5em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: 1px; }\n#pc-stub em { font-style: normal; font-size: 10px; padding: 1px 4px; border-radius: 4px; background: var(--pc-gold); color: #fbf8f0; }\n\n/* 直接放在雾青底上的说明文字要深一点，才看得清 */\n.pc-body > .pc-hint, .pc-body > .pc-chips .pc-dim, .pc-body > .pc-dim { color: #1f2d28; }\n\n.pc-sent { background: #fbf8f0; box-shadow: inset 0 0 0 1.5px var(--pc-ink); }\n.pc-warn { margin-top: 8px; padding: 8px 10px; border-radius: 10px; background: rgba(155, 79, 69, .12); color: #7a3a32; font-size: 13px; line-height: 1.6; }\n\n/* 输入框的占位文字统一颜色（酒馆主题可能会改成别的颜色） */\n.pc-overlay input::placeholder, .pc-overlay textarea::placeholder, .pc-modal input::placeholder, .pc-modal textarea::placeholder { color: #8a7a6d !important; opacity: 1; }\n.pc-field select, .pc-field input { font-family: var(--pc-font) !important; }\n.pc-field input[data-trans=\"url\"], .pc-field input[data-trans=\"key\"], .pc-field select[data-trans=\"model\"], .pc-field input[data-trans=\"model\"] { font-family: var(--pc-font-label) !important; }\n\n/* 酒馆主题会改 textarea / input 的底色、边框和字体，这里锁住 */\n.pc-overlay textarea, .pc-overlay input:not([type=\"checkbox\"]):not([type=\"range\"]):not([type=\"file\"]), .pc-overlay select,\n.pc-sheet-backdrop textarea, .pc-sheet-backdrop input:not([type=\"checkbox\"]):not([type=\"range\"]):not([type=\"file\"]), .pc-sheet-backdrop select,\n.pc-inpaint textarea, .pc-inpaint input:not([type=\"checkbox\"]):not([type=\"range\"]):not([type=\"file\"]),\n.pc-modal textarea, .pc-modal input:not([type=\"checkbox\"]):not([type=\"range\"]):not([type=\"file\"]), .pc-modal select {\n    background: var(--pc-paper-2) !important; color: var(--pc-ink) !important; border: 0 !important; outline: none !important;\n    box-shadow: none !important; font-family: var(--pc-font) !important; -webkit-text-fill-color: var(--pc-ink);\n}\n.pc-overlay .pc-search input:not([type=\"checkbox\"]):not([type=\"range\"]):not([type=\"file\"]) { background: transparent !important; }\n.pc-overlay .pc-dhead input.pc-dtitle:not([type=\"checkbox\"]):not([type=\"range\"]):not([type=\"file\"]) { background: transparent !important; color: var(--pc-paper) !important; -webkit-text-fill-color: var(--pc-paper); font-family: var(--pc-font-name) !important; padding: 0; }\n.pc-sheet-backdrop textarea:focus { box-shadow: 0 0 0 2px var(--pc-ink) !important; }\n.pc-overlay textarea:focus, .pc-overlay input:focus, .pc-overlay select:focus,\n.pc-modal textarea:focus, .pc-modal input:focus { box-shadow: 0 0 0 2px var(--pc-ink) !important; }\n.pc-overlay .pc-sent { background: #fbf8f0 !important; box-shadow: inset 0 0 0 1.5px var(--pc-ink) !important; }\n.pc-overlay .mono, .pc-overlay textarea.mono, .pc-modal textarea.mono { font-family: var(--pc-font-label) !important; font-size: 13px; }\n.pc-sent-box { padding: 0 12px 12px; }\n.pc-sent-box summary { padding: 4px 0; }\n\n/* ───────── 生图页（新版） ───────── */\n.pc-artline { display: flex; align-items: center; gap: 10px; margin-top: 6px; padding: 10px 12px; border-radius: 14px; background: rgba(201, 138, 62, .16); }\n.pc-artline .pc-seal { width: 28px; height: 28px; }\n.pc-artcover { width: 46px; height: 46px; border-radius: 12px; object-fit: cover; object-position: top; border: 1.5px solid var(--pc-ink); flex-shrink: 0; cursor: zoom-in; }\n.pc-artline b { display: block; font-size: 15px; }\n.pc-artline small { display: block; font-size: 11px; color: var(--pc-ink-soft); }\n.pc-artline .pc-pill { min-height: 34px; padding: 0 14px; flex-shrink: 0; }\n.pc-grow { flex: 1; min-width: 0; }\n.pc-textarea.big { min-height: 180px; }\n.pc-cfg { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--pc-ink-soft); }\n.pc-overlay .pc-cfg input { width: 64px !important; margin: 0; border: 0; border-radius: 10px; padding: 7px 8px; background: var(--pc-paper-2) !important; font-family: var(--pc-font-label) !important; }\n.pc-fold { margin-top: 10px; border-radius: 16px; background: var(--pc-paper); border: 1.5px solid var(--pc-ink); box-shadow: var(--pc-shadow); }\n.pc-fold > summary { list-style: none; display: flex; align-items: center; gap: 10px; padding: 12px 16px; cursor: pointer; }\n.pc-fold > summary::-webkit-details-marker { display: none; }\n.pc-fold > summary b { font-size: 15px; white-space: nowrap; }\n.pc-fold > summary i { font-style: normal; flex: 1; min-width: 0; font-size: 12px; color: var(--pc-ink-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }\n.pc-fold > summary::after { content: \"›\"; font-size: 20px; color: var(--pc-ink-soft); transition: transform .15s; }\n.pc-fold[open] > summary::after { transform: rotate(90deg); }\n.pc-fold-in { padding: 0 16px 14px; }\n.pc-field.span4 { grid-column: span 4; }\n.pc-field.span2 { grid-column: span 2; }\n.pc-seg.three { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 6px; }\n.pc-seg.three button { font-size: 13px; padding: 0 4px; }\n.pc-keyrow { display: flex; gap: 8px; align-items: center; }\n.pc-keyrow input { flex: 1; min-width: 0; }\n.pc-keyrow .pc-pill { min-height: 38px; flex-shrink: 0; }\n.pc-warn-card { background: #f6e3cf; }\n.pc-warn-text { color: var(--pc-danger); }\n.pc-card .pc-seg { background: var(--pc-paper-2); }\n\n/* ───────── 画师库（新版） ───────── */\n.pc-toprow { display: flex; gap: 8px; align-items: center; }\n.pc-toprow .pc-search { flex: 1; margin: 0; min-width: 0; }\n.pc-vt { display: flex; flex-shrink: 0; padding: 3px; border-radius: 999px; background: var(--pc-paper); border: 1.5px solid var(--pc-ink); box-shadow: var(--pc-shadow); }\n.pc-vt button { width: 36px; height: 36px; border: 0; border-radius: 50%; background: transparent; color: var(--pc-ink); display: flex; align-items: center; justify-content: center; cursor: pointer; }\n.pc-vt button svg { width: 17px; height: 17px; }\n.pc-vt button.on { background: var(--pc-ink); color: var(--pc-paper); }\n.pc-add { flex-shrink: 0; width: 46px; height: 46px; border-radius: 50%; border: 0; background: var(--pc-ink); color: var(--pc-paper); font-size: 24px; box-shadow: var(--pc-shadow); cursor: pointer; }\n.pc-use { position: absolute; right: 8px; top: 8px; z-index: 2; width: 34px; height: 34px; border-radius: 50%; border: 1.5px solid var(--pc-ink); background: var(--pc-paper); color: var(--pc-ink); display: flex; align-items: center; justify-content: center; padding: 0; cursor: pointer; }\n.pc-use svg { width: 16px; height: 16px; }\n.pc-use.on { background: var(--pc-gold); border-color: var(--pc-gold); color: #fff; }\n.pc-li .pc-use, .pc-dhead .pc-use { position: static; flex-shrink: 0; }\n.pc-dhead .pc-use { width: 44px; height: 44px; }\n.pc-tip { font-size: 11px; color: var(--pc-paper); opacity: .9; margin-top: 6px; }\n.pc-center { text-align: center; }\n.pc-pill.tiny { min-height: 30px; padding: 0 12px; font-size: 12px; }\n.pc-pill.danger { color: var(--pc-danger); border-color: var(--pc-danger); }\n.pc-ticket .pc-ticket-img { height: 150px; }\n.pc-ticket-text small { -webkit-line-clamp: 1; }\n.pc-li { position: relative; margin-top: 12px; padding: 12px 14px; background: var(--pc-paper); border: 1.5px solid var(--pc-ink); border-radius: 16px; box-shadow: var(--pc-shadow); }\n.pc-li.active { box-shadow: 0 0 0 3px var(--pc-gold), var(--pc-shadow); }\n.pc-li-name { border: 0; background: none; padding: 0; font-family: var(--pc-font-name); font-weight: 700; font-size: 17px; color: var(--pc-ink); cursor: pointer; text-align: left; }\n.pc-li-str { font-size: 12px; color: var(--pc-ink-soft); margin-top: 2px; word-break: break-all; }\n.pc-li-imgs { display: flex; gap: 6px; margin-top: 10px; overflow-x: auto; scrollbar-width: none; }\n.pc-li-imgs::-webkit-scrollbar { display: none; }\n.pc-li-imgs img { width: 64px; height: 88px; object-fit: cover; border-radius: 10px; flex-shrink: 0; cursor: pointer; }\n.pc-textarea.tiny { min-height: 40px; font-size: 13px; padding: 8px 10px; margin-top: 8px; }\n.pc-sheet-img { width: 86px; height: 120px; object-fit: cover; border-radius: 12px; flex-shrink: 0; }\n.pc-sheet-img.add { border: 1.5px dashed var(--pc-dash); background: transparent; font-family: var(--pc-font); font-size: 12px; color: var(--pc-ink); cursor: pointer; }\n.pc-gallery { display: flex; gap: 10px; overflow-x: auto; margin-top: 12px; scrollbar-width: none; }\n.pc-gallery::-webkit-scrollbar { display: none; }\n.pc-gal-item { position: relative; flex-shrink: 0; }\n.pc-gal-item .pc-thumb { width: 150px; height: 220px; border-radius: 14px; }\n.pc-gal-add { flex-shrink: 0; width: 110px; height: 220px; border-radius: 14px; border: 1.5px dashed var(--pc-paper); background: rgba(244, 239, 228, .55); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; font-family: var(--pc-font); font-size: 13px; color: var(--pc-ink); cursor: pointer; }\n.pc-gal-add b { font-size: 26px; font-weight: 400; }\n.pc-tplrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; font-size: 12px; color: var(--pc-paper); }\n.pc-tplrow .pc-pill { min-height: 30px; padding: 0 12px; font-size: 12px; }\n.pc-dhead { display: flex; align-items: center; gap: 10px; }\n.pc-round { width: 40px; height: 40px; flex-shrink: 0; border-radius: 50%; border: 1.5px solid var(--pc-ink); background: var(--pc-paper); color: var(--pc-ink); font-size: 20px; display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; }\n.pc-round.dashed { border-style: dashed; border-color: var(--pc-dash); background: transparent; }\n.pc-round svg { width: 17px; height: 17px; }\n.pc-dtitle { flex: 1; min-width: 0; margin: 0; font-family: var(--pc-font-name); font-weight: 700; font-size: 22px; letter-spacing: 2px; color: var(--pc-paper); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n.pc-overlay input.pc-dtitle { background: transparent !important; color: var(--pc-paper) !important; border: 0 !important; padding: 0; font-family: var(--pc-font-name) !important; }\n.pc-strrow { display: flex; gap: 8px; align-items: flex-start; }\n.pc-strrow p { flex: 1; margin: 6px 0 0; }\n.pc-block { display: block; }\n.pc-mem { display: flex; align-items: center; gap: 10px; padding: 10px 0; }\n.pc-mem + .pc-mem { border-top: 1.5px dashed rgba(58, 42, 34, .16); }\n.pc-mem-av { width: 44px; height: 44px; flex-shrink: 0; border-radius: 12px; overflow: hidden; border: 0; padding: 0; background: #cdbfa8; cursor: pointer; }\n.pc-mem-av img { width: 100%; height: 100%; object-fit: cover; }\n.pc-mem-name { flex: 1; min-width: 0; border: 0; background: none; padding: 0; text-align: left; color: var(--pc-ink); cursor: pointer; }\n.pc-mem-name b { display: block; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n.pc-mem-name small { font-size: 11px; color: var(--pc-ink-soft); }\n.pc-icon-btn.on { background: var(--pc-ink); color: var(--pc-paper); }\n.pc-icon-btn svg { width: 18px; height: 18px; }\n.pc-gal-item .pc-thumb-del { right: 6px; top: 6px; }\n.pc-kind { position: absolute; left: 8px; top: 8px; z-index: 2; font-size: 11px; padding: 2px 9px; border-radius: 999px; background: rgba(244, 239, 228, .92); }\n.pc-use.dark.on { background: var(--pc-ink); border-color: var(--pc-ink); }\n.pc-use.static { position: static; }\n.pc-meta { font-size: 11px; color: var(--pc-ink-soft); margin-top: 2px; }\n.pc-pill.blocked { text-decoration: line-through; color: var(--pc-danger); border: 1.5px dashed var(--pc-danger); background: rgba(244, 239, 228, .7); }\n.pc-sort { display: flex; gap: 16px; margin-top: 10px; }\n.pc-sort button { border: 0; background: none; padding: 0; font-family: var(--pc-font); font-size: 13px; color: var(--pc-paper); opacity: .75; cursor: pointer; }\n.pc-sort button.on { opacity: 1; font-weight: 700; }\n.pc-sort button:last-child { margin-left: auto; }\n\n/* ───────── 角色 ───────── */\n.pc-grouplbl { font-size: 12px; font-weight: 700; color: var(--pc-ink-soft); margin-top: 12px; }\n.pc-who { display: flex; align-items: center; gap: 10px; padding: 8px 0; }\n.pc-who + .pc-who { border-top: 1.5px dashed rgba(58, 42, 34, .16); }\n.pc-who-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; border: 0; background: none; padding: 0; text-align: left; color: var(--pc-ink); font-family: var(--pc-font); cursor: pointer; }\n.pc-who-main b { display: block; font-size: 15px; }\n.pc-who-main small { display: block; font-size: 12px; color: var(--pc-ink-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n.pc-av { width: 46px; height: 46px; flex-shrink: 0; border-radius: 50%; overflow: hidden; background: #cdbfa8; display: inline-block; }\n.pc-av img { width: 100%; height: 100%; object-fit: cover; }\n.pc-av.big { width: 56px; height: 56px; border: 1.5px solid var(--pc-ink); }\n.pc-badge-s { font-style: normal; font-weight: 400; font-size: 11px; padding: 1px 8px; margin-left: 6px; border-radius: 999px; background: rgba(201, 138, 62, .22); }\n.pc-switch.only { min-height: 0; gap: 0; flex-shrink: 0; }\n.pc-state { display: inline-block; margin-top: 4px; font-size: 11px; padding: 2px 9px; border-radius: 999px; background: rgba(58, 42, 34, .08); color: var(--pc-ink-soft); font-style: normal; }\n.pc-state.todo { background: rgba(201, 138, 62, .24); color: #7a4a1a; }\n.pc-pairs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }\n.pc-pair { display: inline-flex; align-items: center; border-radius: 999px; background: var(--pc-paper-2); }\n.pc-pair button { border: 0; background: none; color: var(--pc-ink); cursor: pointer; font-family: var(--pc-font); }\n.pc-pair button:first-child { padding: 6px 4px 6px 12px; font-size: 13px; }\n.pc-pair em { font-style: normal; font-size: 11px; color: var(--pc-ink-soft); margin-left: 6px; }\n.pc-pair-x { width: 26px; height: 26px; font-size: 14px; color: var(--pc-ink-soft) !important; }\n.pc-addrow { display: flex; gap: 8px; margin-top: 10px; }\n.pc-overlay .pc-addrow input { flex: 1; min-width: 0; border: 0 !important; border-radius: 999px; padding: 9px 14px; background: var(--pc-paper-2) !important; font-size: 14px; }\n.pc-addrow .pc-btn { flex: 0 0 auto; min-height: 40px; padding: 0 18px; }\n.pc-chat-img { max-width: 100%; border-radius: 10px; }\n.pc-mes-gen { cursor: pointer; }\n\n/* ───────── 氛围 ───────── */\n.pc-big { font-family: var(--pc-font-name); font-size: 17px; }\n.pc-mosaic4 { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 75px 75px; gap: 2px; border-radius: 14.5px 14.5px 0 0; overflow: hidden; background: #cdbfa8; -webkit-mask-image: linear-gradient(#000 78%, transparent); mask-image: linear-gradient(#000 78%, transparent); }\n.pc-mosaic4 i { display: block; background: rgba(58, 42, 34, .12); }\n.pc-mosaic4 img { width: 100%; height: 100%; object-fit: cover; display: block; }\n.pc-vrow { display: flex; gap: 12px; align-items: center; padding: 10px 0; }\n.pc-vrow + .pc-vrow { border-top: 1.5px dashed rgba(58, 42, 34, .16); }\n.pc-vthumb { width: 56px; height: 56px; flex-shrink: 0; border-radius: 12px; overflow: hidden; background: #cdbfa8; }\n.pc-vthumb img { width: 100%; height: 100%; object-fit: cover; }\n.pc-slider input[type=range] { accent-color: var(--pc-gold); }\n.pc-prog { height: 12px; border-radius: 999px; background: var(--pc-paper-2); overflow: hidden; margin-top: 10px; }\n.pc-prog i { display: block; height: 100%; background: var(--pc-gold); border-radius: 999px; transition: width .3s; }\n.pc-bcell { position: relative; border-radius: 12px; overflow: hidden; background: var(--pc-paper); border: 1.5px solid var(--pc-ink); cursor: default; }\n.pc-bcell.done { cursor: pointer; }\n.pc-bcell img, .pc-bcell > span { display: flex; width: 100%; height: 130px; object-fit: cover; align-items: center; justify-content: center; font-size: 12px; color: var(--pc-ink-soft); }\n.pc-bcell.run > span { background: var(--pc-paper-2); }\n.pc-bcell.error > span { color: var(--pc-danger); }\n.pc-bcell b { display: block; font-size: 11px; padding: 5px 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n.pc-bpick { position: absolute; right: 6px; top: 6px; width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid #fff; background: rgba(0, 0, 0, .18); color: #fff; font-style: normal; font-size: 13px; display: flex; align-items: center; justify-content: center; }\n.pc-bcell.on { box-shadow: 0 0 0 3px var(--pc-gold); }\n.pc-bcell.on .pc-bpick { background: var(--pc-gold); border-color: var(--pc-gold); }\n.pc-overlay input[type=\"range\"], .pc-sheet-backdrop input[type=\"range\"] { background: transparent !important; border: 0 !important; box-shadow: none !important; accent-color: var(--pc-gold); }\n\n/* ───────── 局部重绘 ───────── */\n.pc-inpaint { z-index: 30050; }\n.pc-ip { width: min(560px, 94vw); max-height: 94vh; overflow-y: auto; scrollbar-width: none; background: var(--pc-paper); border: 1.5px solid var(--pc-ink); border-radius: 20px; padding: 16px; color: var(--pc-ink); font-family: var(--pc-font); }\n.pc-ip::-webkit-scrollbar { display: none; }\n.pc-ip-stage { position: relative; margin-top: 10px; border-radius: 12px; overflow: hidden; background: #cdbfa8; }\n.pc-ip-stage canvas { display: block; width: 100%; height: auto; }\n.pc-ip-mask { position: absolute; inset: 0; touch-action: none; cursor: crosshair; }\n.pc-ip-tools { display: flex; align-items: center; gap: 10px; margin-top: 10px; }\n.pc-inpaint { align-items: center; justify-content: center; }\n.pc-overlay select.pc-mini-select { width: auto !important; padding: 4px 10px !important; border-radius: 999px; font-size: 12px !important; margin: 0; }\n\n.pc-inpaint input[type=\"range\"] { background: transparent !important; border: 0 !important; accent-color: var(--pc-gold); }\n.pc-ip * { box-sizing: border-box; }\n\n/* 例图按构图显示：头像 1:1、胸像 3:4、立绘 9:16 */\n.pc-gal-item.shot-head .pc-thumb { width: 160px; height: 160px; }\n.pc-gal-item.shot-bust .pc-thumb { width: 150px; height: 200px; }\n.pc-gal-item.shot-full .pc-thumb { width: 124px; height: 220px; }\n.pc-gallery { align-items: flex-end; }\n.pc-shot { position: absolute; left: 6px; bottom: 6px; font-size: 11px; padding: 1px 8px; border-radius: 999px; background: rgba(244, 239, 228, .92); color: var(--pc-ink); }\n.pc-gal-item .pc-tag-mini { display: none; }\n.pc-sample-box .pc-chips { margin-top: 6px; }\n.pc-overlay .pc-use, .pc-sheet-backdrop .pc-use { background: var(--pc-paper) !important; border: 1.5px solid var(--pc-ink) !important; color: var(--pc-ink) !important; opacity: 1 !important; box-shadow: none !important; }\n.pc-overlay .pc-use.on { background: var(--pc-gold) !important; border-color: var(--pc-gold) !important; color: #fff !important; }\n.pc-overlay .pc-use.dark.on { background: var(--pc-ink) !important; border-color: var(--pc-ink) !important; }\n.pc-overlay .pc-use svg { display: block !important; width: 16px !important; height: 16px !important; stroke: currentColor !important; fill: none !important; }\n.pc-overlay .pc-dtitle { font-size: 22px !important; }\n/* 批量结果按构图显示 */\n.pc-bgrid { align-items: start; }\n.pc-bcell img, .pc-bcell > span { height: auto !important; aspect-ratio: 3 / 4; }\n.pc-bcell.shot-head img, .pc-bcell.shot-head > span { aspect-ratio: 1 / 1; }\n.pc-bcell.shot-full img, .pc-bcell.shot-full > span { aspect-ratio: 9 / 16; }\n\n/* ───────── 画师黑名单 ───────── */\nmark.pc-ban { background: rgba(155, 79, 69, .18); color: var(--pc-danger); font-weight: 700; border-radius: 4px; padding: 0 2px; text-decoration: line-through; text-decoration-thickness: 1px; }\n.pc-banwarn { margin-top: 6px; padding: 8px 12px; border-radius: 12px; background: rgba(155, 79, 69, .14); color: var(--pc-danger); font-size: 13px; }\n.pc-banwarn b { font-family: var(--pc-font-label); }\n.pc-ticket.banned { box-shadow: 0 0 0 3px var(--pc-danger), var(--pc-shadow); }\n.pc-banbadge { position: absolute; left: 8px; top: 8px; z-index: 2; font-size: 11px; padding: 2px 9px; border-radius: 999px; background: var(--pc-danger); color: #fbf8f0; }\n.pc-mem.banned .pc-mem-name b, .pc-mem.banned .pc-mem-name small { color: var(--pc-danger); }\n.pc-mem.banned .pc-mem-name b { text-decoration: line-through; }\n.pc-ban-card { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: #f3dcd6; color: var(--pc-danger); }\n.pc-ban-card .pc-pill { margin-left: auto; }\n.pc-banrow { display: flex; align-items: center; gap: 8px; padding: 8px 0; }\n.pc-banrow + .pc-banrow { border-top: 1.5px dashed rgba(58, 42, 34, .16); }\n.pc-banrow b { color: var(--pc-danger); font-size: 13px; }\n.pc-banrow-note { flex: 1; min-width: 0; text-align: left; border: 0; background: none; padding: 0; font-family: var(--pc-font); font-size: 12px; color: var(--pc-ink-soft); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n/* 多选 */\n.pc-selbar { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; padding: 8px 12px; border-radius: 14px; background: var(--pc-paper); border: 1.5px solid var(--pc-ink); box-shadow: var(--pc-shadow); font-size: 13px; }\n.pc-selbar span { margin-right: auto; font-weight: 700; }\n.pc-selbar .pc-pill[disabled] { opacity: .45; }\n.pc-pill.danger-solid { background: var(--pc-danger); border-color: var(--pc-danger); color: #fbf8f0; }\n.pc-selbox { position: absolute; right: 8px; top: 8px; z-index: 3; width: 30px; height: 30px; border-radius: 50%; border: 2px solid #fff; background: rgba(0, 0, 0, .22); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 15px; }\n.pc-selbox.on { background: var(--pc-gold); border-color: var(--pc-gold); }\n.pc-selbox.static { position: static; flex-shrink: 0; margin-right: 8px; border-color: var(--pc-ink); background: transparent; color: #fff; cursor: pointer; }\n.pc-selbox.static.on { background: var(--pc-gold); border-color: var(--pc-gold); }\n.pc-btn.danger { color: var(--pc-danger); border-color: var(--pc-danger); }\n.pc-ticket-img img.pc-blur { filter: blur(14px) saturate(.8); transform: scale(1.1); }\n.pc-nsfw-cover { position: absolute; left: 50%; top: 60px; transform: translateX(-50%); font-style: normal; font-family: var(--pc-font-label); font-size: 12px; padding: 2px 10px; border-radius: 999px; background: var(--pc-danger); color: #fbf8f0; }\n.pc-ticket-img { position: relative; }\n.pc-pagetitle { margin: 2px 4px 0; font-family: var(--pc-font-name); font-size: 22px; letter-spacing: 3px; color: var(--pc-paper); }\n.pc-linkdanger { border: 0; background: none; color: var(--pc-danger); font-family: var(--pc-font); font-size: 13px; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; margin-left: auto; }\n.pc-sp-shots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 6px; }\n.pc-sp-shots button { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px 4px 10px; border: 1.5px solid var(--pc-ink); border-radius: 14px; background: var(--pc-paper); color: var(--pc-ink); font-family: var(--pc-font); font-size: 14px; cursor: pointer; }\n.pc-sp-shots button i { display: block; border-radius: 4px; background: #cdbfa8; }\n.pc-sp-shots button small { font-size: 11px; color: var(--pc-ink-soft); }\n.pc-sp-shots button.on { background: var(--pc-ink); color: var(--pc-paper); }\n.pc-sp-shots button.on i { background: var(--pc-gold); }\n.pc-sp-shots button.on small { color: rgba(244, 239, 228, .7); }\n.pc-sp-back { z-index: 30020; }\n\n/* ───────── 反馈动作 ───────── */\n.pc-btn, .pc-ticket, .pc-gal-add, .pc-add, .pc-round, .pc-li, .pc-pill, .pc-use, .pc-icon-btn, .pc-vt button, .pc-seg button, .pc-sp-shots button, .pc-who-main, .pc-mem-name {\n    transition: transform .12s ease, box-shadow .12s ease, background-color .18s, color .18s; -webkit-tap-highlight-color: transparent;\n}\n.pc-btn:active:not([disabled]), .pc-ticket:active, .pc-gal-add:active, .pc-add:active, .pc-round:active, .pc-li:active { transform: translateY(3px); box-shadow: 0 1px 0 rgba(26, 22, 18, .22); }\n.pc-pill:active, .pc-use:active, .pc-icon-btn:active, .pc-vt button:active, .pc-seg button:active, .pc-sp-shots button:active, .pc-pair button:active { transform: scale(.92); }\n.pc-btn[disabled] { opacity: .55; }\n@keyframes pc-stamp { 0% { transform: scale(1.9) rotate(-14deg); opacity: 0; } 60% { transform: scale(.88) rotate(3deg); opacity: 1; } 100% { transform: scale(1) rotate(0); } }\n.pc-overlay .pc-use.stamp { animation: pc-stamp .36s cubic-bezier(.3, 1.4, .5, 1); }\n/* 导航：深色底块滑动 */\n.pc-nav { position: relative; }\n.pc-nav-ind { position: absolute; top: 0; bottom: 0; left: 0; width: 0; border-radius: 999px; background: var(--pc-ink); transition: left .3s cubic-bezier(.3, 1.25, .45, 1), width .3s, opacity .2s; z-index: 0; pointer-events: none; }\n.pc-nav .pc-pill { position: relative; z-index: 1; }\n.pc-nav .pc-pill.on { background: transparent !important; border-color: var(--pc-ink); }\n/* 换页 */\n.pc-page.from-right { animation: pc-in-r .26s cubic-bezier(.2, .8, .3, 1) both; }\n.pc-page.from-left { animation: pc-in-l .26s cubic-bezier(.2, .8, .3, 1) both; }\n.pc-page.push { animation: pc-push .3s cubic-bezier(.2, .8, .3, 1) both; }\n.pc-page.pop { animation: pc-pop .26s cubic-bezier(.2, .8, .3, 1) both; }\n@keyframes pc-in-r { from { opacity: 0; transform: translateX(26px); } }\n@keyframes pc-in-l { from { opacity: 0; transform: translateX(-26px); } }\n@keyframes pc-push { from { opacity: 0; transform: translateX(60px) scale(.98); } }\n@keyframes pc-pop { from { opacity: 0; transform: translateX(-40px); } }\n.pc-body { overflow-x: hidden; }\n/* 底部面板滑上来 */\n.pc-sheet-backdrop.fresh .pc-sheet { animation: pc-sheet-up .28s cubic-bezier(.2, .9, .3, 1); }\n@keyframes pc-sheet-up { from { transform: translateY(40%); opacity: .4; } }\n.pc-modal { animation: pc-pop-in .22s cubic-bezier(.3, 1.3, .5, 1); }\n@keyframes pc-pop-in { from { transform: scale(.94); opacity: 0; } }\n/* 生成中：点点会动 */\n.pc-busy::after { content: ''; display: inline-block; width: 1.2em; text-align: left; animation: pc-dots 1s steps(1) infinite; }\n@keyframes pc-dots { 0% { content: '·'; } 33% { content: '··'; } 66% { content: '···'; } }\n.pc-gal-add[disabled] { background: linear-gradient(90deg, rgba(244, 239, 228, .45) 0, rgba(255, 255, 255, .85) 50%, rgba(244, 239, 228, .45) 100%); background-size: 300px 100%; animation: pc-shimmer 1.1s linear infinite; }\n@keyframes pc-shimmer { from { background-position: -150px 0; } to { background-position: 150px 0; } }\n@media (prefers-reduced-motion: reduce) { .pc-page, .pc-sheet, .pc-modal, .pc-use.stamp { animation: none !important; } }\n.pc-outmake { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }\n.pc-outmake .pc-btn { flex: 1 1 auto; min-height: 40px; font-size: 14px; }\n.pc-outbox { margin-top: 12px; padding: 12px; border-radius: 14px; background: rgba(201, 138, 62, .1); }\n.pc-outimg { display: block; width: 60%; margin: 10px auto 0; border-radius: 12px; border: 1.5px solid var(--pc-ink); cursor: zoom-in; }\n.pc-od-back { z-index: 30030; }\n.pc-odres { margin-top: 12px; padding: 12px; border-radius: 14px; background: rgba(201, 138, 62, .1); }\n.pc-odres .pc-actions .pc-btn { min-height: 38px; font-size: 13px; }\n.pc-subtitle { font-size: 11px; color: var(--pc-ink-soft); letter-spacing: 1px; margin-top: 2px; }\n/* 衣柜 */\n.pc-outhero { position: relative; margin-top: 12px; height: 320px; border-radius: 16px; overflow: hidden; background: #cdbfa8; border: 1.5px solid var(--pc-ink); display: flex; align-items: center; justify-content: center; color: var(--pc-ink-soft); font-size: 13px; }\n.pc-outhero img { width: 100%; height: 100%; object-fit: contain; background: #f6f1e6; cursor: zoom-in; }\n.pc-outhero-btn { position: absolute; right: 10px; bottom: 10px; font-size: 12px; padding: 4px 12px; border-radius: 999px; background: rgba(244, 239, 228, .94); color: var(--pc-ink); cursor: pointer; }\n.pc-outhero-busy { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(28, 34, 38, .45); color: #fff; font-style: normal; font-size: 15px; }\n.pc-outmake label.pc-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }\n.pc-btn.wide { width: 100%; }\n";
+    style.textContent += `
+.pc-li-str.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.pc-strtoggle { display: inline-block; margin: 6px 0 2px; padding: 3px 12px; border: 1.5px dashed var(--pc-dash); border-radius: 999px; background: transparent; color: var(--pc-ink-soft); font: 12px var(--pc-font); cursor: pointer; }
+.pc-addrow { align-items: flex-end; }
+.pc-addrow textarea { flex: 1; min-width: 0; border: 0; border-radius: 20px; padding: 9px 14px; background: var(--pc-paper-2); color: var(--pc-ink); font: 14px/1.5 var(--pc-font); resize: none; min-height: 40px; max-height: 160px; field-sizing: content; outline: none; box-sizing: border-box; }
+.pc-addrow textarea:focus { box-shadow: 0 0 0 2px var(--pc-ink); }
+.pc-share-pick { display: inline-flex; align-items: center; margin-top: 6px; cursor: pointer; }
+[data-share-meta]:empty { display: none; }
+.pc-outsec { margin-top: 12px; padding: 12px; border-radius: 14px; background: rgba(255, 255, 255, .45); }
+.pc-outsec-h { display: flex; align-items: baseline; gap: 8px; }
+.pc-outsec-h small { color: var(--pc-ink-soft); font-size: 12px; }
+.pc-outsec .pc-pairs { margin-top: 6px; }
+`;
     DOC.head.appendChild(style);
     cleanups.push(() => style.remove());
 }

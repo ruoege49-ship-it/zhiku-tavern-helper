@@ -1,0 +1,714 @@
+说明：每块 @@@ OLD 到 @@@ NEW 是脚本里的原文（必须唯一），@@@ NEW 到 @@@ END 是换成的内容。
+
+═══ 1. 拼提示词：加「固定提示词」，质量词 / 固定提示词里和正面重复的词不再发两遍 ═══
+@@@ OLD
+function composeStudio({ pos = '', neg = '' }, s = N.settings()) {
+    const { aqt, ucp } = extras(s);
+    const fur = String(s.addFurryDataset) === 'true' ? 'fur dataset' : '';
+    let negative = joinTags([ucp, neg]);
+    const tags = negative.split(',').map(t => t.trim()).filter(Boolean);
+    if (tags.some(t => t.toLowerCase() === 'nsfw')) negative = ['nsfw', ...tags.filter(t => t.toLowerCase() !== 'nsfw')].join(', ');
+    return { positive: joinTags([fur, pos, aqt]), negative, aqt, ucp };
+}
+@@@ NEW
+/** 去掉 text 里已经在前面出现过的词（不看权重），质量词、固定提示词不会和正面重复 */
+function dropRepeats(text, ...before) {
+    const seen = new Set(M.tokenize(before.filter(Boolean).join(', ')).map(t => t.text.toLowerCase()));
+    return M.tokenize(text).filter(t => { const k = t.text.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; })
+        .map(t => t.raw || (Math.abs(t.weight - 1) < 0.001 ? t.text : `${M.fmtWeight(t.weight)}::${t.text}::`)).join(', ');
+}
+/**
+ * 正面 = 正面提示词 + 固定提示词 + 质量词（后两个去掉和前面重复的）
+ * 负面 = 负面预设 + 负面提示词
+ */
+function composeStudio({ pos = '', neg = '', scene = '' }, s = N.settings()) {
+    const { aqt, ucp } = extras(s);
+    const fur = String(s.addFurryDataset) === 'true' ? 'fur dataset' : '';
+    let negative = joinTags([ucp, neg]);
+    const tags = negative.split(',').map(t => t.trim()).filter(Boolean);
+    if (tags.some(t => t.toLowerCase() === 'nsfw')) negative = ['nsfw', ...tags.filter(t => t.toLowerCase() !== 'nsfw')].join(', ');
+    const sc = dropRepeats(scene, pos);
+    return { positive: joinTags([fur, pos, sc, dropRepeats(aqt, pos, sc)]), negative, aqt, ucp };
+}
+@@@ END
+
+═══ 2. 角色参考只认角色页里绑定的，不再有全局「在用的那组」 ═══
+@@@ OLD
+/** groupIds 不填就用角色参考页选中的那组 */
+async function charRefs(groupIds) {
+    const d = getData();
+    const groups = (groupIds || [d.charRefActive]).map(id => d.charRefGroups?.[id]).filter(g => g?.refs?.length);
+@@@ NEW
+/** groupIds：角色页里给出场角色绑定的组；不给就不用角色参考 */
+async function charRefs(groupIds) {
+    const d = getData();
+    const groups = (groupIds || []).map(id => d.charRefGroups?.[id]).filter(g => g?.refs?.length);
+@@@ END
+
+@@@ OLD
+    // 角色绑了角色参考组的，用这些角色的；都没绑就用角色参考页选中的
+    const bound = [...new Set(picks.map(p => p.char.charRef).filter(id => id && getData().charRefGroups?.[id]))];
+    const director = await E.charRefs(bound.length ? bound : undefined);
+@@@ NEW
+    // 只用出场角色在角色页里绑的角色参考
+    const bound = [...new Set(picks.map(p => p.char.charRef).filter(id => id && getData().charRefGroups?.[id]))];
+    const director = bound.length ? await E.charRefs(bound) : null;
+@@@ END
+
+═══ 3. 生图台状态 ═══
+@@@ OLD
+    studio: { loaded: false, pos: '', neg: '', lastExtra: '', prompt: '', promptEn: '', transErr: '', expand: true, busy: false, result: null, sent: null, open: {} },
+@@@ NEW
+    strOpen: {},
+    studio: { loaded: false, pos: '', neg: '', lastExtra: '', prompt: '', promptEn: '', transErr: '', expand: true, scene: '', sceneOn: true, sceneEn: '', sceneSrc: '', sceneExpand: false, sceneBusy: false, busy: false, result: null, sent: null, open: {} },
+@@@ END
+
+@@@ OLD
+    st.lastNeg = saved.lastNeg || '';
+    st.loaded = true;
+}
+function saveStudio() {
+    const d = getData();
+    d.studio = { pos: ui.studio.pos, neg: ui.studio.neg, lastExtra: ui.studio.lastExtra, lastNeg: ui.studio.lastNeg || '' };
+@@@ NEW
+    st.lastNeg = saved.lastNeg || '';
+    st.scene = saved.scene || '';
+    st.sceneOn = saved.sceneOn !== false;
+    st.sceneEn = saved.sceneEn || '';
+    st.sceneSrc = saved.sceneSrc || '';
+    st.sceneExpand = !!saved.sceneExpand;
+    st.loaded = true;
+}
+function saveStudio() {
+    const d = getData();
+    const st = ui.studio;
+    d.studio = { pos: st.pos, neg: st.neg, lastExtra: st.lastExtra, lastNeg: st.lastNeg || '', scene: st.scene || '', sceneOn: st.sceneOn !== false, sceneEn: st.sceneEn || '', sceneSrc: st.sceneSrc || '', sceneExpand: !!st.sceneExpand };
+@@@ END
+
+@@@ OLD
+function studioParts() { return { pos: ui.studio.pos, neg: ui.studio.neg }; }
+function previewHtml(s) {
+    const c = E.composeStudio(studioParts(), s);
+    return { pos: esc(c.positive), neg: esc(c.negative), aqt: c.aqt, ucp: c.ucp };
+}
+@@@ NEW
+/** 固定提示词：有中文的先让 AI 转成标签，转过一次就记住，中文改了才重新转 */
+function sceneZh() { return T.hasChinese(ui.studio.scene || ''); }
+function sceneReady() { const st = ui.studio; return !sceneZh() || !!(String(st.sceneEn || '').trim() && st.sceneSrc === String(st.scene || '').trim()); }
+function sceneStateText() { return sceneReady() ? '有中文，实际发的是下面 AI 转好的英文标签。' : ui.studio.sceneEn ? '中文改过了：生成时会先用 AI 重新转成标签。' : '有中文，NovelAI 看不懂：生成时会先用 AI 转成标签，转一次就记住。'; }
+function sceneTags() {
+    const st = ui.studio;
+    if (st.sceneOn === false || !String(st.scene || '').trim()) return '';
+    if (!sceneZh()) return st.scene;
+    return sceneReady() ? st.sceneEn : '';
+}
+async function translateScene() {
+    const st = ui.studio;
+    st.sceneBusy = true; render();
+    try {
+        st.sceneEn = await T.translateToTags(st.scene, { expand: !!st.sceneExpand });
+        st.sceneSrc = String(st.scene || '').trim();
+        saveStudio();
+    } finally { st.sceneBusy = false; }
+}
+function studioParts() { return { pos: ui.studio.pos, neg: ui.studio.neg, scene: sceneTags() }; }
+function previewHtml(s) {
+    const c = E.composeStudio(studioParts(), s);
+    const wait = ui.studio.sceneOn !== false && String(ui.studio.scene || '').trim() && !sceneReady();
+    return { pos: esc(c.positive) + (wait ? '<br><i class="pc-dim">＋ 固定提示词（有中文，生成时先转成标签，放在质量词前面）</i>' : ''), neg: esc(c.negative), aqt: c.aqt, ucp: c.ucp };
+}
+@@@ END
+
+═══ 4. 「用中文写，让 AI 转成标签」→「固定提示词」：单独存，每次跟着发，不插进正面 ═══
+@@@ OLD
+    ${fold('ai', '用中文写，让 AI 转成标签', '写好后插进正面', `
+      <div class="pc-row-between"><span class="pc-dim small">用哪个 AI</span></div>${apiChips(true)}
+      <textarea id="pc-prompt" class="pc-textarea small" data-bind="studio.prompt" placeholder="比如：男的，坐在窗边喝咖啡，外面下雨">${esc(st.prompt)}</textarea>
+      <label class="pc-switch"><input type="checkbox" data-bind-check="studio.expand" ${st.expand ? 'checked' : ''}><span></span>让 AI 补全细节<small>外貌、衣服、动作、场景、光线、构图都写全。关掉就只翻译你写的。</small></label>
+      <button class="pc-btn" data-act="translatenow">转成标签</button>
+      ${st.transErr ? `<div class="pc-warn">${esc(st.transErr)}</div>` : ''}
+      ${st.promptEn ? `<label class="pc-label">AI 写的（可以先改）</label>
+      <textarea class="pc-textarea small mono" data-bind="studio.promptEn">${esc(st.promptEn)}</textarea>
+      <div class="pc-actions wrap"><button class="pc-btn dark" data-act="insertai">插进正面</button><button class="pc-btn" data-act="replaceai">替换正面（保留画师）</button></div>` : ''}`)}
+@@@ NEW
+    ${fold('scene', '固定提示词', st.sceneOn === false ? '不发送' : !String(st.scene || '').trim() ? '跟着发送 · 还没写' : !sceneReady() ? '跟着发送 · 生成时转成标签' : `跟着发送 · ${M.tokenize(sceneTags()).length} 个词`, `
+      <label class="pc-switch"><input type="checkbox" data-scene-on ${st.sceneOn !== false ? 'checked' : ''}><span></span>每次生成都带上<small>接在正面提示词后面、质量词前面一起发。不改你的正面提示词，也不进画师串。</small></label>
+      <textarea id="pc-scene" class="pc-textarea small" data-bind="studio.scene" placeholder="中文英文都行。比如：坐在窗边喝咖啡，外面下雨 / 1boy, sitting, window, rain">${esc(st.scene || '')}</textarea>
+      <div id="pc-scene-ai" ${sceneZh() ? '' : 'hidden'}>
+        <div class="pc-dim small pc-mt-s" id="pc-scene-state">${sceneStateText()}</div>
+        <div class="pc-row-between pc-mt-s"><span class="pc-dim small">用哪个 AI 转</span></div>${apiChips(true)}
+        <label class="pc-switch"><input type="checkbox" data-bind-check="studio.sceneExpand" ${st.sceneExpand ? 'checked' : ''}><span></span>让 AI 补全细节<small>外貌、衣服、动作、场景、光线、构图都写全。关掉就只翻译你写的。</small></label>
+        <button class="pc-btn" data-act="scenetrans" ${st.sceneBusy ? 'disabled' : ''}>${st.sceneBusy ? '<span class="pc-busy">转换中</span>' : sceneReady() ? '重新转换' : '现在转换'}</button>
+        ${st.sceneEn ? `<label class="pc-label">AI 转好的（实际发这段，可以直接改）</label>
+        <textarea class="pc-textarea small mono" data-bind="studio.sceneEn">${esc(st.sceneEn)}</textarea>` : ''}
+      </div>`)}
+@@@ END
+
+@@@ OLD
+    ${fold('preview', '将会发送的内容', '正面 + 质量词，负面预设 + 负面', `
+@@@ NEW
+    ${fold('preview', '将会发送的内容', '正面 + 固定提示词 + 质量词，负面预设 + 负面', `
+@@@ END
+
+@@@ OLD
+        if (el.dataset.bind === 'studio.pos' || el.dataset.bind === 'studio.neg') { updateStudioPreview(); clearTimeout(onInput.ss); onInput.ss = setTimeout(saveStudio, 600); }
+@@@ NEW
+        if (['studio.pos', 'studio.neg', 'studio.scene', 'studio.sceneEn'].includes(el.dataset.bind)) { updateStudioPreview(); clearTimeout(onInput.ss); onInput.ss = setTimeout(saveStudio, 600); }
+        if (el.dataset.bind === 'studio.scene') { const box = root.querySelector('#pc-scene-ai'); if (box) box.hidden = !sceneZh(); const s2 = root.querySelector('#pc-scene-state'); if (s2) s2.textContent = sceneStateText(); }
+@@@ END
+
+@@@ OLD
+async function onChangeEv(ev) {
+    const el = ev.target;
+    const d = getData();
+@@@ NEW
+async function onChangeEv(ev) {
+    const el = ev.target;
+    const d = getData();
+    if (el.dataset.sceneOn !== undefined) { ui.studio.sceneOn = el.checked; saveStudio(); render(); return; }
+    if (el.dataset.bindCheck === 'studio.sceneExpand') { ui.studio.sceneExpand = el.checked; saveStudio(); }
+@@@ END
+
+@@@ OLD
+        if (!(await confirmBox('正面提示词里有中文，NovelAI 看不懂中文。还是要生成吗？（可以用「用中文写，让 AI 转成标签」）', { ok: '照样生成', cancel: '先不' }))) return;
+    }
+    saveStudio();
+@@@ NEW
+        if (!(await confirmBox('正面提示词里有中文，NovelAI 看不懂中文。还是要生成吗？（中文描述可以写进下面的「固定提示词」，会自动转成标签）', { ok: '照样生成', cancel: '先不' }))) return;
+    }
+    if (st.sceneOn !== false && String(st.scene || '').trim() && !sceneReady()) {
+        try { await translateScene(); }
+        catch (e) { render(); toastr.error('固定提示词转标签失败：' + e.message, '生成图片', { timeOut: 8000 }); return; }
+    }
+    saveStudio();
+@@@ END
+
+@@@ OLD
+            case 'generate': await doGenerate(); break;
+@@@ NEW
+            case 'generate': await doGenerate(); break;
+            case 'scenetrans': {
+                if (!String(ui.studio.scene || '').trim()) { toastr.info('先写一点固定提示词', '固定提示词'); break; }
+                try { await translateScene(); } catch (e) { toastr.error('转换失败：' + e.message, '固定提示词'); }
+                render();
+                break;
+            }
+@@@ END
+
+═══ 5. 画师库列表：长画师串默认收成三行 ═══
+@@@ OLD
+      <div class="pc-li-str mono">${markStr(d, M.ticketString(d, ref))}</div>
+@@@ NEW
+      ${(() => { const full = M.ticketString(d, ref); const key = ref.type + ':' + ref.id; const long = full.length > 110; const open = !!ui.strOpen[key]; return `<div class="pc-li-str mono ${long && !open ? 'clamp' : ''}">${markStr(d, full)}</div>${long ? `<button class="pc-strtoggle" data-act="strtoggle" data-key="${esc(key)}">${open ? '收起' : `展开全部 · ${M.tokenize(full).length} 个词`}</button>` : ''}`; })()}
+@@@ END
+
+@@@ OLD
+            case 'clearresult': ui.studio.result = null; ui.studio.sent = null; render(); break;
+@@@ NEW
+            case 'clearresult': ui.studio.result = null; ui.studio.sent = null; render(); break;
+            case 'strtoggle': ui.strOpen[el.dataset.key] = !ui.strOpen[el.dataset.key]; render(); break;
+@@@ END
+
+═══ 6. 氛围页只管氛围；角色参考挪进角色页 ═══
+@@@ OLD
+    return `<div class="pc-seg"><button class="${ui.vibeTab !== 'char' ? 'on' : ''}" data-act="vibetab" data-v="vibe">氛围</button><button class="${ui.vibeTab === 'char' ? 'on' : ''}" data-act="vibetab" data-v="char">角色参考</button></div>`;
+@@@ NEW
+    return '';
+@@@ END
+
+@@@ OLD
+    if (ui.vibeTab === 'char') return viewCharRef(d);
+@@@ NEW
+@@@ END
+
+@@@ OLD
+    ${d.charRefActive && d.charRefGroups?.[d.charRefActive] ? '<div class="pc-card pc-pad pc-mt pc-warn-card">现在开着角色参考，氛围暂时不生效（NovelAI 不能两个一起用）。</div>' : ''}
+    <section class="pc-card pc-pad pc-row-between pc-mt">
+@@@ NEW
+    <section class="pc-card pc-pad pc-row-between">
+@@@ END
+
+@@@ OLD
+        <div class="pc-dim small">氛围就是参考图：照着这几张图的色调、光线、质感去画，不会照抄里面的人和构图。</div></div>
+@@@ NEW
+        <div class="pc-dim small">氛围就是参考图：照着这几张图的色调、光线、质感去画，不会照抄里面的人和构图。角色长相参考在「角色」里给每个角色单独绑。</div></div>
+@@@ END
+
+@@@ OLD
+    <section class="pc-card pc-pad pc-mt">
+      <b>长相参考</b>
+      <div class="pc-dim small">绑一组角色参考图，聊天生图带上${esc(c.name)}时，就照着这组图画出同一个人。只有 NAI 4.5 能用。</div>
+      <div class="pc-chips wrap"><button class="pc-pill ${!c.charRef ? 'on' : 'dashed'}" data-act="charrefpick" data-id="">不用</button>${Object.values(d.charRefGroups || {}).map(g => `<button class="pc-pill ${c.charRef === g.id ? 'on' : 'dashed'}" data-act="charrefpick" data-id="${g.id}">${esc(g.name)}</button>`).join('')}
+        <label class="pc-pill dashed">＋ 上传一张<input type="file" accept="image/*" data-charrefup hidden></label></div>
+      ${c.charRef && d.charRefGroups?.[c.charRef] ? `<div class="pc-li-imgs">${d.charRefGroups[c.charRef].refs.map(r => `<img src="${esc('/' + r.path)}" alt="">`).join('')}</div>` : ''}
+    </section>
+@@@ NEW
+    <section class="pc-card pc-pad pc-mt">
+      <b>长相参考</b>
+      <div class="pc-dim small">绑一组角色参考图，聊天生图带上${esc(c.name)}时，就照着这组图画出同一个人。只有 NAI 4.5 能用；用上时那张图不加氛围（NovelAI 不能两个一起用）。</div>
+      ${!N.charRefSupported() ? '<div class="pc-warn pc-mt-s">现在用不了：要选 NAI 4.5 模型，而且不能是「用酒馆里的 key」。</div>' : ''}
+      ${(() => {
+        const g = c.charRef && d.charRefGroups?.[c.charRef];
+        const TYPES = [['character', '只参考长相'], ['both', '长相和画风'], ['style', '只参考画风']];
+        return `<div class="pc-chips wrap"><button class="pc-pill ${!g ? 'on' : 'dashed'}" data-act="charrefpick" data-id="">不用</button>${Object.values(d.charRefGroups || {}).map(x => `<button class="pc-pill ${g && g.id === x.id ? 'on' : 'dashed'}" data-act="charrefpick" data-id="${x.id}" data-lp="crgroup">${esc(x.name)}</button>`).join('')}
+        <label class="pc-pill dashed">＋ 新的一组<input type="file" accept="image/*" data-charrefup hidden></label></div>
+        ${g ? `<div class="pc-row-between pc-mt-s"><span class="pc-dim small">「${esc(g.name)}」· ${g.refs.length} 张</span><label class="pc-pill dashed tiny">＋ 加图<input type="file" accept="image/*" multiple data-cradd="${g.id}" hidden></label></div>
+        ${g.refs.map((r, i) => `<div class="pc-vrow"><div class="pc-vthumb"><img src="${esc('/' + r.path)}" alt=""></div>
+          <div class="pc-grow"><div class="pc-row-between"><select class="pc-mini-select" data-crtype="${g.id}:${i}">${TYPES.map(([v, t]) => `<option value="${v}" ${v === (r.type || 'character') ? 'selected' : ''}>${t}</option>`).join('')}</select><button class="pc-x" data-act="crdel" data-g="${g.id}" data-i="${i}" aria-label="删掉">×</button></div>
+          <label class="pc-slider"><span>像不像</span><input type="range" min="0" max="1" step="0.01" value="${Number(r.strength ?? 0.6)}" data-crstr="${g.id}:${i}"><b>${Number(r.strength ?? 0.6).toFixed(2)}</b></label></div></div>`).join('') || '<div class="pc-dim small pc-mt-s">这组还没有图，点「＋ 加图」。最好是单人、看得清脸和衣服。</div>'}
+        <div class="pc-hint">「像不像」越大越像参考图，太大会不听提示词，一般 0.5 到 0.8。长按组名可以改名或删除。</div>` : ''}`;
+      })()}
+    </section>
+@@@ END
+
+@@@ OLD
+                d.charRefGroups[id] = { id, name: c.name, refs: [{ id: M.uid('cr_'), path, type: 'character', strength: 0.6 }] };
+                c.charRef = id; C.saveChar(c); commit();
+                toastr.success(`已绑定。在「氛围 → 角色参考」里能调「像不像」。`, '角色');
+@@@ NEW
+                const names = new Set(Object.values(d.charRefGroups || {}).map(g => g.name));
+                let name = c.name.slice(0, 20), k = 2;
+                while (names.has(name)) name = `${c.name.slice(0, 16)} ${k++}`;
+                d.charRefGroups[id] = { id, name, refs: [{ id: M.uid('cr_'), path, type: 'character', strength: 0.6 }] };
+                c.charRef = id; C.saveChar(c); commit();
+                toastr.success(`建好「${name}」并绑定了，下面能加图、调「像不像」。`, '角色');
+@@@ END
+
+═══ 7. 衣服 / 外貌：整套粘贴（逗号、顿号、换行都行），先建再起名，一键复制整套 ═══
+@@@ OLD
+async function textToPairs(text) {
+    if (!hasChinese(text)) return text.split(/[,，]/).map(t => t.trim()).filter(Boolean).map(en => ({ en, zh: '' }));
+    const j = pickJson(await askLLM(`把用户写的外貌或衣服描述翻成 NovelAI 标签。${PAIRS}只输出 JSON：{"tags": [...]}`, text, { maxTokens: 300 }));
+    return (j.tags || []).map(x => ({ en: String(x.en || '').trim(), zh: String(x.zh || '').trim() })).filter(x => x.en && !hasChinese(x.en));
+}
+@@@ NEW
+async function textToPairs(text) {
+    // 整套粘贴：逗号、顿号、分号、换行都算分隔；英文的直接用，只有带中文的那几项才问 AI
+    const parts = String(text || '').split(/[,，、;；\r\n]+/).map(t => t.trim().replace(/^(?:[-*•·]\s*|\d+[.)）]\s+)/, '').trim()).filter(Boolean);
+    const out = parts.map(p => hasChinese(p) ? null : { en: p, zh: '' });
+    const zh = parts.filter(hasChinese);
+    if (!zh.length) return out;
+    const j = pickJson(await askLLM(`把用户写的外貌或衣服描述翻成 NovelAI 标签，每一行都要翻。${PAIRS}只输出 JSON：{"tags": [...]}`, zh.join('\n'), { maxTokens: Math.min(2400, 300 + zh.length * 80) }));
+    const got = (j.tags || []).map(x => ({ en: String(x.en || '').trim(), zh: String(x.zh || '').trim() })).filter(x => x.en && !hasChinese(x.en));
+    const at = out.indexOf(null);
+    return [...out.slice(0, at).filter(Boolean), ...got, ...out.slice(at).filter(Boolean)];
+}
+@@@ END
+
+@@@ OLD
+            const m = ev.key === 'Enter' && ev.target.dataset?.enter?.match(/^addpair-(\w+)$/);
+@@@ NEW
+            // 电脑：回车加、Shift+回车换行；手机（触屏）：回车就是换行，点「加」才加
+            const touch = P.matchMedia?.('(pointer: coarse)').matches;
+            const m = ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing && !touch && ev.target.dataset?.enter?.match(/^addpair-(\w+)$/);
+@@@ END
+
+@@@ OLD
+<div class="pc-addrow"><input data-bind="addText.ward" value="${esc(ui.addText.ward || '')}" placeholder="加一件，中文也行" data-enter="addpair-ward">
+@@@ NEW
+<div class="pc-addrow"><textarea rows="1" data-bind="addText.ward" placeholder="加一件，或整套粘贴（逗号、换行隔开，中文也行）" data-enter="addpair-ward">${esc(ui.addText.ward || '')}</textarea>
+@@@ END
+
+@@@ OLD
+<span class="pc-dim small">点标签改，× 删</span>
+@@@ NEW
+<span class="pc-chips" style="margin:0">${o.tags.length ? `<button class="pc-pill dashed tiny" data-act="copytext" data-text="${esc(C.tagText(o.tags))}">复制整套</button>` : '<span class="pc-dim small">点标签改，× 删</span>'}</span>
+@@@ END
+
+@@@ OLD
+<div class="pc-addrow"><input data-bind="addText.app" value="${esc(ui.addText.app)}" placeholder="自己加，中文也行，比如：左耳有耳钉" data-enter="addpair-app">
+@@@ NEW
+<div class="pc-addrow"><textarea rows="1" data-bind="addText.app" placeholder="自己加，中文也行，可以一次粘贴好几个" data-enter="addpair-app">${esc(ui.addText.app)}</textarea>
+@@@ END
+
+@@@ OLD
+<div class="pc-addrow"><input data-bind="addText.out" value="${esc(ui.addText.out)}" placeholder="加一件，比如：黑框眼镜" data-enter="addpair-out">
+@@@ NEW
+<div class="pc-addrow"><textarea rows="1" data-bind="addText.out" placeholder="加一件，或整套粘贴进来（逗号、换行隔开）" data-enter="addpair-out">${esc(ui.addText.out)}</textarea>
+@@@ END
+
+@@@ OLD
+<span class="pc-chips" style="margin:0"><button class="pc-pill dashed tiny" data-act="renameout">改名</button>
+@@@ NEW
+<span class="pc-chips" style="margin:0">${out.tags.length ? `<button class="pc-pill dashed tiny" data-act="copytext" data-text="${esc(C.tagText(out.tags))}">复制整套</button>` : ''}<button class="pc-pill dashed tiny" data-act="renameout">改名</button>
+@@@ END
+
+@@@ OLD
+        case 'newout': {
+            const name = await promptText('这套衣服叫什么？', '');
+            if (!name) return true;
+            const o = { id: M.uid('o_'), name: name.slice(0, 20), tags: [] };
+            c.outfits.push(o); c.outfitId = o.id; save();
+            return true;
+        }
+@@@ NEW
+        case 'newout': {
+            // 先建一套空的，衣服加好再起名（随时点「改名」）
+            let n = c.outfits.length + 1;
+            while (c.outfits.some(o => o.name === `第 ${n} 套`)) n++;
+            const o = { id: M.uid('o_'), name: `第 ${n} 套`, tags: [] };
+            c.outfits.push(o); c.outfitId = o.id; ui.outTestImg = ''; ui.addText.out = ''; save();
+            root.querySelector('[data-bind="addText.out"]')?.focus();
+            return true;
+        }
+@@@ END
+
+═══ 8. 共享上传：选 NovelAI 原图当例图时自动读出正面和负面 ═══
+@@@ OLD
+function openSharedUpload() {
+@@@ NEW
+/** 图片里存的提示词：NovelAI 原图（PNG 文字块 / 透明通道隐写）或 WebUI 的 parameters */
+function promptFromTexts(t) {
+    if (!t) return null;
+    let j = null;
+    try { j = typeof t.Comment === 'string' ? JSON.parse(t.Comment) : (t.Comment || null); } catch { j = null; }
+    if (j) {
+        const pos = j.prompt || j.v4_prompt?.caption?.base_caption || t.Description || '';
+        const neg = j.uc || j.v4_negative_prompt?.caption?.base_caption || '';
+        if (pos) return { positive: String(pos).trim(), negative: String(neg).trim() };
+    }
+    if (t.parameters) {
+        const s = String(t.parameters);
+        const ni = s.indexOf('\nNegative prompt:'), si = s.search(/\nSteps:/);
+        const pos = s.slice(0, ni >= 0 ? ni : si >= 0 ? si : undefined).trim();
+        const neg = ni >= 0 ? s.slice(ni + 17, si > ni ? si : undefined).trim() : '';
+        if (pos) return { positive: pos, negative: neg };
+    }
+    if (t.Description) return { positive: String(t.Description).trim(), negative: '' };
+    return null;
+}
+const inflateBytes = async (bytes, fmt) => new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream(fmt))).arrayBuffer());
+/** NovelAI 的透明通道隐写（stealth_pngcomp）：按列读 alpha 最低位 */
+async function readStealthTexts(file) {
+    const url = URL.createObjectURL(file);
+    try {
+        const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = url; });
+        const w = img.naturalWidth, h = img.naturalHeight;
+        if (!w || !h || w * h > 40e6) return null;
+        const cv = DOC.createElement('canvas'); cv.width = w; cv.height = h;
+        const g = cv.getContext('2d', { willReadFrequently: true });
+        g.drawImage(img, 0, 0);
+        const px = g.getImageData(0, 0, w, h).data;
+        const total = w * h;
+        let i = 0;
+        const bit = () => { const x = Math.floor(i / h), y = i % h; i++; return px[(y * w + x) * 4 + 3] & 1; };
+        const bytes = n => { const out = new Uint8Array(n); for (let k = 0; k < n; k++) { let v = 0; for (let b = 0; b < 8; b++) v = (v << 1) | bit(); out[k] = v; } return out; };
+        const magic = 'stealth_pngcomp';
+        if (total < 200 || new TextDecoder().decode(bytes(magic.length)) !== magic) return null;
+        let len = 0;
+        for (let b = 0; b < 32; b++) len = len * 2 + bit();
+        if (!len || i + len > total) return null;
+        return JSON.parse(new TextDecoder().decode(await inflateBytes(bytes(Math.floor(len / 8)), 'gzip')));
+    } catch { return null; } finally { URL.revokeObjectURL(url); }
+}
+async function readImagePrompt(file) {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    const utf8 = b => new TextDecoder('utf-8').decode(b);
+    const texts = {};
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+        const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+        for (let p = 8; p + 8 <= buf.length;) {
+            const len = dv.getUint32(p), type = String.fromCharCode(...buf.subarray(p + 4, p + 8));
+            const data = buf.subarray(p + 8, p + 8 + len);
+            p += 12 + len;
+            if (type === 'IEND') break;
+            if (!['tEXt', 'iTXt', 'zTXt'].includes(type)) continue;
+            const z = data.indexOf(0);
+            if (z < 0) continue;
+            const key = utf8(data.subarray(0, z));
+            try {
+                if (type === 'tEXt') texts[key] = utf8(data.subarray(z + 1));
+                else if (type === 'zTXt') texts[key] = utf8(await inflateBytes(data.subarray(z + 2), 'deflate'));
+                else {
+                    let q = data.indexOf(0, z + 3);
+                    q = data.indexOf(0, q + 1);
+                    const body = data.subarray(q + 1);
+                    texts[key] = utf8(data[z + 1] ? await inflateBytes(body, 'deflate') : body);
+                }
+            } catch { /* 坏块跳过 */ }
+        }
+    }
+    let r = promptFromTexts(texts);
+    if (!r && /png|webp/i.test(file.type || file.name)) r = promptFromTexts(await readStealthTexts(file));
+    return r;
+}
+
+function openSharedUpload() {
+@@@ END
+
+@@@ OLD
+      <label class="pc-field"><span>画师串</span><textarea class="pc-textarea mono" name="artistString" maxlength="20000" required placeholder="artist:aaa, 0.8::artist:bbb::"></textarea></label>
+@@@ NEW
+      <div class="pc-field"><span>例图（可选，最多 6 张）</span><label class="pc-pill dashed pc-share-pick">＋ 选图<input name="images" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden></label>
+        <small class="pc-dim" style="display:block;margin-top:4px">选 NovelAI 原图，会自动读出正面和负面填到下面</small></div>
+      <div data-share-previews style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0"></div>
+      <button class="pc-pill dashed" type="button" data-share-clear hidden>清空例图</button>
+      <p class="pc-dim small" data-share-meta role="status" aria-live="polite"></p>
+      <label class="pc-field"><span>画师串（正面）</span><textarea class="pc-textarea mono" name="artistString" maxlength="20000" required placeholder="artist:aaa, 0.8::artist:bbb::"></textarea></label>
+      <label class="pc-field"><span>负面（可选）</span><textarea class="pc-textarea mono" name="negative" maxlength="20000" placeholder="lowres, bad anatomy …"></textarea></label>
+@@@ END
+
+@@@ OLD
+      <label class="pc-field"><span>例图（可选，最多 6 张）</span><input name="images" type="file" accept="image/png,image/jpeg,image/webp" multiple></label>
+      <div data-share-previews style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0"></div>
+      <button class="pc-pill dashed" type="button" data-share-clear hidden>清空例图</button>
+      <label class="pc-field"><span><input type="checkbox" name="nsfw"> 含 NSFW 内容</span></label>
+@@@ NEW
+      <label class="pc-switch"><input type="checkbox" name="nsfw"><span></span>含 NSFW 内容</label>
+@@@ END
+
+@@@ OLD
+    const say = message => { status.textContent = message; };
+    clear.addEventListener('click', () => { ++previewVersion; files.value = ''; previews.replaceChildren(); clear.hidden = true; say(''); });
+@@@ NEW
+    const say = message => { status.textContent = message; };
+    const metaBox = box.querySelector('[data-share-meta]');
+    const fillFromImageMeta = async version => {
+        let meta = null;
+        for (const file of files.files) {
+            try { meta = await readImagePrompt(file); } catch (e) { console.warn('[智库] 读图片里的提示词', e); }
+            if (version !== previewVersion || !box.isConnected) return;
+            if (meta?.positive) break;
+        }
+        metaBox.replaceChildren();
+        if (!meta?.positive) { if (files.files.length) metaBox.textContent = '例图里没读到提示词（不是 NovelAI 原图，或者被压缩、截图过）。'; return; }
+        const pos = form.elements.namedItem('artistString'), neg = form.elements.namedItem('negative');
+        const apply = () => { pos.value = meta.positive; neg.value = meta.negative || ''; metaBox.textContent = `已从例图读出正面${meta.negative ? '和负面' : ''}，可以再改。`; };
+        if (!pos.value.trim() && !neg.value.trim()) { apply(); return; }
+        if (pos.value.trim() === meta.positive && neg.value.trim() === (meta.negative || '')) return;
+        const b = DOC.createElement('button');
+        b.type = 'button'; b.className = 'pc-pill dashed tiny'; b.textContent = '例图里有提示词，用它替换下面的';
+        b.addEventListener('click', apply);
+        metaBox.appendChild(b);
+    };
+    clear.addEventListener('click', () => { ++previewVersion; files.value = ''; previews.replaceChildren(); metaBox.replaceChildren(); clear.hidden = true; say(''); });
+@@@ END
+
+@@@ OLD
+            } catch { say('有一张例图无法读取，请重新选择。'); }
+        }
+    });
+@@@ NEW
+            } catch { say('有一张例图无法读取，请重新选择。'); }
+        }
+        if (version === previewVersion && box.isConnected) await fillFromImageMeta(version);
+    });
+@@@ END
+
+@@@ OLD
+        const name = value('title'), nickname = value('signature'), artistString = value('artistString');
+@@@ NEW
+        const name = value('title'), nickname = value('signature'), artistString = value('artistString'), negative = value('negative');
+@@@ END
+
+@@@ OLD
+            await L.createPost({ nickname, name, kind: members.length === 1 ? 'artist' : 'group', note, tags, nsfw, content: { artistString, members }, images });
+@@@ NEW
+            const post = { nickname, name, kind: members.length === 1 ? 'artist' : 'group', note, tags, nsfw, content: { artistString, members, ...(negative ? { negative } : {}) }, images };
+            try { await L.createPost(post); }
+            catch (e) {
+                // 服务器不认负面字段时，把负面写进说明再发一次
+                if (!negative || [401, 403, 413, 429].includes(e?.status)) throw e;
+                await L.createPost({ ...post, note: [note, '负面：' + negative].filter(Boolean).join('\n\n').slice(0, 5000), content: { artistString, members } });
+            }
+@@@ END
+
+@@@ OLD
+            ref = M.createFromString(d, { name: p.name, text: p.content.artistString, note: p.note });
+@@@ NEW
+            ref = M.createFromString(d, { name: p.name, text: p.content.artistString, note: p.note, neg: p.content.negative || '' });
+@@@ END
+
+@@@ OLD
+${banWarn(getData(), p.content.artistString)}` : ''}
+@@@ NEW
+${banWarn(getData(), p.content.artistString)}` : ''}
+      ${p.content?.negative ? `<div class="pc-dim small mono" style="word-break:break-all;margin-top:6px">负面：${esc(p.content.negative)}</div>` : ''}
+@@@ END
+
+═══ 9. 样式 ═══
+@@@ OLD
+    DOC.head.appendChild(style);
+    cleanups.push(() => style.remove());
+}
+
+// 聊天里每一楼加一个
+@@@ NEW
+    style.textContent += `
+.pc-li-str.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.pc-strtoggle { display: inline-block; margin: 6px 0 2px; padding: 3px 12px; border: 1.5px dashed var(--pc-dash); border-radius: 999px; background: transparent; color: var(--pc-ink-soft); font: 12px var(--pc-font); cursor: pointer; }
+.pc-addrow { align-items: flex-end; }
+.pc-addrow textarea { flex: 1; min-width: 0; border: 0; border-radius: 20px; padding: 9px 14px; background: var(--pc-paper-2); color: var(--pc-ink); font: 14px/1.5 var(--pc-font); resize: none; min-height: 40px; max-height: 160px; field-sizing: content; outline: none; box-sizing: border-box; }
+.pc-addrow textarea:focus { box-shadow: 0 0 0 2px var(--pc-ink); }
+.pc-share-pick { display: inline-flex; align-items: center; margin-top: 6px; cursor: pointer; }
+[data-share-meta]:empty { display: none; }
+`;
+    DOC.head.appendChild(style);
+    cleanups.push(() => style.remove());
+}
+
+// 聊天里每一楼加一个
+@@@ END
+
+@@@ OLD
+      <p class="pc-tip" data-share-status role="status" aria-live="polite"></p>
+@@@ NEW
+      <p class="pc-dim small" data-share-status role="status" aria-live="polite"></p>
+@@@ END
+
+═══ 10. 一套衣服里分「整体」和「配饰」；「自己写一套」一步建好 ═══
+@@@ OLD
+function pairChips(list, where) {
+@@@ NEW
+/** 配饰：眼镜、首饰、帽子、发饰这类。没手动分过的按词猜 */
+const ACC_RE = /(glasses|eyewear|monocle|goggles|earring|piercing|necklace|pendant|choker|bracelet|wristband|wristwatch|\bwatch\b|\brings?\b|anklet|brooch|jewelry|\bhat\b|\bcap\b|beret|beanie|crown|tiara|veil|hairclip|hairpin|hair ornament|hair ribbon|hair bow|hairband|headband|scrunchie|\bbow\b|ribbon|scarf|gloves?|mittens|\bbag\b|handbag|backpack|\bbelt\b|bandana|\bmask\b|eyepatch|flower|corsage|tie clip|cufflinks|眼镜|耳钉|耳环|耳饰|项链|吊坠|颈圈|手链|手环|手表|戒指|脚链|胸针|首饰|帽|皇冠|头纱|发夹|发卡|发饰|发带|头箍|蝴蝶结|丝带|围巾|手套|包|腰带|面具|眼罩)/i;
+const isAcc = p => p.acc ?? ACC_RE.test(`${p.en} ${p.zh || ''}`);
+/** 一套衣服：整体和配饰分开显示，下标仍是原列表里的 */
+function outfitSections(list, where, { busy = false, busyKey = '', disabled = '' } = {}) {
+    const chips = acc => list.map((t, i) => [t, i]).filter(([t]) => isAcc(t) === acc).map(([t, i]) => `<span class="pc-pair"><button data-act="editpair" data-where="${where}" data-i="${i}"><span class="mono">${esc(t.en)}</span>${t.zh ? `<em>${esc(t.zh)}</em>` : ''}</button><button class="pc-pair-x" data-act="movepair" data-where="${where}" data-i="${i}" aria-label="${acc ? '移到整体' : '移到配饰'}" title="${acc ? '移到整体' : '移到配饰'}">${acc ? '↑' : '↓'}</button><button class="pc-pair-x" data-act="delpair" data-where="${where}" data-i="${i}" aria-label="删掉">×</button></span>`).join('');
+    const row = (acc, ph) => { const k = where + (acc ? 'acc' : ''); return `<div class="pc-addrow"><textarea rows="1" data-bind="addText.${k}" placeholder="${ph}" data-enter="addpair-${k}">${esc(ui.addText[k] || '')}</textarea><button class="pc-btn dark" data-act="addpair" data-where="${k}" ${disabled}>${busy && busyKey === k ? '…' : '加'}</button></div>`; };
+    const n = list.filter(t => !isAcc(t)).length, m = list.length - n;
+    return `<div class="pc-outsec"><div class="pc-outsec-h"><b>整体</b><small>${n ? n + ' 件' : '上衣、裤裙、鞋袜、外套'}</small></div>
+        <div class="pc-pairs">${chips(false) || '<span class="pc-dim small">还没有</span>'}</div>
+        ${row(false, '加一件，或整套粘贴进来，配饰会自动分到下面')}</div>
+      <div class="pc-outsec"><div class="pc-outsec-h"><b>配饰</b><small>${m ? m + ' 件' : '眼镜、首饰、帽子、发饰、包'}</small></div>
+        <div class="pc-pairs">${chips(true) || '<span class="pc-dim small">还没有</span>'}</div>
+        ${row(true, '加配饰，比如：黑框眼镜、银耳钉')}</div>
+      <div class="pc-dim small">点标签改，↓↑ 换到另一栏，× 删掉</div>`;
+}
+/** 往一套里加：配饰栏加的都算配饰；整体栏加的按词猜，猜成配饰的会自动分过去 */
+function addToOutfit(list, pairs, toAcc) {
+    for (const p of pairs) {
+        if (toAcc) p.acc = true;
+        const old = list.find(x => x.en.toLowerCase() === p.en.toLowerCase());
+        if (old) { if (toAcc) old.acc = true; } else list.push(p);
+    }
+}
+function newOutfitBox(defName) {
+    return new Promise(resolve => {
+        const box = modal(`<h3 class="pc-h3">自己写一套</h3>
+          <label class="pc-field"><span>整套衣服（整套粘贴也行，逗号、换行隔开，中文也行）</span><textarea class="pc-textarea" data-v placeholder="white shirt, navy blazer, red necktie, black pants, loafers, 黑框眼镜"></textarea></label>
+          <label class="pc-field"><span>名字（可以不填）</span><input class="pc-input" data-n placeholder="${esc(defName)}"></label>
+          <div class="pc-dim small">配饰会自动分出来，建好后还能改。</div>
+          <div class="pc-actions"><button class="pc-btn" data-m="no">算了</button><button class="pc-btn dark" data-m="ok">建好</button></div>`);
+        const done = v => { box.closeModal(); resolve(v); };
+        box.addEventListener('click', ev => { const m = ev.target.closest('[data-m]')?.dataset.m; if (m === 'ok') done({ text: box.querySelector('[data-v]').value.trim(), name: box.querySelector('[data-n]').value.trim() || defName }); if (m === 'no') done(null); });
+        box.parentElement.addEventListener('click', ev => { if (ev.target === box.parentElement) resolve(null); });
+    });
+}
+
+function pairChips(list, where) {
+@@@ END
+
+@@@ OLD
+      <div class="pc-row-between"><b>${o.tags.length ? `${o.tags.length} 件` : '还没有标签'}</b><span class="pc-chips" style="margin:0">${o.tags.length ? `<button class="pc-pill dashed tiny" data-act="copytext" data-text="${esc(C.tagText(o.tags))}">复制整套</button>` : '<span class="pc-dim small">点标签改，× 删</span>'}</span></div>
+      <div class="pc-pairs">${pairChips(o.tags, 'ward')}</div>
+      <div class="pc-addrow"><textarea rows="1" data-bind="addText.ward" placeholder="加一件，或整套粘贴（逗号、换行隔开，中文也行）" data-enter="addpair-ward">${esc(ui.addText.ward || '')}</textarea><button class="pc-btn dark" data-act="addpair" data-where="ward">${u.busy === 'add' ? '…' : '加'}</button></div>
+@@@ NEW
+      <div class="pc-row-between"><b>${o.tags.length ? `${o.tags.length} 件` : '还没有标签'}</b>${o.tags.length ? `<button class="pc-pill dashed tiny" data-act="copytext" data-text="${esc(C.tagText(o.tags))}">复制整套</button>` : ''}</div>
+      ${outfitSections(o.tags, 'ward', { busy: u.busy === 'add', busyKey: u.addKey })}
+@@@ END
+
+@@@ OLD
+        <div class="pc-pairs">${pairChips(out.tags, 'out') || '<span class="pc-dim small">这套还是空的</span>'}</div>
+        <div class="pc-addrow"><textarea rows="1" data-bind="addText.out" placeholder="加一件，或整套粘贴进来（逗号、换行隔开）" data-enter="addpair-out">${esc(ui.addText.out)}</textarea><button class="pc-btn dark" data-act="addpair" data-where="out" ${busy ? 'disabled' : ''}>${busy === 'out' ? '…' : '加'}</button></div>
+@@@ NEW
+        ${outfitSections(out.tags, 'out', { busy: !!busy, busyKey: busy, disabled: busy ? 'disabled' : '' })}
+@@@ END
+
+@@@ OLD
+    if (['addpair', 'editpair', 'delpair'].includes(act) && el.dataset.where === 'ward') {
+        const list = wardList();
+        if (!list) return true;
+        if (act === 'delpair') { list.splice(Number(el.dataset.i), 1); saveOutfit(); return true; }
+@@@ NEW
+    if (['addpair', 'editpair', 'delpair', 'movepair'].includes(act) && ['ward', 'wardacc'].includes(el.dataset.where)) {
+        const list = wardList();
+        if (!list) return true;
+        if (act === 'delpair') { list.splice(Number(el.dataset.i), 1); saveOutfit(); return true; }
+        if (act === 'movepair') { const t = list[Number(el.dataset.i)]; if (t) t.acc = !isAcc(t); saveOutfit(); return true; }
+@@@ END
+
+@@@ OLD
+        const text = (ui.addText.ward || '').trim();
+        if (!text) return true;
+        ui.outfit.busy = 'add'; render();
+        try { for (const p of await T.textToPairs(text)) if (!list.some(x => x.en === p.en)) list.push(p); ui.addText.ward = ''; }
+@@@ NEW
+        const key = el.dataset.where;
+        const text = (ui.addText[key] || '').trim();
+        if (!text) return true;
+        ui.outfit.busy = 'add'; ui.outfit.addKey = key; render();
+        try { addToOutfit(list, await T.textToPairs(text), key === 'wardacc'); ui.addText[key] = ''; }
+@@@ END
+
+@@@ OLD
+        case 'addpair': {
+            const where = el.dataset.where;
+            const text = ui.addText[where].trim();
+            if (!text) return true;
+            ui.charBusy = where; render();
+            try {
+                const pairs = await T.textToPairs(text);
+                const list = where === 'app' ? c.appearance : C.currentOutfit(c)?.tags;
+                if (list) for (const p of pairs) if (!list.some(x => x.en === p.en)) list.push(p);
+                ui.addText[where] = '';
+@@@ NEW
+        case 'addpair': {
+            const where = el.dataset.where;
+            const text = (ui.addText[where] || '').trim();
+            if (!text) return true;
+            ui.charBusy = where; render();
+            try {
+                const pairs = await T.textToPairs(text);
+                if (where === 'app') { for (const p of pairs) if (!c.appearance.some(x => x.en === p.en)) c.appearance.push(p); }
+                else { const list = C.currentOutfit(c)?.tags; if (list) addToOutfit(list, pairs, where === 'outacc'); }
+                ui.addText[where] = '';
+@@@ END
+
+@@@ OLD
+        case 'outmode': c.outfitMode = el.dataset.v; save(); return true;
+@@@ NEW
+        case 'movepair': { const t = C.currentOutfit(c)?.tags[Number(el.dataset.i)]; if (t) t.acc = !isAcc(t); save(); return true; }
+        case 'outmode': c.outfitMode = el.dataset.v; save(); return true;
+@@@ END
+
+@@@ OLD
+        case 'newout': {
+            // 先建一套空的，衣服加好再起名（随时点「改名」）
+            let n = c.outfits.length + 1;
+            while (c.outfits.some(o => o.name === `第 ${n} 套`)) n++;
+            const o = { id: M.uid('o_'), name: `第 ${n} 套`, tags: [] };
+            c.outfits.push(o); c.outfitId = o.id; ui.outTestImg = ''; ui.addText.out = ''; save();
+            root.querySelector('[data-bind="addText.out"]')?.focus();
+            return true;
+        }
+@@@ NEW
+        case 'newout': {
+            // 一步建好：整套粘进去，名字可以不填（默认「第 N 套」）
+            let n = c.outfits.length + 1;
+            while (c.outfits.some(o => o.name === `第 ${n} 套`)) n++;
+            const r = await newOutfitBox(`第 ${n} 套`);
+            if (!r) return true;
+            const o = { id: M.uid('o_'), name: r.name.slice(0, 20), tags: [] };
+            c.outfits.push(o); c.outfitId = o.id; ui.outTestImg = '';
+            if (r.text) {
+                ui.charBusy = 'out'; save();
+                try { addToOutfit(o.tags, await T.textToPairs(r.text), false); }
+                catch (e) { ui.addText.out = r.text; toastr.error(e.message + '（写的内容留在输入框里了）', '加不进去'); }
+                ui.charBusy = '';
+            }
+            save();
+            return true;
+        }
+@@@ END
+
+@@@ OLD
+[data-share-meta]:empty { display: none; }
+@@@ NEW
+[data-share-meta]:empty { display: none; }
+.pc-outsec { margin-top: 12px; padding: 12px; border-radius: 14px; background: rgba(255, 255, 255, .45); }
+.pc-outsec-h { display: flex; align-items: baseline; gap: 8px; }
+.pc-outsec-h small { color: var(--pc-ink-soft); font-size: 12px; }
+.pc-outsec .pc-pairs { margin-top: 6px; }
+@@@ END
