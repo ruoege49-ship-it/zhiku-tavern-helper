@@ -1,22 +1,34 @@
-# 智库 · 酒馆助手脚本
+# 智库 · SillyTavern 扩展
 
-NovelAI 生图、画师库、例图、角色、衣柜、聊天生图与共享。
+版本 **0.7.0**。NovelAI 生图、画师库、例图、角色、衣柜、聊天生图与共享上传。
 
-## 固定下载地址
+## 安装与更新
 
-- [完整酒馆助手脚本 JSON](https://raw.githubusercontent.com/ruoege49-ship-it/zhiku-tavern-helper/main/zhiku.script.json)
-- [完整 JavaScript 源码](https://raw.githubusercontent.com/ruoege49-ship-it/zhiku-tavern-helper/main/zhiku.js)
+1. 打开酒馆「扩展」→「安装扩展」。
+2. 粘贴仓库地址：`https://github.com/ruoege49-ship-it/zhiku-tavern-helper`
+3. 安装后刷新酒馆，通过扩展设置「打开智库」、魔棒菜单「智库」或侧边票根打开。
+4. 后续在扩展管理里点击更新，再刷新页面。
 
-将 JSON 导入酒馆助手脚本库，替换原来的智库脚本。后续更新继续使用同一地址；链接指向 main 最新版本，GitHub 缓存可能有短暂延迟。此完整脚本本身不新增自动更新机制。
+扩展版不需要酒馆助手。最低宿主版本为 SillyTavern 1.14.0；新版本宿主支持启停钩子，旧版本启停后刷新页面。
 
-## 共享上传
+**从脚本版切换：先停用酒馆助手脚本库中的旧「智库」，再启用扩展版。** 同一个酒馆用户下，原有画师库文件、图片、NovelAI 设置与共享身份继续沿用，无需重新导入画师库。
 
-共享页右上角「＋ 上传」可填写名称、署名、画师串、标签和说明，并附上最多 6 张例图。上传后自动打开「我分享的」，署名会显示在共享卡片上并记住供下次使用。
+## 共享
 
-已内置共享服务器地址，无需邀请码。原有自定义服务器地址优先使用。多用户可同时浏览、上传和保存；自己的 NovelAI Key 仍由自己在酒馆内配置。
+共享页右上角「＋ 上传」可填写名称、署名、画师串、标签和说明，并附上最多 6 张例图。发布后自动打开「我分享的」。内置共享服务器地址，无需邀请码。已有自定义服务器地址优先使用。NovelAI Key 由使用者自己在酒馆内配置。
+
+## 兼容脚本文件
+
+`zhiku.script.json` 和 `zhiku.js` 保留为此前的酒馆助手脚本交付文件。扩展安装使用仓库地址，不使用这两个文件的 Raw 地址。
+
+## 开发与验证
+
+入口为 `index.js`，完整本地运行代码为 `runtime.js`，扩展清单为 `manifest.json`。
+
+运行 `node tools/build-extension.mjs` 可从完整脚本 JSON 和 `src/index.js` 重建扩展。扩展不从远程拉取代码执行。
+
+清单、语法、模拟宿主中的启动、原生入口、共享署名表单、停用清理及再启用检查通过。接口核对依据为本机 SillyTavern 1.14.0，提交 `fbf789fa7480fafe0275b2f79e4384e77ae689a7`；扩展规范见 [官方文档](https://docs.sillytavern.app/for-contributors/writing-extensions/)。浏览器内实际安装点击验收尚未执行。
 
 ## 来源与署名
 
-保留原脚本说明：二改自从前佬的智绘姬（https://github.com/damoshen123/st-chatu8，原脚本标注 AFPL v9）。本仓库保留该署名与说明，不另行覆盖原有许可。脚本内其余作者信息按原文件保留。
-
-本次接入共享 VPS，增加共享页直接上传及署名入口。服务器性能修复已部署，客户端接口保持兼容。
+保留原脚本说明：二改自从前佬的智绘姬（https://github.com/damoshen123/st-chatu8，原脚本标注 AFPL v9）。本仓库保留该署名与说明，不另行覆盖原有许可。其余作者信息按原文件保留。
