@@ -44,8 +44,9 @@ export function createMarkerController({context,getData,generate,upload,notify,d
         const cfg=settings(),msg=context().chat?.[id];
         if(!msg)return;
         const tokens=parseImageMarkers(msg.mes,cfg.start,cfg.end);
-        const slots=doc.querySelectorAll(`.mes[mesid="${Number(id)}"] .mes_text .pc-marker-slot`);
+        const slots=doc.querySelectorAll(`.mes[mesid="${Number(id)}"] .mes_text :is(.pc-marker-slot,.custom-pc-marker-slot)`);
         slots.forEach((slot,index)=>{
+            slot.classList.add('pc-marker-slot');
             const token=tokens[index];if(!token)return;
             if(slot.dataset.pcReady===token.raw) { const b=slot.querySelector('button');if(b){b.disabled=pending.has(msg);b.textContent=b.disabled?'生成中…':failed.get(msg)===String(msg.mes)?'重试生成':'生成图片';}return; }
             slot.dataset.pcReady=token.raw;

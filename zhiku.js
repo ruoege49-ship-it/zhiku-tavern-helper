@@ -2133,8 +2133,9 @@ function createMarkerController({context,getData,generate,upload,notify,document
         const cfg=settings(),msg=context().chat?.[id];
         if(!msg)return;
         const tokens=parseImageMarkers(msg.mes,cfg.start,cfg.end);
-        const slots=doc.querySelectorAll(`.mes[mesid="${Number(id)}"] .mes_text .pc-marker-slot`);
+        const slots=doc.querySelectorAll(`.mes[mesid="${Number(id)}"] .mes_text :is(.pc-marker-slot,.custom-pc-marker-slot)`);
         slots.forEach((slot,index)=>{
+            slot.classList.add('pc-marker-slot');
             const token=tokens[index];if(!token)return;
             if(slot.dataset.pcReady===token.raw) { const b=slot.querySelector('button');if(b){b.disabled=pending.has(msg);b.textContent=b.disabled?'生成中…':failed.get(msg)===String(msg.mes)?'重试生成':'生成图片';}return; }
             slot.dataset.pcReady=token.raw;
@@ -2207,7 +2208,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
 }
 
 const __mod_marker=createMarkerController({
-        context:()=>SillyTavern.getContext(),getData:__mod_store.getData,
+        context:()=>SillyTavern.getContext(),getData:__mod_store.getData,document:DOC,
         generate:prompt=>{const d=__mod_store.getData();return __mod_engine.generate({pos:__mod_model.mergeTags(d.active?__mod_model.ticketString(d,d.active):'',prompt),neg:[d.active?__mod_model.ticketNeg(d,d.active):'',d.options.chatNegative||''].filter(Boolean).join(', ')});},
         upload:__mod_store.uploadImage,notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
     });

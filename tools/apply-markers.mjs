@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 export function applyMarkers(source) {
     function presentation(s) {
+        s=s.replace('context:()=>SillyTavern.getContext(),getData:__mod_store.getData,','context:()=>SillyTavern.getContext(),getData:__mod_store.getData,document:DOC,');
+        s=s.replace('    setTimeout(() => __mod_marker.refresh(), 0);\n    setTimeout(() => __mod_marker.refresh(), 0);','    setTimeout(() => __mod_marker.refresh(), 0);');
         s=s.replace('<span class="pc-menu-picture" aria-hidden="true">🖼️</span>', '<i class="fa-solid fa-image fa-fw" aria-hidden="true"></i>');
         s=s.replaceAll('🖼️ 开启标记自动生图','开启标记自动生图');
         s=s.replace("      ${sw('markerAuto', '识别完整标记后自动生图', '直接使用标记内的提示词，不额外调用聊天 AI')}\n", '');
