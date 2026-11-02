@@ -6,6 +6,8 @@ await gate.run(async()=>{calls++;if(calls===1)throw Object.assign(Error('limited
 assert.equal(calls,2);assert.equal(waits[0],8000);
 await gate.run(async()=>1);assert.equal(waits[1],1500);
 let ordinary=0;await assert.rejects(gate.run(async()=>{ordinary++;throw Object.assign(Error('bad'),{status:400});}));assert.equal(ordinary,1);
+let tav=0;assert.equal(await gate.run(async()=>{tav++;if(tav<3)throw Object.assign(Error('tavern'),{status:500,retryable:true});return 'ok';}),'ok');assert.equal(tav,3);
+let hard=0;await assert.rejects(gate.run(async()=>{hard++;throw Object.assign(Error('limited'),{status:429});}));assert.equal(hard,3);
 const msg={mes:Array.from({length:5},(_,i)=>`image###prompt${i}###`).join(' ')};const sent=[];let release;const hold=new Promise(r=>release=r);
 const c={chat:[msg],chatId:'x',extensionSettings:{},saveSettingsDebounced(){},async saveChat(){}};
 const ctrl=createMarkerController({context:()=>c,getData:()=>({options:{markerAuto:true}}),generate:async p=>{sent.push(p);await hold;return 'image';},upload:async()=>({url:'/image.png'}),notify(){}});

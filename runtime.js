@@ -8,7 +8,7 @@ function setTimeout(fn, delay, ...args) {
     timers.add(id); return id;
 }
 function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
-// 智库 · 原生扩展版 v0.8.5（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.6（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -25,7 +25,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.5';
+globalThis.__PC_VERSION = '0.8.6';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -927,7 +927,7 @@ async function generateRequest(opts) {
         if (model.includes('nai-diffusion-5')) { body.tag_hint_uc_preset = params.tag_hint_uc_preset; body.tag_hint_qt = 1; delete body.scheduler; }
         const r = await http('/api/novelai/generate-image', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });
         const text = await r.text();
-        if (!r.ok) throw Object.assign(new Error(explain(r.status, text, true)),{status:r.status,retryAfter:r.headers?.get('Retry-After')});
+        if (!r.ok) throw Object.assign(new Error(explain(r.status, text, true)),{status:r.status,retryAfter:r.headers?.get('Retry-After'),retryable:r.status===500});
         let b64 = text.trim();
         try { const j = JSON.parse(b64); b64 = j.images?.[0] || j.image || j.data || b64; } catch { /* 原样就是 base64 */ }
         return { image: toDataUrl(b64), sent };
@@ -958,7 +958,7 @@ function explain(status, text, viaTavern = false) {
     if (status === 402) return 'NovelAI 点数不够，或者订阅不支持这个尺寸/步数';
     if (status === 429) return 'NovelAI 说太快了，同一个账号一次只能生成一张，等上一张出来再试';
     if (status === 400) return '参数不对：' + msg;
-    if (status >= 500) return 'NovelAI 服务器出错了，过一会再试（' + status + '）';
+    if (status >= 500) return 'NovelAI 服务器出错了，过一会再试（' + status + '）' + (viaTavern ? '。用酒馆里的 key 时，请求太快也会显示成这个' : '');
     return `生成失败（${status}）：${msg}`;
 }
 
@@ -1085,7 +1085,8 @@ function vibeSupported() {
 }
 
 /** 把一张图编码成当前模型能用的氛围（NovelAI 会扣一点点数）。imageB64 不带 data: 前缀 */
-async function encodeVibe(imageB64, infoExtracted = 1, model = settings().novelaimode) {
+function encodeVibe(...args){return __naiGate.run(()=>encodeVibeRequest(...args));}
+async function encodeVibeRequest(imageB64, infoExtracted = 1, model = settings().novelaimode) {
     const key = authKey();
     const r = await http(siteUrl('/ai/encode-vibe'), {
         method: 'POST',
@@ -1093,7 +1094,7 @@ async function encodeVibe(imageB64, infoExtracted = 1, model = settings().novela
         body: JSON.stringify({ image: imageB64, information_extracted: infoExtracted, model }),
     });
     const buf = new Uint8Array(await r.arrayBuffer());
-    if (!r.ok) throw new Error(explain(r.status, new TextDecoder().decode(buf)));
+    if (!r.ok) throw Object.assign(new Error(explain(r.status, new TextDecoder().decode(buf))),{status:r.status,retryAfter:r.headers?.get('Retry-After')});
     if (buf.length < 100) throw new Error('编码结果不对，可能 key 或站点有问题');
     return toB64(buf);
 }
@@ -1156,7 +1157,7 @@ async function inpaintRequest({ image, mask, prompt, negative, width, height, st
         body: JSON.stringify({ action: 'infill', input: prompt, model, parameters, use_new_shared_trial: true }),
     });
     const buf = new Uint8Array(await r.arrayBuffer());
-    if (!r.ok) throw new Error(explain(r.status, new TextDecoder().decode(buf)));
+    if (!r.ok) throw Object.assign(new Error(explain(r.status, new TextDecoder().decode(buf))),{status:r.status,retryAfter:r.headers?.get('Retry-After')});
     return imageFromResponse(buf);
 }
 
@@ -2119,6 +2120,8 @@ return { avatarUrl, stCards, stPersonas, currentPersonaKey, getChar, saveChar, d
 
 // ───── ui.js ─────
 // Marker-triggered generation and prompt-only filtering. No chat LLM request.
+// 智库插进楼层的图片（<img class="pc-chat-img"> / alt="画师库生成"）也不发给聊天 AI
+const CHAT_IMG_PATTERN='<img\\b[^>]*(?:pc-chat-img|画师库生成)[^>]*>';
 const MARKER_REGEX_ID = '72c57f73-46af-46ac-a28e-bf31b131332a';
 const MARKER_DISPLAY_ID = '6ba93a8e-cabb-494c-a7e8-6c9dfcf5fb80';
 function escapeMarker(value) { return value.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'); }
@@ -2148,7 +2151,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
     }
     function syncRegex() {
         const c=context(), {start,end}=settings();
-        const rule={id:MARKER_REGEX_ID,scriptName:'智库 · 生图标记不发送',findRegex:start&&end?'/'+markerPattern(start,end)+'/g':'/(?!)/g',replaceString:'',trimStrings:[],placement:[1,2],disabled:false,markdownOnly:false,promptOnly:true,runOnEdit:false,substituteRegex:0,minDepth:null,maxDepth:null};
+        const rule={id:MARKER_REGEX_ID,scriptName:'智库 · 生图标记不发送',findRegex:'/'+(start&&end?'(?:'+markerPattern(start,end)+')|':'')+CHAT_IMG_PATTERN+'/g',replaceString:'',trimStrings:[],placement:[1,2],disabled:false,markdownOnly:false,promptOnly:true,runOnEdit:false,substituteRegex:0,minDepth:null,maxDepth:null};
         const rules=c.extensionSettings.regex ||= [];
         const display={...rule,id:MARKER_DISPLAY_ID,scriptName:'智库 · 生图标记折叠',findRegex:start&&end?'/'+escapeMarker(start)+'(?!\\s*'+escapeMarker(end)+')[\\s\\S]*?'+escapeMarker(end)+'/g':'/(?!)/g',markdownOnly:true,promptOnly:false,replaceString:'<div class="pc-marker-slot"><details><summary>图片提示词</summary></details><button type="button" class="pc-marker-generate">生成图片</button></div>'};
         let changed=false;
@@ -3974,8 +3977,11 @@ function viewSettings(d) {
       </div>`);
 
     const about = setFold('about', '关于', '智库 v' + (globalThis.__PC_VERSION || ''), `
-      <div class="pc-about"><b>智库</b><div class="pc-subtitle">二改自从前佬的智绘姬</div>
-      <div class="pc-hint">感谢智绘姬原作者。生图走 NovelAI，看图提取需要能识图的模型。</div></div>`);
+      <style>.pc-about-card{text-align:center;padding:22px 10px 10px;border-radius:16px;background:radial-gradient(circle at 50% 0,rgba(201,138,62,.22),transparent 70%)}.pc-about-name{font-family:var(--pc-font-name);font-size:34px;font-weight:800;letter-spacing:.3em;padding-left:.3em;color:var(--pc-ink)}.pc-about-card .pc-subtitle{font-size:13px;margin-top:4px}.pc-about-ver{display:block;margin-top:12px;font:11px var(--pc-font-label);letter-spacing:.25em;color:var(--pc-ink-soft);text-transform:uppercase}.pc-about-card .pc-actions{justify-content:center;margin-top:14px}.pc-about-note{text-align:center;font-size:12px;color:var(--pc-ink-soft);margin-top:12px;line-height:1.7}</style>
+      <div class="pc-about-card"><div class="pc-about-name">智库</div><div class="pc-subtitle">二改自从前佬的智绘姬</div>
+        <span class="pc-about-ver">v${esc(globalThis.__PC_VERSION || '')} · if love</span>
+        <div class="pc-actions wrap"><a class="pc-btn dark" href="https://github.com/ruoege49-ship-it/zhiku-tavern-helper" target="_blank" rel="noopener">仓库 / 更新</a><a class="pc-btn" href="https://github.com/damoshen123/st-chatu8" target="_blank" rel="noopener">智绘姬原仓库</a></div></div>
+      <div class="pc-about-note">看图提取需要能识图的模型 · 原脚本 AFPL v9，署名保留</div>`);
 
     return `<h2 class="pc-pagetitle">设置</h2><div class="pc-marker-primary" style="padding:16px;margin-bottom:16px;border-radius:14px;background:var(--SmartThemeBlurTintColor,rgba(128,128,128,.12))">${sw('markerAuto', '开启标记自动生图', '默认开启 · 回复出现完整生图标记时自动生成，提示词默认折叠')}</div>${chat}${nai}${ai}${tpl}${entry}${share}${ban}${data}${about}<div style="height:24px"></div>`;
 }

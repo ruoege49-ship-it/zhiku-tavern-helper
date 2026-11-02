@@ -16,6 +16,7 @@ assert(rule.promptOnly&&!rule.markdownOnly&&!rule.runOnEdit);assert.deepEqual(ru
 const regex=()=>new RegExp(rule.findRegex.slice(1,-2),'g');
 assert.equal(msg.mes.replace(regex(),''),'before  middle  after');
 assert(msg.mes.includes('image###'),'filter must not mutate message');
+assert.equal('a <img src="/u/x.png" alt="画师库生成" class="pc-chat-img"> b <img src="/u/y.png" alt="画师库生成"> c <img src="keep.png">'.replace(regex(),''),'a  b  c <img src="keep.png">');
 await Promise.all([controller.process(0),controller.process(0)]);
 assert.equal(count,2);assert.equal(peak,1);assert.equal(saves,2);assert.equal(msg.swipes[0],msg.mes);
 assert.equal(Object.keys(msg.extra.zhikuImages).length,2);assert.equal(msg.mes,'before image###sunset### middle image###sea### after');
