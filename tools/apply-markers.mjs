@@ -2,6 +2,9 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 export function applyMarkers(source) {
     function presentation(s) {
+        s=s.replace("      ${sw('markerAuto', '识别完整标记后自动生图', '直接使用标记内的提示词，不额外调用聊天 AI')}\n", '');
+        s=s.replace("<h2 class=\"pc-pagetitle\">设置</h2>${nai}${ai}${tpl}${chat}", "<h2 class=\"pc-pagetitle\">设置</h2><div class=\"pc-marker-primary\" style=\"padding:16px;margin-bottom:16px;border-radius:14px;background:var(--SmartThemeBlurTintColor,rgba(128,128,128,.12))\">${sw('markerAuto', '🖼️ 开启标记自动生图', '默认开启 · 回复出现完整生图标记时自动生成，提示词默认折叠')}</div>${chat}${nai}${ai}${tpl}");
+
         if(!s.includes('__mod_marker.decorateAll();'))s=s.replace('function addMesButtons() {','function addMesButtons() {\n    __mod_marker.decorateAll();');
         if(!s.includes('__mod_marker.refresh();'))s=s.replace('    __mod_marker.syncRegex();','    __mod_marker.syncRegex();\n    setTimeout(() => __mod_marker.refresh(), 0);');
         s=s.replace('<span class="pc-menu-seal"></span><span>智库</span>', '<span class="pc-menu-picture" aria-hidden="true">🖼️</span><span>智库</span>');
