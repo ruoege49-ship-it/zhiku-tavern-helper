@@ -2581,6 +2581,30 @@ function paramFields(s, { withSize = false } = {}) {
       <label class="pc-switch"><input type="checkbox" data-st-check="nai3Variety" ${String(s.nai3Variety) === 'true' ? 'checked' : ''}><span></span>多样性加强（Variety+）<small>画面更多变化，偶尔会乱</small></label>`;
 }
 
+/** 没写 artist: 的画师名：开头一串名字（遇到普通词就停），加上画师库里已有的名字 */
+function guessBareArtists(d, text) {
+    const GENERAL = /^(\d+(boy|girl|other)s?|solo|male|female|nsfw|sfw|rating:.*|year \d{4}|\d{4}|newest|oldest|recent|early|mid|late|masterpiece|absurdres|highres|lowres|very aesthetic|aesthetic|no text|artist collaboration|.*quality.*|ultra[ -_]?detailed)$/i;
+    const nameLike = t => !/\s/.test(t) || /^[^\s()]+ \((?!medium|style)[^()]+\)$/i.test(t);
+    const out = [];
+    let lead = true;
+    for (const t of M.tokenize(text)) {
+        if (t.isArtist) continue;
+        const name = t.text.trim();
+        const known = !!M.findArtistByTag(d, 'artist:' + name);
+        if (lead && (GENERAL.test(name) || !nameLike(name))) lead = false;
+        if ((lead || known) && !GENERAL.test(name) && !out.includes(name)) out.push(name);
+    }
+    return out;
+}
+function addArtistPrefix(text, names) {
+    let s = String(text || '');
+    for (const n of names) {
+        const e = n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        s = s.replace(new RegExp('(^|[,{\\[]|::)(\\s*)(' + e + ')(?=\\s*(?:,|::|[}\\]]|$))', 'g'), '$1$2artist:$3');
+    }
+    return s;
+}
+
 function viewStudio(d) {
     const s = settingsST();
     loadStudio();
@@ -2604,6 +2628,7 @@ function viewStudio(d) {
         ${!owner && st.pos.trim() ? '<button class="pc-pill dashed" data-act="saveartist">存</button>' : ''}
         <button class="pc-pill dashed" data-act="pickartist">换画师</button>
       </div>
+      ${(() => { const bare = guessBareArtists(d, st.pos); return bare.length ? `<div class="pc-bare" style="margin-top:8px"><div class="pc-row-between"><span class="pc-dim small">没写 artist: 的画师名 · 点名字单个补</span><button class="pc-pill tiny on" data-act="addprefix">全部补上</button></div><div class="pc-chips wrap">${bare.map(n => `<button class="pc-pill dashed tiny" data-act="addprefix" data-name="${esc(n)}">${esc(n)}</button>`).join('')}</div></div>` : ''; })()}
       <textarea id="pc-pos" class="pc-textarea mono big" data-bind="studio.pos" placeholder="artist:xxx, 1boy, solo, black hair, sitting, rain …">${esc(st.pos)}</textarea>
       <div id="pc-pos-ban">${banWarn(d, st.pos)}</div>
       <label class="pc-label" for="pc-neg">负面提示词</label>
@@ -2622,6 +2647,7 @@ function viewStudio(d) {
         <button class="pc-btn" data-act="inpaint">局部重绘</button>
         <button class="pc-btn" data-act="insertresult">插到聊天最后一楼</button>
         <a class="pc-btn" href="${esc(st.result)}" download="piaoce_${Date.now()}.png">下载</a>
+        <button class="pc-btn danger" data-act="clearresult">删掉</button>
       </div>
       ${st.sent ? `<details class="pc-details pc-sent-box"><summary>这张图实际发出去的内容（${esc(st.sent.size)} · 种子 ${esc(st.sent.seed)}）</summary>
         <div class="pc-label">正面</div><p class="pc-quote small mono">${esc(st.sent.prompt)}</p>
@@ -4104,6 +4130,13 @@ async function onClick(ev, outside = false) {
                 N.save();
                 ui.naiTest = await N.testConnection();
                 render();
+                break;
+            }
+            case 'clearresult': ui.studio.result = null; ui.studio.sent = null; render(); break;
+            case 'addprefix': {
+                const names = el.dataset.name ? [el.dataset.name] : guessBareArtists(d, ui.studio.pos);
+                ui.studio.pos = addArtistPrefix(ui.studio.pos, names);
+                saveStudio(); render();
                 break;
             }
             case 'saveartist': {

@@ -94,6 +94,50 @@ function applyBindingOnChatChange() {
     }
 }`);
 }
+// 画师名没写 artist: 时：认出来，一键补上
+patch('function viewStudio(d) {',`/** 没写 artist: 的画师名：开头一串名字（遇到普通词就停），加上画师库里已有的名字 */
+function guessBareArtists(d, text) {
+    const GENERAL = /^(\\d+(boy|girl|other)s?|solo|male|female|nsfw|sfw|rating:.*|year \\d{4}|\\d{4}|newest|oldest|recent|early|mid|late|masterpiece|absurdres|highres|lowres|very aesthetic|aesthetic|no text|artist collaboration|.*quality.*|ultra[ -_]?detailed)$/i;
+    const nameLike = t => !/\\s/.test(t) || /^[^\\s()]+ \\((?!medium|style)[^()]+\\)$/i.test(t);
+    const out = [];
+    let lead = true;
+    for (const t of M.tokenize(text)) {
+        if (t.isArtist) continue;
+        const name = t.text.trim();
+        const known = !!M.findArtistByTag(d, 'artist:' + name);
+        if (lead && (GENERAL.test(name) || !nameLike(name))) lead = false;
+        if ((lead || known) && !GENERAL.test(name) && !out.includes(name)) out.push(name);
+    }
+    return out;
+}
+function addArtistPrefix(text, names) {
+    let s = String(text || '');
+    for (const n of names) {
+        const e = n.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
+        s = s.replace(new RegExp('(^|[,{\\\\[]|::)(\\\\s*)(' + e + ')(?=\\\\s*(?:,|::|[}\\\\]]|$))', 'g'), '$1$2artist:$3');
+    }
+    return s;
+}
+
+function viewStudio(d) {`);
+patch(`        <button class="pc-pill dashed" data-act="pickartist">换画师</button>
+      </div>
+      <textarea id="pc-pos"`,`        <button class="pc-pill dashed" data-act="pickartist">换画师</button>
+      </div>
+      \${(() => { const bare = guessBareArtists(d, st.pos); return bare.length ? \`<div class="pc-bare" style="margin-top:8px"><div class="pc-row-between"><span class="pc-dim small">没写 artist: 的画师名 · 点名字单个补</span><button class="pc-pill tiny on" data-act="addprefix">全部补上</button></div><div class="pc-chips wrap">\${bare.map(n => \`<button class="pc-pill dashed tiny" data-act="addprefix" data-name="\${esc(n)}">\${esc(n)}</button>\`).join('')}</div></div>\` : ''; })()}
+      <textarea id="pc-pos"`);
+patch(`        <a class="pc-btn" href="\${esc(st.result)}" download="piaoce_\${Date.now()}.png">下载</a>
+      </div>`,`        <a class="pc-btn" href="\${esc(st.result)}" download="piaoce_\${Date.now()}.png">下载</a>
+        <button class="pc-btn danger" data-act="clearresult">删掉</button>
+      </div>`);
+patch(`            case 'saveartist': {`,`            case 'clearresult': ui.studio.result = null; ui.studio.sent = null; render(); break;
+            case 'addprefix': {
+                const names = el.dataset.name ? [el.dataset.name] : guessBareArtists(d, ui.studio.pos);
+                ui.studio.pos = addArtistPrefix(ui.studio.pos, names);
+                saveStudio(); render();
+                break;
+            }
+            case 'saveartist': {`);
 const oldButtons=s.slice(s.indexOf('    // 酒馆助手的脚本按钮（输入框下方）'),s.indexOf("    if (N.isReady()) toastr.success('打开方式：输入框下方"));
 assert(oldButtons.length>100);
 patch(oldButtons,`    // Native settings entry; no Tavern Helper globals.
