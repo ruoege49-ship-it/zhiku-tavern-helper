@@ -18,7 +18,7 @@ assert.equal(msg.mes.replace(regex(),''),'before  middle  after');
 assert(msg.mes.includes('image###'),'filter must not mutate message');
 await Promise.all([controller.process(0),controller.process(0)]);
 assert.equal(count,2);assert.equal(peak,1);assert.equal(saves,2);assert.equal(msg.swipes[0],msg.mes);
-assert.equal((msg.mes.match(/<img /g)||[]).length,2);
+assert.equal(Object.keys(msg.extra.zhikuImages).length,2);assert.equal(msg.mes,'before image###sunset### middle image###sea### after');
 await controller.process(0);assert.equal(count,2);
 msg.mes='image###retry###';fail=true;await controller.process(0);await controller.process(0);assert.equal(count,3);
 fail=false;await controller.process(0,{manual:true});assert.equal(count,4);
@@ -28,6 +28,9 @@ data.options.imageStartTag='[draw:';data.options.imageEndTag=']';controller.sync
 assert.equal('text [draw:sunset] tail'.replace(regex(),''),'text  tail');
 data.options.markerAuto=false;msg.mes='[draw:off]';const before=count;await controller.process(0);assert.equal(count,before);
 await controller.process(0,{manual:true});assert.equal(count,before+1);
-controller.stop();msg.mes='[draw:stopped]';await controller.process(0,{manual:true});assert.equal(count,before+1);
-console.log('PASS: exact/custom/multiline markers, prompt-only filter, deduplication, serial queue, in-place insertion, swipe persistence, failure retry, chat switch protection, auto toggle and stop.');
-
+const priorSave=c.saveChat;c.saveChat=async()=>{throw Error('save failed');};msg.mes='[draw:save-failure]';
+const oldRecords=JSON.stringify(msg.extra.zhikuImages);await controller.process(0,{manual:true});
+assert.equal(JSON.stringify(msg.extra.zhikuImages),oldRecords);assert.equal(msg.mes,'[draw:save-failure]');c.saveChat=priorSave;
+const countBeforeStop=count;
+controller.stop();msg.mes='[draw:stopped]';await controller.process(0,{manual:true});assert.equal(count,countBeforeStop);
+console.log('PASS: exact/custom/multiline markers, prompt-only filter, deduplication, serial queue, separate image records, preserved message/swipe text, failure retry, chat switch protection, auto toggle and stop.');

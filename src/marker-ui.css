@@ -1,0 +1,40 @@
+/* Button styles adapted from st-chatu8/styles/send_data.css; original attribution retained in README. */
+.mes_text .pc-marker-slot .pc-marker-generate {
+    display: inline-block;
+    padding: 6px 12px;
+    background-color: var(--st-chatu8-accent-primary, #4a90d9);
+    color: var(--st-chatu8-text-highlight, white);
+    border: 1px solid var(--st-chatu8-border-color, transparent);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    margin-left: 0;
+    font-family: inherit;
+    line-height: 1.4;
+    text-decoration: none;
+    box-sizing: border-box;
+    transition: all 0.3s ease;
+}
+
+.mes_text .pc-marker-slot .pc-marker-generate:hover {
+    background-color: var(--st-chatu8-accent-secondary, #357abd);
+}
+
+
+
+.mes_text .pc-marker-slot{display:flex;align-items:center;gap:6px;flex-wrap:wrap;width:auto;padding:0;border:0;background:transparent;margin:8px 0}
+.mes_text .pc-marker-slot>details:not(.pc-result-collapse){flex:0 1 auto;min-width:0;max-width:100%}
+.mes_text .pc-marker-slot summary{font-size:13px;line-height:1.4}
+.mes_text .pc-marker-slot pre{font:13px/1.5 sans-serif;max-height:140px;overflow:auto;white-space:pre-wrap;scrollbar-width:none}
+.mes_text .pc-marker-slot pre::-webkit-scrollbar{display:none}
+.mes_text .pc-marker-slot .pc-result-collapse{flex-basis:100%;margin:8px 0;border-radius:8px;background:transparent;border:none}
+.mes_text .pc-result-collapse>summary{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;user-select:none;background:linear-gradient(135deg,rgba(74,144,226,.15),rgba(74,144,226,.08));font-size:13px;color:#a8c8f0;border-radius:8px}
+.mes_text .pc-result-collapse>summary:before{content:'▸'}
+.mes_text .pc-result-collapse[open]>summary:before{content:'▾'}
+.mes_text .pc-result-image{display:block;max-width:100%;max-height:520px;object-fit:contain;cursor:zoom-in;touch-action:pan-y}
+.pc-image-preview{position:fixed;inset:0;z-index:40000;background:rgba(0,0,0,.95);display:flex;align-items:center;justify-content:center}
+.pc-image-dialog{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:center;width:min(96vw,850px);max-height:96vh;overflow:auto;background:#1a1a2e;color:#fff;padding:12px;border-radius:8px;scrollbar-width:none}
+.pc-image-dialog::-webkit-scrollbar{display:none}
+.pc-image-dialog img{flex-basis:100%;max-width:100%;max-height:75vh;object-fit:contain}
+.pc-image-dialog textarea{flex-basis:100%;width:100%;min-height:160px;font:14px/1.5 sans-serif;scrollbar-width:none}
+.pc-image-dialog button{position:static;padding:6px 12px;min-height:32px;width:auto;font-size:14px}
