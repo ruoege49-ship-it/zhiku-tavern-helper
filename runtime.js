@@ -3872,7 +3872,7 @@ function viewSettings(d) {
       <div class="pc-about"><b>智库</b><div class="pc-subtitle">二改自从前佬的智绘姬</div>
       <div class="pc-hint">感谢智绘姬原作者。生图走 NovelAI，看图提取需要能识图的模型。</div></div>`);
 
-    return `<h2 class="pc-pagetitle">设置</h2><div class="pc-marker-primary" style="padding:16px;margin-bottom:16px;border-radius:14px;background:var(--SmartThemeBlurTintColor,rgba(128,128,128,.12))">${sw('markerAuto', '🖼️ 开启标记自动生图', '默认开启 · 回复出现完整生图标记时自动生成，提示词默认折叠')}</div>${chat}${nai}${ai}${tpl}${entry}${share}${ban}${data}${about}<div style="height:24px"></div>`;
+    return `<h2 class="pc-pagetitle">设置</h2><div class="pc-marker-primary" style="padding:16px;margin-bottom:16px;border-radius:14px;background:var(--SmartThemeBlurTintColor,rgba(128,128,128,.12))">${sw('markerAuto', '开启标记自动生图', '默认开启 · 回复出现完整生图标记时自动生成，提示词默认折叠')}</div>${chat}${nai}${ai}${tpl}${entry}${share}${ban}${data}${about}<div style="height:24px"></div>`;
 }
 
 const VIEWS = { cast: viewCast, charedit: viewCharEdit, outfit: viewOutfit, studio: viewStudio, book: viewBook, artist: viewArtist, group: viewGroup, batch: viewBatch, vibe: viewVibe, lobby: viewLobby, settings: viewSettings };
@@ -5167,7 +5167,7 @@ function addMenuButton() {
     item.id = 'pc-menu-btn';
     item.className = 'list-group-item flex-container flexGap5 interactable';
     item.tabIndex = 0;
-    item.innerHTML = '<span class="pc-menu-picture" aria-hidden="true">🖼️</span><span>智库</span>';
+    item.innerHTML = '<i class="fa-solid fa-image fa-fw" aria-hidden="true"></i><span>智库</span>';
     item.addEventListener('click', () => UI.openWindow());
     menu.appendChild(item);
     cleanups.push(() => item.remove());
@@ -5239,7 +5239,7 @@ async function start() {
         DOC.getElementById('zhiku-extension-settings')?.remove();
         const panel = DOC.createElement('div');
         panel.id = 'zhiku-extension-settings';
-        panel.innerHTML = '<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>智库</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><label class="checkbox_label" style="display:flex;padding:12px 0;font-weight:600"><input type="checkbox" data-zhiku="auto"><span>🖼️ 开启标记自动生图</span></label><div class="inline-drawer-content"><p>画师库、生图与共享上传</p><div class="flex-container flexGap5"><button type="button" class="menu_button" data-zhiku="open">打开智库</button><button type="button" class="menu_button" data-zhiku="switch">切换画师串</button></div></div></div>';
+        panel.innerHTML = '<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>智库</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><label class="checkbox_label" style="display:flex;padding:12px 0;font-weight:600"><input type="checkbox" data-zhiku="auto"><span>开启标记自动生图</span></label><div class="inline-drawer-content"><p>画师库、生图与共享上传</p><div class="flex-container flexGap5"><button type="button" class="menu_button" data-zhiku="open">打开智库</button><button type="button" class="menu_button" data-zhiku="switch">切换画师串</button></div></div></div>';
         panel.querySelector('[data-zhiku="open"]').addEventListener('click', () => UI.openWindow());
         panel.querySelector('[data-zhiku="switch"]').addEventListener('click', () => UI.openSwitcher());
         const autoToggle=panel.querySelector('[data-zhiku="auto"]');

@@ -18,7 +18,7 @@ patch(oldButtons,`    // Native settings entry; no Tavern Helper globals.
         DOC.getElementById('zhiku-extension-settings')?.remove();
         const panel = DOC.createElement('div');
         panel.id = 'zhiku-extension-settings';
-        panel.innerHTML = '<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>智库</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><label class="checkbox_label" style="display:flex;padding:12px 0;font-weight:600"><input type="checkbox" data-zhiku="auto"><span>🖼️ 开启标记自动生图</span></label><div class="inline-drawer-content"><p>画师库、生图与共享上传</p><div class="flex-container flexGap5"><button type="button" class="menu_button" data-zhiku="open">打开智库</button><button type="button" class="menu_button" data-zhiku="switch">切换画师串</button></div></div></div>';
+        panel.innerHTML = '<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>智库</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><label class="checkbox_label" style="display:flex;padding:12px 0;font-weight:600"><input type="checkbox" data-zhiku="auto"><span>开启标记自动生图</span></label><div class="inline-drawer-content"><p>画师库、生图与共享上传</p><div class="flex-container flexGap5"><button type="button" class="menu_button" data-zhiku="open">打开智库</button><button type="button" class="menu_button" data-zhiku="switch">切换画师串</button></div></div></div>';
         panel.querySelector('[data-zhiku="open"]').addEventListener('click', () => UI.openWindow());
         panel.querySelector('[data-zhiku="switch"]').addEventListener('click', () => UI.openSwitcher());
         const autoToggle=panel.querySelector('[data-zhiku="auto"]');
