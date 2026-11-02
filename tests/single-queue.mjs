@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import {createMarkerController} from '../src/marker-generation.js';
+import {createNaiGate} from '../src/nai-gate.js';
+let time=0,calls=0;const waits=[];const gate=createNaiGate({now:()=>time,sleep:async ms=>{waits.push(ms);time+=ms;}});
+await gate.run(async()=>{calls++;if(calls===1)throw Object.assign(Error('limited'),{status:429,retryAfter:'8'});return 'image';});
+assert.equal(calls,2);assert.equal(waits[0],8000);
+await gate.run(async()=>1);assert.equal(waits[1],1500);
+let ordinary=0;await assert.rejects(gate.run(async()=>{ordinary++;throw Object.assign(Error('bad'),{status:400});}));assert.equal(ordinary,1);
+const msg={mes:Array.from({length:5},(_,i)=>`image###prompt${i}###`).join(' ')};const sent=[];let release;const hold=new Promise(r=>release=r);
+const c={chat:[msg],chatId:'x',extensionSettings:{},saveSettingsDebounced(){},async saveChat(){}};
+const ctrl=createMarkerController({context:()=>c,getData:()=>({options:{markerAuto:true}}),generate:async p=>{sent.push(p);await hold;return 'image';},upload:async()=>({url:'/image.png'}),notify(){}});
+await ctrl.process(0,{manual:true});assert.equal(sent.length,0,'ambiguous floor action cannot generate five');
+const one=ctrl.process(0,{manual:true,tokenIndex:2});const duplicate=ctrl.process(0,{manual:true,tokenIndex:2});await Promise.resolve();assert.deepEqual(sent,['prompt2']);release();await Promise.all([one,duplicate]);assert.equal(sent.length,1);
+await ctrl.process(0,{manual:true,tokenIndex:4});assert.deepEqual(sent,['prompt2','prompt4']);
+await ctrl.process(0);assert.equal(sent.length,5);assert.equal(new Set(sent).size,5);
+ctrl.stop();gate.stop();console.log('PASS: five markers, one click/one request, dedup, remaining auto work, Retry-After, interval and non-429 no retry.');

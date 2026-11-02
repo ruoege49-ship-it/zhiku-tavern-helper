@@ -2,6 +2,20 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 export function applyMarkers(source) {
     function presentation(s) {
+        if(!s.includes('const __naiGate=')){
+            const gate=fs.readFileSync(new URL('../src/nai-gate.js',import.meta.url),'utf8').replace(/^export /gm,'');
+            s=s.replace('async function generate(opts) {',gate+"\nconst __naiGate=createNaiGate({notice:message=>toastr.info(message,'智库 · 生图排队')});\nfunction generate(opts){return __naiGate.run(()=>generateRequest(opts));}\nasync function generateRequest(opts) {");
+            s=s.replace('throw new Error(explain(r.status, text, true))',"throw Object.assign(new Error(explain(r.status, text, true)),{status:r.status,retryAfter:r.headers?.get('Retry-After')})");
+            s=s.replace('throw new Error(explain(r.status, new TextDecoder().decode(buf)))',"throw Object.assign(new Error(explain(r.status, new TextDecoder().decode(buf))),{status:r.status,retryAfter:r.headers?.get('Retry-After')})");
+            s=s.replace('async function inpaint({ image, mask, prompt, negative, width, height, strength = 0.7 }) {','function inpaint(opts){return __naiGate.run(()=>inpaintRequest(opts));}\nasync function inpaintRequest({ image, mask, prompt, negative, width, height, strength = 0.7 }) {');
+            s=s.replace('return { MODELS, SAMPLERS,', 'return { stopQueue:()=>__naiGate.stop(), MODELS, SAMPLERS,');
+            s=s.replace('    cleanups.push(() => __mod_marker.stop());','    cleanups.push(() => {__mod_marker.stop();__mod_nai.stopQueue();});');
+        }
+        s=s.replace("b.title = '智库：识别这一楼的文生图标记';", "b.title = '智库：请在对应提示词旁点击生成';");
+        s=s.replace('const onUserRendered = id => { onRendered(id); setTimeout(() => { void __mod_marker.process(Number(id)); }, 0); };','const onUserRendered = id => { onRendered(id); };');
+        s=s.replace('const onEdited = id => { onRendered(id); setTimeout(() => { void __mod_marker.process(Number(id)); }, 0); };','const onEdited = id => { onRendered(id); };');
+        s=s.replace(', [event_types.GENERATION_ENDED, () => { const id=SillyTavern.getContext().chat.length-1; setTimeout(() => { void __mod_marker.process(id); }, 0); }]','');
+
         s=s.replace(/context:\(\)=>SillyTavern\.getContext\(\),getData:__mod_store\.getData,(?:document:DOC,)*/, 'context:()=>SillyTavern.getContext(),getData:__mod_store.getData,document:DOC,');
         s=s.replace('    setTimeout(() => __mod_marker.refresh(), 0);\n    setTimeout(() => __mod_marker.refresh(), 0);','    setTimeout(() => __mod_marker.refresh(), 0);');
         s=s.replace('<span class="pc-menu-picture" aria-hidden="true">🖼️</span>', '<i class="fa-solid fa-image fa-fw" aria-hidden="true"></i>');

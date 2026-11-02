@@ -8,7 +8,7 @@ function setTimeout(fn, delay, ...args) {
     timers.add(id); return id;
 }
 function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
-// 智库 · 原生扩展版 v0.8.4（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.5（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -25,7 +25,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.4';
+globalThis.__PC_VERSION = '0.8.5';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -889,7 +889,26 @@ function authKey() {
  * 生成一张图，返回 data:image/png;base64,...
  * 同时返回实际发送的内容 sent，给界面展示
  */
-async function generate(opts) {
+function createNaiGate({sleep=ms=>new Promise(r=>setTimeout(r,ms)),now=()=>Date.now(),notice=()=>{},gap=1500}={}) {
+ let queue=Promise.resolve(),next=0,stopped=false;
+ return {stop(){stopped=true;},run(fn){const job=queue.then(async()=>{
+  for(let attempt=0;;attempt++){
+   if(stopped)throw new Error('生图已停止');
+   const delay=next-now();if(delay>0)await sleep(delay);
+   if(stopped)throw new Error('生图已停止');
+   try{return await fn();}
+   catch(e){if(e.status!==429||attempt>=2)throw e;
+    const seconds=Number(e.retryAfter),date=Date.parse(e.retryAfter);
+    const retry=Number.isFinite(seconds)&&seconds>0?seconds*1000:Number.isFinite(date)?Math.max(0,date-now()):0;
+    next=now()+Math.max(retry,5000*2**attempt);notice('请求受到限流，等待 '+Math.ceil((next-now())/1000)+' 秒后重试');
+   }finally{next=Math.max(next,now()+gap);}
+  }
+ });queue=job.catch(()=>{});return job;}};
+}
+
+const __naiGate=createNaiGate({notice:message=>toastr.info(message,'智库 · 生图排队')});
+function generate(opts){return __naiGate.run(()=>generateRequest(opts));}
+async function generateRequest(opts) {
     const s = settings();
     const model = s.novelaimode;
     const params = buildParameters(opts);
@@ -908,7 +927,7 @@ async function generate(opts) {
         if (model.includes('nai-diffusion-5')) { body.tag_hint_uc_preset = params.tag_hint_uc_preset; body.tag_hint_qt = 1; delete body.scheduler; }
         const r = await http('/api/novelai/generate-image', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });
         const text = await r.text();
-        if (!r.ok) throw new Error(explain(r.status, text, true));
+        if (!r.ok) throw Object.assign(new Error(explain(r.status, text, true)),{status:r.status,retryAfter:r.headers?.get('Retry-After')});
         let b64 = text.trim();
         try { const j = JSON.parse(b64); b64 = j.images?.[0] || j.image || j.data || b64; } catch { /* 原样就是 base64 */ }
         return { image: toDataUrl(b64), sent };
@@ -920,7 +939,7 @@ async function generate(opts) {
         body: JSON.stringify({ input: opts.positive, model, action: 'generate', parameters: params, use_new_shared_trial: true }),
     });
     const buf = new Uint8Array(await r.arrayBuffer());
-    if (!r.ok) throw new Error(explain(r.status, new TextDecoder().decode(buf)));
+    if (!r.ok) throw Object.assign(new Error(explain(r.status, new TextDecoder().decode(buf))),{status:r.status,retryAfter:r.headers?.get('Retry-After')});
     return { image: await imageFromResponse(buf), sent };
 }
 
@@ -1111,7 +1130,8 @@ function inpaintModel(model = settings().novelaimode) {
 }
 
 /** image、mask 都是不带前缀的 PNG base64（mask：白色 = 重画） */
-async function inpaint({ image, mask, prompt, negative, width, height, strength = 0.7 }) {
+function inpaint(opts){return __naiGate.run(()=>inpaintRequest(opts));}
+async function inpaintRequest({ image, mask, prompt, negative, width, height, strength = 0.7 }) {
     const s = settings();
     if (s.naiMode === 'tavern') throw new Error('「用酒馆里的 key」不能局部重绘，到设置里改成「填我的 key」');
     const key = authKey();
@@ -1140,7 +1160,7 @@ async function inpaint({ image, mask, prompt, negative, width, height, strength 
     return imageFromResponse(buf);
 }
 
-return { MODELS, SAMPLERS, SCHEDULES, settings, save, isReady, ucpValue, buildParameters, generate, unzipFirstImage, testConnection, importFromZhihuiji, encKey, vibeSupported, encodeVibe, parseVibeFile, charRefSupported, inpaintModel, inpaint };
+return { stopQueue:()=>__naiGate.stop(), MODELS, SAMPLERS, SCHEDULES, settings, save, isReady, ucpValue, buildParameters, generate, unzipFirstImage, testConnection, importFromZhihuiji, encKey, vibeSupported, encodeVibe, parseVibeFile, charRefSupported, inpaintModel, inpaint };
 })();
 
 // ───── engine.js ─────
@@ -2140,6 +2160,8 @@ function createMarkerController({context,getData,generate,upload,notify,document
         }
         if(changed)c.saveSettingsDebounced();
     }
+    function state(msg,token){return pending.get(msg)?.get(recordKey(msg,token))?.state;}
+    function label(msg,token,record){return state(msg,token)|| (failed.get(msg)?.has(recordKey(msg,token))?'重试生成':record?.url?'重新生成':'生成图片');}
     function decorate(id) {
         if(!doc || stopped)return;
         const cfg=settings(),msg=context().chat?.[id];
@@ -2152,13 +2174,13 @@ function createMarkerController({context,getData,generate,upload,notify,document
             const token=tokens[index];if(!token)return;
             const record=msg.extra?.zhikuImages?.[recordKey(msg,token)];
             const ready=token.raw+'|'+(record?.url||'');
-            if(slot.dataset.pcReady===ready) { const b=slot.querySelector('button');if(b){b.disabled=pending.has(msg);b.textContent=b.disabled?'生成中…':failed.get(msg)===String(msg.mes)?'重试生成':record?.url?'重新生成':'生成图片';}return; }
+            if(slot.dataset.pcReady===ready) { const b=slot.querySelector('button');if(b){b.disabled=!!state(msg,token);b.textContent=label(msg,token,record);}return; }
             slot.dataset.pcReady=ready;
             slot.replaceChildren();
             const details=doc.createElement('details'),summary=doc.createElement('summary'),pre=doc.createElement('pre'),button=doc.createElement('button');
             summary.textContent='图片提示词';pre.textContent=token.prompt;
             details.append(summary,pre);button.type='button';button.className='pc-marker-generate';button.title='点击生成，长按编辑提示词';
-            button.disabled=pending.has(msg);button.textContent=button.disabled?'生成中…':'生成图片';
+            button.disabled=!!state(msg,token);button.textContent=label(msg,token,record);
             button.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(button._pcHeld)return;void process(Number(id),{manual:true,tokenIndex:index});});
             slot.append(details,button);
             const edit=()=>editPrompt(id,msg,token,index);
@@ -2170,7 +2192,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
                 wrapper.append(header,img);slot.append(wrapper);
                 img.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(!img._pcHeld)preview(id,msg,token,index,record);});
                 bindHold(img,edit);
-                button.textContent=pending.has(msg)?'生成中…':'重新生成';
+                button.textContent=label(msg,token,record);
             }
 
         });
@@ -2192,7 +2214,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
         if(!old)return;
         records[key]={deleted:true};
         try{await context().saveChat();}catch(e){records[key]=old;throw e;}
-        failed.set(msg,String(msg.mes));decorate(id);
+        decorate(id);
     }
     function preview(id,msg,token,index,record){
         const {box,dismiss}=dialog(),img=doc.createElement('img'),download=doc.createElement('a'),edit=doc.createElement('button'),remove=doc.createElement('button');
@@ -2244,7 +2266,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
                 const next=source.slice(0,tag.index)+raw+source.slice(tag.index+tag[0].length);
                 const swipes=Array.isArray(msg.swipes)&&Number.isInteger(swipe)?msg.swipes:null,oldSwipe=swipes?.[swipe];
                 msg.mes=next;if(swipes)swipes[swipe]=next;
-                try {await context().saveChat();failed.set(msg,next);context().updateMessageBlock(id,msg);decorate(id);}
+                try {await context().saveChat();context().updateMessageBlock(id,msg);decorate(id);}
                 catch(e){msg.mes=source;if(swipes)swipes[swipe]=oldSwipe;notify(e.message||String(e),'error');}
             };
             img.addEventListener('contextmenu',e=>{e.preventDefault();bar.hidden=false;remove.focus();});
@@ -2266,45 +2288,36 @@ function createMarkerController({context,getData,generate,upload,notify,document
     }
     const chatKey=c=>String(c.getCurrentChatId?.() ?? c.chatId ?? '')+'|'+String(c.characterId ?? '')+'|'+String(c.groupId ?? '');
     async function process(id,{manual=false,tokenIndex=null,promptOverride=null}={}) {
-        const c=context(), msg=c.chat?.[id], cfg=settings();
-        if(stopped || !msg || msg.is_system || (!manual && !cfg.auto))return 0;
-        const source=String(msg.mes || ''), swipe=msg.swipe_id;
-        const allTokens=parseImageMarkers(source,cfg.start,cfg.end);
-        const tokens=(tokenIndex===null?allTokens:allTokens.filter((_,i)=>i===tokenIndex)).filter(t=>manual||!msg.extra?.zhikuImages?.[recordKey(msg,t)]);
-        if(!tokens.length) { if(manual)notify(`没有完整生图标记，请使用 ${cfg.start}提示词${cfg.end}`,'info');return 0; }
-        if(pending.has(msg))return pending.get(msg);
-        if(!manual && failed.get(msg)===source)return 0;
-        const key=chatKey(c);
-        const job=queue.then(async()=>{
-            let expected=source, count=0, offset=0;
-            const current=()=>!stopped && chatKey(context())===key && context().chat?.[id]===msg && msg.swipe_id===swipe && String(msg.mes || '')===expected;
-            if(!current())return 0;
-            try {
-                for(const token of tokens) {
-                    if(!current())break;
-                    const effectivePrompt=promptOverride??msg.extra?.zhikuImages?.[recordKey(msg,token)]?.prompt??token.prompt;
-                    const image=await generate(effectivePrompt);
-                    if(!current()) { notify('图片生成时聊天或消息已变化，已停止插入。','info');break; }
-                    const {url}=await upload(image,'marker_'+Date.now());
-                    if(!current())break;
+        const c=context(),msg=c.chat?.[id],cfg=settings();
+        if(stopped||!msg||msg.is_system||(!manual&&(!cfg.auto||msg.is_user)))return 0;
+        const source=String(msg.mes||''),swipe=msg.swipe_id,chat=chatKey(c),all=parseImageMarkers(source,cfg.start,cfg.end);
+        if(manual&&tokenIndex===null&&all.length>1){notify('请点击具体提示词旁的生成按钮，一次只生成所选图片','info');decorate(id);return 0;}
+        const selected=tokenIndex===null?all:all.filter((_,i)=>i===tokenIndex);
+        if(!selected.length){if(manual)notify('没有完整生图标记','info');return 0;}
+        const jobs=selected.map(token=>{
+            const key=recordKey(msg,token);let map=pending.get(msg);
+            if(map?.has(key))return map.get(key).job;
+            if(!manual&&(msg.extra?.zhikuImages?.[key]||failed.get(msg)?.has(key)))return Promise.resolve(0);
+            if(!map){map=new Map();pending.set(msg,map);}
+            const entry={state:'排队中…',job:null};map.set(key,entry);
+            const current=()=>!stopped&&chatKey(context())===chat&&context().chat?.[id]===msg&&msg.swipe_id===swipe&&String(msg.mes||'')===source;
+            const job=queue.then(async()=>{
+                if(!current())return 0;
+                entry.state='生成中…';decorate(id);
+                try {
+                    const prompt=promptOverride??msg.extra?.zhikuImages?.[key]?.prompt??token.prompt;
+                    const image=await generate(prompt);if(!current())return 0;
+                    entry.state='保存中…';decorate(id);
+                    const {url}=await upload(image,'marker_'+Date.now());if(!current())return 0;
                     if(!url)throw new Error('图片上传未返回地址');
-                    const hadExtra=!!msg.extra;msg.extra ||= {};
-                    const hadRecords=!!msg.extra.zhikuImages;const records=msg.extra.zhikuImages ||= {},key=recordKey(msg,token),old=records[key];
-                    records[key]={url:String(url),prompt:effectivePrompt};
-                    try {await context().saveChat();}
-                    catch(e){if(old)records[key]=old;else delete records[key];if(!hadRecords&&!Object.keys(records).length)delete msg.extra.zhikuImages;if(!hadExtra&&!Object.keys(msg.extra).length)delete msg.extra;throw e;}
-                    count++;
-                    if(current())decorate(id);
-                }
-                if(count)notify(`已按标记生成 ${count} 张图片`,'success');
-                failed.delete(msg);
-                return count;
-            } catch(e) { failed.set(msg,String(msg.mes || ''));notify(e.message || String(e),'error');return count; }
+                    const hadExtra=!!msg.extra;msg.extra ||= {};const hadRecords=!!msg.extra.zhikuImages,records=msg.extra.zhikuImages ||= {},old=records[key];records[key]={url:String(url),prompt};
+                    try{await c.saveChat();}catch(e){if(old)records[key]=old;else delete records[key];if(!hadRecords&&!Object.keys(records).length)delete msg.extra.zhikuImages;if(!hadExtra&&!Object.keys(msg.extra).length)delete msg.extra;throw e;}
+                    failed.get(msg)?.delete(key);return 1;
+                }catch(e){let errors=failed.get(msg);if(!errors){errors=new Set();failed.set(msg,errors);}errors.add(key);notify(e.message||String(e),'error');return 0;}
+            }).finally(()=>{map.delete(key);if(!map.size)pending.delete(msg);if(current())decorate(id);});
+            entry.job=job;queue=job.catch(()=>{});return job;
         });
-        pending.set(msg,job);
-        decorate(id);
-        queue=job.catch(()=>{});
-        try {return await job;} finally {pending.delete(msg);decorate(id);}
+        decorate(id);return (await Promise.all(jobs)).reduce((a,b)=>a+b,0);
     }
     return {settings,syncRegex,process,decorate,decorateAll,refresh,stop(){stopped=true;for(const timer of holds)clearTimeout(timer);holds.clear();for(const el of overlays)el.remove();overlays.clear();if(doc)doc.querySelectorAll('.pc-image-actions').forEach(el=>el.remove());},idle(){return queue;}};
 }
@@ -5228,7 +5241,7 @@ function addMesButtons() {
         box.prepend(o);
         const b = DOC.createElement('div');
         b.className = 'mes_button pc-mes-gen fa-solid fa-image interactable';
-        b.title = '智库：识别这一楼的文生图标记';
+        b.title = '智库：请在对应提示词旁点击生成';
         b.tabIndex = 0;
         box.prepend(b);
     });
@@ -5282,7 +5295,7 @@ async function start() {
     __mod_marker.syncRegex();
     setTimeout(() => __mod_marker.refresh(), 0);
     setTimeout(() => __mod_marker.refresh(), 0);
-    cleanups.push(() => __mod_marker.stop());
+    cleanups.push(() => {__mod_marker.stop();__mod_nai.stopQueue();});
     // 第一次用：装过智绘姬的话，把 NovelAI key 和画师搬过来
     const ns = N.settings();
     if (!ns.__imported) {
@@ -5299,13 +5312,13 @@ async function start() {
     DOC.addEventListener('click', onChatClick, true);
     cleanups.push(() => { DOC.removeEventListener('click', onChatClick, true); DOC.querySelectorAll('.pc-mes-gen, .pc-mes-outfit').forEach(n => n.remove()); });
     const onRendered = id => { setTimeout(addMesButtons, 50); };
-    const onUserRendered = id => { onRendered(id); setTimeout(() => { void __mod_marker.process(Number(id)); }, 0); };
-    const onEdited = id => { onRendered(id); setTimeout(() => { void __mod_marker.process(Number(id)); }, 0); };
+    const onUserRendered = id => { onRendered(id); };
+    const onEdited = id => { onRendered(id); };
     const onCharMsg = id => {
         setTimeout(addMesButtons, 50);
         setTimeout(() => { void __mod_marker.process(Number(id)); }, 0);
     };
-    for (const [ev, fn] of [[event_types.USER_MESSAGE_RENDERED, onUserRendered], [event_types.CHARACTER_MESSAGE_RENDERED, onCharMsg], [event_types.MORE_MESSAGES_LOADED, onRendered], [event_types.GENERATION_ENDED, () => { const id=SillyTavern.getContext().chat.length-1; setTimeout(() => { void __mod_marker.process(id); }, 0); }], [event_types.MESSAGE_UPDATED, onEdited]]) {
+    for (const [ev, fn] of [[event_types.USER_MESSAGE_RENDERED, onUserRendered], [event_types.CHARACTER_MESSAGE_RENDERED, onCharMsg], [event_types.MORE_MESSAGES_LOADED, onRendered], [event_types.MESSAGE_UPDATED, onEdited]]) {
         if (!ev) continue;
         eventSource.on(ev, fn);
         cleanups.push(() => eventSource.removeListener?.(ev, fn));

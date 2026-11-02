@@ -40,6 +40,8 @@ export function createMarkerController({context,getData,generate,upload,notify,d
         }
         if(changed)c.saveSettingsDebounced();
     }
+    function state(msg,token){return pending.get(msg)?.get(recordKey(msg,token))?.state;}
+    function label(msg,token,record){return state(msg,token)|| (failed.get(msg)?.has(recordKey(msg,token))?'重试生成':record?.url?'重新生成':'生成图片');}
     function decorate(id) {
         if(!doc || stopped)return;
         const cfg=settings(),msg=context().chat?.[id];
@@ -52,13 +54,13 @@ export function createMarkerController({context,getData,generate,upload,notify,d
             const token=tokens[index];if(!token)return;
             const record=msg.extra?.zhikuImages?.[recordKey(msg,token)];
             const ready=token.raw+'|'+(record?.url||'');
-            if(slot.dataset.pcReady===ready) { const b=slot.querySelector('button');if(b){b.disabled=pending.has(msg);b.textContent=b.disabled?'生成中…':failed.get(msg)===String(msg.mes)?'重试生成':record?.url?'重新生成':'生成图片';}return; }
+            if(slot.dataset.pcReady===ready) { const b=slot.querySelector('button');if(b){b.disabled=!!state(msg,token);b.textContent=label(msg,token,record);}return; }
             slot.dataset.pcReady=ready;
             slot.replaceChildren();
             const details=doc.createElement('details'),summary=doc.createElement('summary'),pre=doc.createElement('pre'),button=doc.createElement('button');
             summary.textContent='图片提示词';pre.textContent=token.prompt;
             details.append(summary,pre);button.type='button';button.className='pc-marker-generate';button.title='点击生成，长按编辑提示词';
-            button.disabled=pending.has(msg);button.textContent=button.disabled?'生成中…':'生成图片';
+            button.disabled=!!state(msg,token);button.textContent=label(msg,token,record);
             button.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(button._pcHeld)return;void process(Number(id),{manual:true,tokenIndex:index});});
             slot.append(details,button);
             const edit=()=>editPrompt(id,msg,token,index);
@@ -70,7 +72,7 @@ export function createMarkerController({context,getData,generate,upload,notify,d
                 wrapper.append(header,img);slot.append(wrapper);
                 img.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(!img._pcHeld)preview(id,msg,token,index,record);});
                 bindHold(img,edit);
-                button.textContent=pending.has(msg)?'生成中…':'重新生成';
+                button.textContent=label(msg,token,record);
             }
 
         });
@@ -92,7 +94,7 @@ export function createMarkerController({context,getData,generate,upload,notify,d
         if(!old)return;
         records[key]={deleted:true};
         try{await context().saveChat();}catch(e){records[key]=old;throw e;}
-        failed.set(msg,String(msg.mes));decorate(id);
+        decorate(id);
     }
     function preview(id,msg,token,index,record){
         const {box,dismiss}=dialog(),img=doc.createElement('img'),download=doc.createElement('a'),edit=doc.createElement('button'),remove=doc.createElement('button');
@@ -144,7 +146,7 @@ export function createMarkerController({context,getData,generate,upload,notify,d
                 const next=source.slice(0,tag.index)+raw+source.slice(tag.index+tag[0].length);
                 const swipes=Array.isArray(msg.swipes)&&Number.isInteger(swipe)?msg.swipes:null,oldSwipe=swipes?.[swipe];
                 msg.mes=next;if(swipes)swipes[swipe]=next;
-                try {await context().saveChat();failed.set(msg,next);context().updateMessageBlock(id,msg);decorate(id);}
+                try {await context().saveChat();context().updateMessageBlock(id,msg);decorate(id);}
                 catch(e){msg.mes=source;if(swipes)swipes[swipe]=oldSwipe;notify(e.message||String(e),'error');}
             };
             img.addEventListener('contextmenu',e=>{e.preventDefault();bar.hidden=false;remove.focus();});
@@ -166,45 +168,36 @@ export function createMarkerController({context,getData,generate,upload,notify,d
     }
     const chatKey=c=>String(c.getCurrentChatId?.() ?? c.chatId ?? '')+'|'+String(c.characterId ?? '')+'|'+String(c.groupId ?? '');
     async function process(id,{manual=false,tokenIndex=null,promptOverride=null}={}) {
-        const c=context(), msg=c.chat?.[id], cfg=settings();
-        if(stopped || !msg || msg.is_system || (!manual && !cfg.auto))return 0;
-        const source=String(msg.mes || ''), swipe=msg.swipe_id;
-        const allTokens=parseImageMarkers(source,cfg.start,cfg.end);
-        const tokens=(tokenIndex===null?allTokens:allTokens.filter((_,i)=>i===tokenIndex)).filter(t=>manual||!msg.extra?.zhikuImages?.[recordKey(msg,t)]);
-        if(!tokens.length) { if(manual)notify(`没有完整生图标记，请使用 ${cfg.start}提示词${cfg.end}`,'info');return 0; }
-        if(pending.has(msg))return pending.get(msg);
-        if(!manual && failed.get(msg)===source)return 0;
-        const key=chatKey(c);
-        const job=queue.then(async()=>{
-            let expected=source, count=0, offset=0;
-            const current=()=>!stopped && chatKey(context())===key && context().chat?.[id]===msg && msg.swipe_id===swipe && String(msg.mes || '')===expected;
-            if(!current())return 0;
-            try {
-                for(const token of tokens) {
-                    if(!current())break;
-                    const effectivePrompt=promptOverride??msg.extra?.zhikuImages?.[recordKey(msg,token)]?.prompt??token.prompt;
-                    const image=await generate(effectivePrompt);
-                    if(!current()) { notify('图片生成时聊天或消息已变化，已停止插入。','info');break; }
-                    const {url}=await upload(image,'marker_'+Date.now());
-                    if(!current())break;
+        const c=context(),msg=c.chat?.[id],cfg=settings();
+        if(stopped||!msg||msg.is_system||(!manual&&(!cfg.auto||msg.is_user)))return 0;
+        const source=String(msg.mes||''),swipe=msg.swipe_id,chat=chatKey(c),all=parseImageMarkers(source,cfg.start,cfg.end);
+        if(manual&&tokenIndex===null&&all.length>1){notify('请点击具体提示词旁的生成按钮，一次只生成所选图片','info');decorate(id);return 0;}
+        const selected=tokenIndex===null?all:all.filter((_,i)=>i===tokenIndex);
+        if(!selected.length){if(manual)notify('没有完整生图标记','info');return 0;}
+        const jobs=selected.map(token=>{
+            const key=recordKey(msg,token);let map=pending.get(msg);
+            if(map?.has(key))return map.get(key).job;
+            if(!manual&&(msg.extra?.zhikuImages?.[key]||failed.get(msg)?.has(key)))return Promise.resolve(0);
+            if(!map){map=new Map();pending.set(msg,map);}
+            const entry={state:'排队中…',job:null};map.set(key,entry);
+            const current=()=>!stopped&&chatKey(context())===chat&&context().chat?.[id]===msg&&msg.swipe_id===swipe&&String(msg.mes||'')===source;
+            const job=queue.then(async()=>{
+                if(!current())return 0;
+                entry.state='生成中…';decorate(id);
+                try {
+                    const prompt=promptOverride??msg.extra?.zhikuImages?.[key]?.prompt??token.prompt;
+                    const image=await generate(prompt);if(!current())return 0;
+                    entry.state='保存中…';decorate(id);
+                    const {url}=await upload(image,'marker_'+Date.now());if(!current())return 0;
                     if(!url)throw new Error('图片上传未返回地址');
-                    const hadExtra=!!msg.extra;msg.extra ||= {};
-                    const hadRecords=!!msg.extra.zhikuImages;const records=msg.extra.zhikuImages ||= {},key=recordKey(msg,token),old=records[key];
-                    records[key]={url:String(url),prompt:effectivePrompt};
-                    try {await context().saveChat();}
-                    catch(e){if(old)records[key]=old;else delete records[key];if(!hadRecords&&!Object.keys(records).length)delete msg.extra.zhikuImages;if(!hadExtra&&!Object.keys(msg.extra).length)delete msg.extra;throw e;}
-                    count++;
-                    if(current())decorate(id);
-                }
-                if(count)notify(`已按标记生成 ${count} 张图片`,'success');
-                failed.delete(msg);
-                return count;
-            } catch(e) { failed.set(msg,String(msg.mes || ''));notify(e.message || String(e),'error');return count; }
+                    const hadExtra=!!msg.extra;msg.extra ||= {};const hadRecords=!!msg.extra.zhikuImages,records=msg.extra.zhikuImages ||= {},old=records[key];records[key]={url:String(url),prompt};
+                    try{await c.saveChat();}catch(e){if(old)records[key]=old;else delete records[key];if(!hadRecords&&!Object.keys(records).length)delete msg.extra.zhikuImages;if(!hadExtra&&!Object.keys(msg.extra).length)delete msg.extra;throw e;}
+                    failed.get(msg)?.delete(key);return 1;
+                }catch(e){let errors=failed.get(msg);if(!errors){errors=new Set();failed.set(msg,errors);}errors.add(key);notify(e.message||String(e),'error');return 0;}
+            }).finally(()=>{map.delete(key);if(!map.size)pending.delete(msg);if(current())decorate(id);});
+            entry.job=job;queue=job.catch(()=>{});return job;
         });
-        pending.set(msg,job);
-        decorate(id);
-        queue=job.catch(()=>{});
-        try {return await job;} finally {pending.delete(msg);decorate(id);}
+        decorate(id);return (await Promise.all(jobs)).reduce((a,b)=>a+b,0);
     }
     return {settings,syncRegex,process,decorate,decorateAll,refresh,stop(){stopped=true;for(const timer of holds)clearTimeout(timer);holds.clear();for(const el of overlays)el.remove();overlays.clear();if(doc)doc.querySelectorAll('.pc-image-actions').forEach(el=>el.remove());},idle(){return queue;}};
 }
