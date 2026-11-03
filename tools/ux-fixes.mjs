@@ -15,5 +15,14 @@ export function applyUxFixes(s) {
         assert.equal(s.split(a).length, 2, '补丁原文不唯一或找不到：' + a.slice(0, 80));
         s = s.replace(a, () => n);
     }
+    // 0.8.7：手机美化兼容。有的美化给 body 加 transform / filter，窗口就只剩一截、还透出聊天；
+    // 所以窗口和弹窗挂到 <html> 上，层级抬到最高，背景不再依赖美化的颜色变量。
+    s = s.replace('const DOC = P.document;', 'const DOC = P.document;\nconst pcMount = el => (DOC.documentElement || DOC.body).appendChild(el);');
+    assert(s.includes('const pcMount'), '没找到 DOC 定义');
+    s = s.replaceAll('DOC.body.appendChild(', 'pcMount(');
+    for (const [a, b] of [['30000', '2147480000'], ['30010', '2147480010'], ['30020', '2147480020'], ['30030', '2147480030'], ['30050', '2147480050']]) {
+        assert(s.includes('z-index: ' + a), 'z-index ' + a);
+        s = s.replaceAll('z-index: ' + a, 'z-index: ' + b);
+    }
     return s;
 }

@@ -712,3 +712,15 @@ function pairChips(list, where) {
 .pc-outsec-h small { color: var(--pc-ink-soft); font-size: 12px; }
 .pc-outsec .pc-pairs { margin-top: 6px; }
 @@@ END
+
+═══ 11. 手机美化兼容：窗口铺满整屏、背景不透明（配合 ux-fixes.mjs 里挂到 <html> 和抬高层级） ═══
+@@@ OLD
+.pc-outsec .pc-pairs { margin-top: 6px; }
+@@@ NEW
+.pc-outsec .pc-pairs { margin-top: 6px; }
+#pc-root.pc-overlay, .pc-sheet-backdrop, .pc-modal-backdrop { position: fixed !important; top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important; width: 100vw !important; height: 100vh !important; height: 100dvh !important; max-width: none !important; max-height: none !important; margin: 0 !important; transform: none !important; filter: none !important; opacity: 1 !important; }
+#pc-root.pc-overlay { background-color: #7ea29c !important; background-image: radial-gradient(rgba(28, 34, 38, .22) 1px, transparent 1.5px), linear-gradient(var(--pc-mist), var(--pc-mist)) !important; background-size: 7px 7px, auto !important; }
+#pc-root.pc-overlay:not(.open) { display: none !important; }
+#pc-root.pc-overlay.open { display: block !important; }
+#toast-container { z-index: 2147483600 !important; }
+@@@ END
