@@ -1185,7 +1185,9 @@ function stSettings() { return N.settings(); }
 
 /** 正面、负面最后会被自动加上的质量词和负面预设 */
 function extras(s = N.settings()) {
-    return qualityPresets({ ...s, UCP_novelai: N.ucpValue(s) });
+    const r = qualityPresets({ ...s, UCP_novelai: N.ucpValue(s) });
+    if (String(s.UCP_novelai) === 'custom') r.ucp = String(s.UCP_custom || '').trim();
+    return r;
 }
 
 const stripNotes = t => { let r = String(t || ''), prev; do { prev = r; r = r.replace(/（[^（）]*）/g, ''); } while (r !== prev); return r; };
@@ -2601,7 +2603,7 @@ function previewHtml(s) {
 
 function ucpOptions(s) {
     const v5 = String(s.novelaimode || '').includes('nai-diffusion-5');
-    const o = [['', '不加'], ['Heavy', '重（Heavy）'], ['Light', '轻（Light）']];
+    const o = [['', '不加'], ['custom', '自定义'], ['Heavy', '重（Heavy）'], ['Light', '轻（Light）']];
     if (v5 || ['nai-diffusion-3', 'nai-diffusion-4-5-full'].includes(s.novelaimode)) o.push(['Human Focus', '人物（Human Focus）']);
     if (v5 || s.novelaimode === 'nai-diffusion-4-5-full') o.push(['Furry Focus', '兽人（Furry Focus）']);
     return o;
@@ -2716,7 +2718,8 @@ function viewStudio(d) {
       <label class="pc-switch"><input type="checkbox" data-aqt ${String(s.AQT_novelai ?? '') !== '' ? 'checked' : ''}><span></span>质量词（加在正面最后）<small>${pv.aqt ? esc(pv.aqt) : '现在不加'}</small></label>
       <label class="pc-field"><span>负面预设（加在负面最前面）</span>
         <select data-st="UCP_novelai">${ucpOptions(s).map(([v, t]) => `<option value="${esc(v)}" ${v === ucpVal ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
-      ${pv.ucp ? `<p class="pc-quote small mono">${esc(pv.ucp)}</p>` : ''}`)}
+      ${ucpVal === 'custom' ? `<textarea class="pc-textarea small mono" data-ucp-custom placeholder="自己写的固定负面，比如 lowres, bad hands, watermark, text">${esc(s.UCP_custom || '')}</textarea>
+      <div class="pc-hint">每次出图都加在负面最前面：生图页、聊天标记出图、例图、试穿都带上。</div>` : pv.ucp ? `<p class="pc-quote small mono">${esc(pv.ucp)}</p>` : ''}`)}
     ${fold('params', '更多参数', `步数 ${s.novelai_steps} · 种子 ${Number(s.novelai_seed) > 0 ? s.novelai_seed : '随机'} · ${w}×${h}`, paramFields(s, { withSize: true }))}
     ${fold('preview', '将会发送的内容', '正面 + 固定提示词 + 质量词，负面预设 + 负面', `
       <div class="pc-label" style="margin-top:0">正面</div><p class="pc-quote small mono" id="pc-pv-pos">${pv.pos || '（空）'}</p>
@@ -4653,6 +4656,7 @@ function setPath(obj, path, val) {
 function onInput(ev) {
     const el = ev.target;
     const d = getData();
+    if (el.dataset.ucpCustom !== undefined) { N.settings().UCP_custom = el.value; N.save(); updateStudioPreview(); return; }
     if (el.dataset.bind) {
         setPath(ui, el.dataset.bind, el.value);
         if (el.dataset.bind === 'studio.pos') { const w = root.querySelector('#pc-pos-ban'); if (w) w.innerHTML = banWarn(getData(), el.value); }
@@ -4770,6 +4774,10 @@ async function onChangeEv(ev) {
     if (el.dataset.aqt !== undefined) {
         N.settings().AQT_novelai = el.checked ? 'on' : '';
         N.save(); render(); return;
+    }
+    if (el.dataset.st === 'UCP_novelai' && el.value === 'custom' && !String(N.settings().UCP_custom || '').trim()) {
+        // 第一次选自定义：先放进原来预设的内容，在它基础上改
+        N.settings().UCP_custom = E.extras(N.settings()).ucp || '';
     }
     if (el.dataset.st === 'UCP_novelai' || el.dataset.st === 'novelaimode') { N.settings()[el.dataset.st] = el.value; N.save(); render(); return; }
     if (el.dataset.st) {

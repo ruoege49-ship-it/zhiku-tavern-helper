@@ -724,3 +724,50 @@ function pairChips(list, where) {
 #pc-root.pc-overlay.open { display: block !important; }
 #toast-container { z-index: 2147483600 !important; }
 @@@ END
+
+═══ 12. 负面预设加「自定义」：自己写一段固定负面，所有出图都带上 ═══
+@@@ OLD
+function extras(s = N.settings()) {
+    return qualityPresets({ ...s, UCP_novelai: N.ucpValue(s) });
+}
+@@@ NEW
+function extras(s = N.settings()) {
+    const r = qualityPresets({ ...s, UCP_novelai: N.ucpValue(s) });
+    if (String(s.UCP_novelai) === 'custom') r.ucp = String(s.UCP_custom || '').trim();
+    return r;
+}
+@@@ END
+
+@@@ OLD
+    const o = [['', '不加'], ['Heavy', '重（Heavy）'], ['Light', '轻（Light）']];
+@@@ NEW
+    const o = [['', '不加'], ['custom', '自定义'], ['Heavy', '重（Heavy）'], ['Light', '轻（Light）']];
+@@@ END
+
+@@@ OLD
+      ${pv.ucp ? `<p class="pc-quote small mono">${esc(pv.ucp)}</p>` : ''}`)}
+@@@ NEW
+      ${ucpVal === 'custom' ? `<textarea class="pc-textarea small mono" data-ucp-custom placeholder="自己写的固定负面，比如 lowres, bad hands, watermark, text">${esc(s.UCP_custom || '')}</textarea>
+      <div class="pc-hint">每次出图都加在负面最前面：生图页、聊天标记出图、例图、试穿都带上。</div>` : pv.ucp ? `<p class="pc-quote small mono">${esc(pv.ucp)}</p>` : ''}`)}
+@@@ END
+
+@@@ OLD
+function onInput(ev) {
+    const el = ev.target;
+    const d = getData();
+@@@ NEW
+function onInput(ev) {
+    const el = ev.target;
+    const d = getData();
+    if (el.dataset.ucpCustom !== undefined) { N.settings().UCP_custom = el.value; N.save(); updateStudioPreview(); return; }
+@@@ END
+
+@@@ OLD
+    if (el.dataset.st === 'UCP_novelai' || el.dataset.st === 'novelaimode') { N.settings()[el.dataset.st] = el.value; N.save(); render(); return; }
+@@@ NEW
+    if (el.dataset.st === 'UCP_novelai' && el.value === 'custom' && !String(N.settings().UCP_custom || '').trim()) {
+        // 第一次选自定义：先放进原来预设的内容，在它基础上改
+        N.settings().UCP_custom = E.extras(N.settings()).ucp || '';
+    }
+    if (el.dataset.st === 'UCP_novelai' || el.dataset.st === 'novelaimode') { N.settings()[el.dataset.st] = el.value; N.save(); render(); return; }
+@@@ END
