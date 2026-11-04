@@ -2338,7 +2338,9 @@ function parseImageMarkers(text, start, end) {
     }
     return result;
 }
-function createMarkerController({context,getData,generate,upload,notify,document:doc=globalThis.document}) {
+function createMarkerController({context,getData,generate,upload,notify,document:doc=globalThis.document,resolveUrl=u=>u}) {
+    // 图存在本地浏览器时地址是 idb:xxx，要先换成能显示的地址；换不出来（存在别的设备上）就是空的
+    function showUrl(url,apply,missing){Promise.resolve(resolveUrl(url)).then(u=>{if(u)apply(u);else missing?.();},()=>missing?.());}
     let queue=Promise.resolve(), stopped=false;
     const pending=new WeakMap(), failed=new WeakMap();
     const imageBindings=new WeakSet(), overlays=new Set(), holds=new Set(), inflight=new Set(), keepOpen=new Set();
@@ -2393,7 +2395,8 @@ function createMarkerController({context,getData,generate,upload,notify,document
             if(record?.url){
                 const wrapper=doc.createElement('details');wrapper.className='pc-result-collapse';
                 const header=doc.createElement('summary');header.textContent='图片 · 点击展开';
-                const img=doc.createElement('img');img.src=record.url;img.className='pc-result-image';img.alt='生成图片';
+                const img=doc.createElement('img');img.className='pc-result-image';img.alt='生成图片';
+                showUrl(record.url,u=>{img.src=u;},()=>{header.textContent='这张图存在别的设备 / 浏览器里，这里看不到，可以点「重新生成」';img.remove();});
                 wrapper.append(header,img);slot.append(wrapper);
                 const vs=Array.isArray(record.versions)?record.versions:[];
                 if(vs.length>1){
@@ -2457,7 +2460,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
     }
     function preview(id,msg,token,index,record){
         const {box,dismiss}=dialog(),img=doc.createElement('img'),download=doc.createElement('a'),edit=doc.createElement('button'),remove=doc.createElement('button');
-        img.src=record.url;download.href=record.url;download.download='image.png';download.textContent='下载';edit.type=remove.type='button';edit.textContent='编辑 / 重新生成';remove.textContent='删除当前图片';
+        showUrl(record.url,u=>{img.src=u;download.href=u;});download.download='image.png';download.textContent='下载';edit.type=remove.type='button';edit.textContent='编辑 / 重新生成';remove.textContent='删除当前图片';
         edit.onclick=()=>{dismiss();editPrompt(id,msg,token,index);};
         remove.onclick=async()=>{try{await deleteResult(id,msg,token);dismiss();}catch(e){notify(e.message,'error');}};
         box.append(img,download,edit,remove);
@@ -2569,6 +2572,56 @@ function createMarkerController({context,getData,generate,upload,notify,document
     return {settings,syncRegex,process,decorate,decorateAll,refresh,stop(){stopped=true;for(const timer of holds)clearTimeout(timer);holds.clear();for(const el of overlays)el.remove();overlays.clear();if(doc)doc.querySelectorAll('.pc-image-actions').forEach(el=>el.remove());},idle(){return queue;}};
 }
 
+/** 本地图片库：存在用户自己的浏览器（IndexedDB）里，不占酒馆服务器。地址写成 idb:xxx */
+const pcLocal = (() => {
+    const IDB = P.indexedDB || globalThis.indexedDB, STORE = 'images';
+    let dbp = null;
+    const open = () => dbp ||= new Promise((ok, bad) => {
+        const r = IDB.open('zhiku_images', 1);
+        r.onupgradeneeded = () => r.result.createObjectStore(STORE);
+        r.onsuccess = () => ok(r.result); r.onerror = () => { dbp = null; bad(r.error); };
+    });
+    const run = async (mode, fn) => { const db = await open(); return new Promise((ok, bad) => { const t = db.transaction(STORE, mode); const req = fn(t.objectStore(STORE)); t.oncomplete = () => ok(req?.result); t.onerror = () => bad(t.error); t.onabort = () => bad(t.error); }); };
+    const shown = new Map();
+    const isLocal = u => String(u || '').startsWith('idb:');
+    return {
+        isLocal,
+        async put(dataUrl) {
+            const id = 'idb:' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+            const blob = await (await fetch(dataUrl)).blob();
+            await run('readwrite', st => st.put(blob, id));
+            return id;
+        },
+        /** idb:xxx → 能显示的 blob 地址；别的地址原样返回；这台设备上没有就返回空 */
+        async url(u) {
+            if (!isLocal(u)) return u || '';
+            if (shown.has(u)) return shown.get(u);
+            const blob = await run('readonly', st => st.get(u)).catch(() => null);
+            if (!blob) return '';
+            const url = URL.createObjectURL(blob); shown.set(u, url); return url;
+        },
+        async del(u) { if (isLocal(u)) { await run('readwrite', st => st.delete(u)).catch(() => {}); const b = shown.get(u); if (b) { URL.revokeObjectURL(b); shown.delete(u); } } },
+    };
+})();
+/** 生成的图存哪：默认存本地浏览器；设置里可以改成存酒馆服务器（自己的服务器、想换设备也能看时用） */
+async function pcStoreImage(dataUrl, name) {
+    if ((__mod_store.getData().options.imageStore || 'local') === 'server') return __mod_store.uploadImage(dataUrl, name);
+    return { url: await pcLocal.put(dataUrl) };
+}
+/** 删一张图：本地的从浏览器删，服务器上的调酒馆删 */
+function pcDropImage(u) {
+    if (!u) return;
+    if (pcLocal.isLocal(u)) void pcLocal.del(u);
+    else __mod_store.deleteImageFile(String(u).replace(/^\/+/, ''));
+}
+/** 页面里 data-pc-src / data-pc-href 写的是 idb: 地址，渲染完再换成能显示的 */
+function pcHydrate(root = DOC) {
+    for (const el of root.querySelectorAll('[data-pc-src]:not([data-pc-done]), [data-pc-href]:not([data-pc-done])')) {
+        el.setAttribute('data-pc-done', '1');
+        if (el.dataset.pcSrc) pcLocal.url(el.dataset.pcSrc).then(u => { if (u) el.src = u; else el.closest('.pc-hist-item')?.classList.add('missing'); });
+        if (el.dataset.pcHref) pcLocal.url(el.dataset.pcHref).then(u => { if (u) el.href = u; });
+    }
+}
 /** 缩略图：长边 360、JPEG，历史画廊只加载它 */
 async function pcMakeThumb(dataUrl) {
     const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = dataUrl; });
@@ -2578,11 +2631,11 @@ async function pcMakeThumb(dataUrl) {
     c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
     return c.toDataURL('image/jpeg', 0.82);
 }
-/** 记一张生成过的图：原图地址、缩略图、提示词和参数。图本身存在酒馆的 user/images 里 */
+/** 记一张生成过的图：原图地址、缩略图、提示词和参数。缩略图总是存在本地浏览器 */
 async function pcRecordImage({ dataUrl, url, raw = '', sent = null, from }) {
     if (!url) return;
     let thumb = '';
-    try { thumb = (await __mod_store.uploadImage(await pcMakeThumb(dataUrl), 'thumb_' + Date.now())).url; } catch (e) { console.warn('[智库] 缩略图没存上', e); }
+    try { thumb = await pcLocal.put(await pcMakeThumb(dataUrl)); } catch (e) { console.warn('[智库] 缩略图没存上', e); }
     const d = __mod_store.getData();
     const cut = (v, n) => String(v || '').slice(0, n);
     const entry = { id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), url: String(url), thumb, raw: cut(raw, 800), prompt: cut(sent?.prompt, 800), negative: cut(sent?.negative, 400), seed: sent?.seed ?? '', size: cut(sent?.size, 20), model: cut(sent?.model, 40), from, at: Date.now() };
@@ -2598,7 +2651,7 @@ const __mod_marker=createMarkerController({
             const {positive,negative,chars}=hit||__mod_engine.composeStudio({pos:__mod_model.mergeTags(d.active?__mod_model.ticketString(d,d.active):'',prompt),neg:[d.active?__mod_model.ticketNeg(d,d.active):'',d.options.chatNegative||''].filter(Boolean).join(', ')});
             const bound=[...new Set((hit?.cast||[]).map(ch=>ch.charRef).filter(id=>id&&d.charRefGroups?.[id]))];
             const image=await __mod_engine.generateFull({positive,negative,...(chars?.length?{chars}:{}),director:bound.length?await __mod_engine.charRefs(bound):undefined});__mod_engine.afterChatImage();return image;},
-        upload:async(image,name)=>{const r=await __mod_store.uploadImage(image,name);void pcRecordImage({dataUrl:image,url:r?.url,raw:pcMarkerRaw,sent:__mod_engine.runtime.lastSent,from:'chat'}).catch(e=>console.warn('[智库] 历史生图没存上',e));return r;},notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
+        resolveUrl:u=>pcLocal.url(u),upload:async(image,name)=>{const r=await pcStoreImage(image,name);void pcRecordImage({dataUrl:image,url:r?.url,raw:pcMarkerRaw,sent:__mod_engine.runtime.lastSent,from:'chat'}).catch(e=>console.warn('[智库] 历史生图没存上',e));return r;},notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
     });
 const __mod_ui = (() => {
 /**
@@ -2867,13 +2920,14 @@ function addArtistPrefix(text, names) {
 }
 
 // ───────────── 历史生图 ─────────────
-const HIST_CSS = `<style>.pc-hist{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.pc-hist-item{position:relative;padding:0;border:0;border-radius:10px;overflow:hidden;aspect-ratio:2/3;background:var(--pc-paper-2);cursor:pointer}.pc-hist-item img{width:100%;height:100%;object-fit:cover;display:block}.pc-hist-item i{position:absolute;left:4px;bottom:4px;font-style:normal;font-size:10px;padding:0 5px;border-radius:6px;background:rgba(0,0,0,.55);color:#fff}.pc-hist-item.sel{outline:3px solid var(--pc-gold);outline-offset:-3px}.pc-hist-item b{position:absolute;right:5px;top:5px;width:20px;height:20px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.35);display:grid;place-items:center;color:#fff;font-size:12px}.pc-hist-item.sel b{background:var(--pc-gold)}.pc-hist-detail img{width:100%;border-radius:12px;display:block}.pc-hist-meta{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12px;margin-top:8px}.pc-hist-meta dt{color:var(--pc-ink-soft)}.pc-hist-meta dd{margin:0;word-break:break-all}@media (max-width:420px){.pc-hist{grid-template-columns:repeat(3,minmax(0,1fr))}}</style>`;
+const HIST_CSS = `<style>.pc-hist{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.pc-hist-item{position:relative;padding:0;border:0;border-radius:10px;overflow:hidden;aspect-ratio:2/3;background:var(--pc-paper-2);cursor:pointer}.pc-hist-item img{width:100%;height:100%;object-fit:cover;display:block}.pc-hist-item i{position:absolute;left:4px;bottom:4px;font-style:normal;font-size:10px;padding:0 5px;border-radius:6px;background:rgba(0,0,0,.55);color:#fff}.pc-hist-item.missing::after{content:'这台设备上没有';position:absolute;inset:0;display:grid;place-items:center;font-size:11px;color:var(--pc-ink-soft)}.pc-hist-item.sel{outline:3px solid var(--pc-gold);outline-offset:-3px}.pc-hist-item b{position:absolute;right:5px;top:5px;width:20px;height:20px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.35);display:grid;place-items:center;color:#fff;font-size:12px}.pc-hist-item.sel b{background:var(--pc-gold)}.pc-hist-detail img{width:100%;border-radius:12px;display:block}.pc-hist-meta{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12px;margin-top:8px}.pc-hist-meta dt{color:var(--pc-ink-soft)}.pc-hist-meta dd{margin:0;word-break:break-all}@media (max-width:420px){.pc-hist{grid-template-columns:repeat(3,minmax(0,1fr))}}</style>`;
 const histList = () => (Array.isArray(getData().history) ? getData().history : []);
 function historyFold(d) {
     const hist = histList();
     if (!hist.length) return '';
     const h = ui.hist ||= { select: false, picked: [], show: 60 };
     const shown = hist.slice(0, h.show);
+    setTimeout(() => pcHydrate(), 0);
     return fold('history', '历史生图', `${hist.length} 张`, `${HIST_CSS}
       <div class="pc-chips wrap" style="margin-top:0">
         <button class="pc-pill ${h.select ? 'on' : 'dashed'} tiny" data-act="histselect">${h.select ? '完成' : '多选'}</button>
@@ -2883,39 +2937,40 @@ function historyFold(d) {
         <button class="pc-pill dashed tiny" data-act="histclean" data-days="7">清理 7 天前</button>
         <button class="pc-pill dashed tiny" data-act="histclean" data-days="30">清理 30 天前</button>`}
       </div>
-      <div class="pc-hist pc-mt-s">${shown.map(x => `<button class="pc-hist-item ${h.picked.includes(x.id || x.url) ? 'sel' : ''}" data-act="histopen" data-id="${esc(x.id || x.url)}"><img src="${esc(x.thumb || x.url)}" alt="" loading="lazy"><i>${x.from === 'chat' ? '聊天' : '生图'}</i>${h.select ? `<b>${h.picked.includes(x.id || x.url) ? '✓' : ''}</b>` : ''}</button>`).join('')}</div>
+      <div class="pc-hist pc-mt-s">${shown.map(x => `<button class="pc-hist-item ${h.picked.includes(x.id || x.url) ? 'sel' : ''}" data-act="histopen" data-id="${esc(x.id || x.url)}"><img data-pc-src="${esc(x.thumb || x.url)}" alt=""><i>${x.from === 'chat' ? '聊天' : '生图'}</i>${h.select ? `<b>${h.picked.includes(x.id || x.url) ? '✓' : ''}</b>` : ''}</button>`).join('')}</div>
       ${hist.length > shown.length ? `<div class="pc-center pc-mt-s"><button class="pc-pill dashed tiny" data-act="histmore">再显示 60 张（还有 ${hist.length - shown.length} 张）</button></div>` : ''}
-      <div class="pc-dim small pc-mt-s">图存在酒馆的 user/images 里。删除和清理会真的删掉图片文件，聊天里用到这张图的地方也会显示不出来。</div>`);
+      <div class="pc-dim small pc-mt-s">${(d.options.imageStore || 'local') === 'server' ? '新图存在酒馆服务器的 user/images 里。' : '图存在这台设备的浏览器里，不占酒馆服务器；换设备、清浏览器数据就看不到了。'}删除和清理会真的删掉图片，聊天里用到这张图的地方也会显示不出来。</div>`);
 }
 const histFind = id => histList().find(x => (x.id || x.url) === id);
 /** 删掉记录和文件（原图 + 缩略图） */
 function histRemove(entries) {
     const gone = new Set(entries.map(x => x.id || x.url));
-    for (const x of entries) for (const u of [x.url, x.thumb]) if (u) deleteImageFile(String(u).replace(/^\/+/, ''));
+    for (const x of entries) for (const u of [x.url, x.thumb]) pcDropImage(u);
     getData().history = histList().filter(x => !gone.has(x.id || x.url));
     if (ui.hist) ui.hist.picked = ui.hist.picked.filter(id => !gone.has(id));
     commit();
 }
 function histDownload(entries) {
-    entries.forEach((x, i) => setTimeout(() => { const a = DOC.createElement('a'); a.href = x.url; a.download = `zhiku_${new Date(x.at).toISOString().slice(0, 19).replace(/[:T]/g, '-')}_${i + 1}.png`; pcMount(a); a.click(); a.remove(); }, i * 400));
+    entries.forEach((x, i) => setTimeout(async () => { const a = DOC.createElement('a'); a.href = await pcLocal.url(x.url); if (!a.href) return; a.download = `zhiku_${new Date(x.at).toISOString().slice(0, 19).replace(/[:T]/g, '-')}_${i + 1}.png`; pcMount(a); a.click(); a.remove(); }, i * 400));
 }
 function histDetail(x) {
     const row = (k, v) => v === '' || v === undefined || v === null ? '' : `<dt>${k}</dt><dd>${esc(String(v))}</dd>`;
-    const box = modal(`<div class="pc-hist-detail">${HIST_CSS}<img src="${esc(x.url)}" alt="">
+    const box = modal(`<div class="pc-hist-detail">${HIST_CSS}<img data-pc-src="${esc(x.url)}" alt="">
       <dl class="pc-hist-meta">${row('来源', x.from === 'chat' ? '聊天标记' : '生图页')}${row('时间', new Date(x.at).toLocaleString())}${row('种子', x.seed)}${row('尺寸', x.size)}${row('模型', x.model)}</dl>
       ${x.raw ? `<div class="pc-label">${x.from === 'chat' ? '标记里的提示词' : '正面提示词'}</div><p class="pc-quote small mono">${esc(x.raw)}</p>` : ''}
       ${x.prompt ? `<details class="pc-details"><summary>实际发出去的内容</summary><div class="pc-label">正面</div><p class="pc-quote small mono">${esc(x.prompt)}</p>${x.negative ? `<div class="pc-label">负面</div><p class="pc-quote small mono">${esc(x.negative)}</p>` : ''}</details>` : ''}
       <div class="pc-actions wrap pc-mt-s">
         <button class="pc-btn dark" type="button" data-h="reuse">用这组参数再生成</button>
-        <a class="pc-btn" href="${esc(x.url)}" download="zhiku_${x.at}.png">下载</a>
+        <a class="pc-btn" data-pc-href="${esc(x.url)}" download="zhiku_${x.at}.png">下载</a>
         <button class="pc-btn danger" type="button" data-h="delete">删除</button>
         <button class="pc-btn" type="button" data-h="close">关闭</button>
       </div></div>`);
     box.style.maxHeight = '90dvh'; box.style.overflowY = 'auto';
+    pcHydrate(box);
     box.addEventListener('click', async ev => {
         const act = ev.target.closest('[data-h]')?.dataset.h;
         if (act === 'close') box.closeModal();
-        if (act === 'delete') { if (!(await confirmBox('删掉这张图？图片文件也会删掉。', { ok: '删除', cancel: '算了' }))) return; histRemove([x]); box.closeModal(); render(); }
+        if (act === 'delete') { if (!(await confirmBox('删掉这张图？图片也会删掉。', { ok: '删除', cancel: '算了' }))) return; histRemove([x]); box.closeModal(); render(); }
         if (act === 'reuse') {
             const st = ui.studio, n = N.settings();
             st.pos = x.raw || x.prompt || st.pos;
@@ -4626,7 +4681,10 @@ function viewSettings(d) {
       <button class="pc-pill dashed tiny pc-mt-s" data-act="banadd">＋ 拉黑画师</button>`);
 
     const data = setFold('data', '数据', '导出 · 导入' + (zSettings() ? ' · 从智绘姬搬' : ''), `
-      <div class="pc-hint" style="margin-top:0">画师库存在酒馆的 user/files/piaoce_data.json，例图在 user/images/piaoce/，换设备也在。</div>
+      <div class="pc-dim small" style="margin-top:0">生成的图存在哪（聊天标记、生图页、历史生图）</div>
+      <div class="pc-seg pc-mt-s">${[['local', '本地浏览器'], ['server', '酒馆服务器']].map(([v, t]) => `<button class="${(d.options.imageStore || 'local') === v ? 'on' : ''}" data-act="imgstore" data-mode="${v}">${t}</button>`).join('')}</div>
+      <div class="pc-hint">${(d.options.imageStore || 'local') === 'server' ? '存在酒馆的 user/images 里，换设备也能看到；共用服务器、人多的话会占很多空间。' : '存在这台设备的浏览器里，不占酒馆服务器。换设备、换浏览器或清除浏览器数据后就看不到了，需要的图记得下载。'}只影响以后生成的图。</div>
+      <div class="pc-hint">画师库存在酒馆的 user/files/piaoce_data.json，例图在 user/images/piaoce/，换设备也在。</div>
       <div class="pc-actions wrap">
         ${zSettings() ? '<button class="pc-btn" data-act="importfixed">从智绘姬搬过来</button>' : ''}
         <button class="pc-btn" data-act="exportdata">导出</button>
@@ -4719,6 +4777,7 @@ async function onClick(ev, outside = false) {
             case 'naimode': { const n = N.settings(); n.naiMode = el.dataset.mode; N.save(); ui.naiTest = null; render(); break; }
             case 'illmode': { getData().options.illustMode = el.dataset.mode; commit(); render(); break; }
             case 'nightmode': { getData().options.nightMode = el.dataset.mode; commit(); render(); break; }
+            case 'imgstore': { getData().options.imageStore = el.dataset.mode; commit(); render(); break; }
             case 'nighttheme': { getData().options.nightTheme = el.dataset.theme; commit(); render(); break; }
             case 'togglekey': ui.showKey = !ui.showKey; render(); break;
             case 'naitest': {
@@ -5363,9 +5422,9 @@ async function doGenerate() {
     try {
         st.result = await E.generate(studioParts());
         st.sent = E.runtime.lastSent;
-        // 存进酒馆，记到历史生图里；关掉智库、刷新页面后也能找回来
+        // 存起来（默认本地浏览器），记到历史生图里；关掉智库、刷新页面后也能找回来
         const shot = { dataUrl: st.result, raw: st.pos, sent: st.sent, from: 'studio' };
-        uploadImage(shot.dataUrl, 'studio_' + Date.now()).then(r => pcRecordImage({ ...shot, url: r.url })).catch(e => console.warn('[智库] 历史生图没存上', e));
+        pcStoreImage(shot.dataUrl, 'studio_' + Date.now()).then(r => pcRecordImage({ ...shot, url: r.url })).catch(e => console.warn('[智库] 历史生图没存上', e));
     } catch (e) {
         toastr.error(e.message, '生成失败', { timeOut: 8000 });
     } finally {
