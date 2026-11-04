@@ -188,7 +188,7 @@ export function createMarkerController({context,getData,generate,upload,notify,d
                 entry.state='生成中…';decorate(id);
                 try {
                     const prompt=promptOverride??msg.extra?.zhikuImages?.[key]?.prompt??token.prompt;
-                    const image=await generate(prompt,{near:source.slice(Math.max(0,token.index-800),token.index),whole:source});if(!current())return 0;
+                    const image=await generate(prompt,{whole:source});if(!current())return 0;
                     entry.state='保存中…';decorate(id);
                     const {url}=await upload(image,'marker_'+Date.now());if(!current())return 0;
                     if(!url)throw new Error('图片上传未返回地址');

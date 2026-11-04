@@ -1371,10 +1371,9 @@ function castIn(text) {
     if (!t) return [];
     return currentCast().filter(x => x.on && fixedTags(x.char) && namesOf(x.char).some(n => t.includes(n))).map(x => x.char);
 }
-/** 标记生图：先看标记前面那段，没人再看整条回复；都没人就返回 null，只用标记里的词 */
-function markerPrompt(prompt, { near = '', whole = '' } = {}) {
-    let chars = castIn(near + '\n' + prompt);
-    if (!chars.length) chars = castIn(whole);
+/** 标记生图：按楼层看，这一楼提到谁就带谁；谁都没提到就返回 null，只用标记里的词 */
+function markerPrompt(prompt, { whole = '' } = {}) {
+    const chars = castIn(whole + '\n' + prompt);
     if (!chars.length) return null;
     const picks = chars.slice(0, 4).map((ch, i, a) => ({ char: ch, tags: '', x: (i + 1) / (a.length + 1), y: 0.5 }));
     return { ...buildChatPrompt(prompt, picks), cast: chars };
@@ -1482,7 +1481,7 @@ return { extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, 
 @@@ OLD
 <div class="pc-dim small">开着 = 聊天里生图时带上${esc(c.name)}</div>
 @@@ NEW
-<div class="pc-dim small">开着 = 生图标记前面的正文提到${esc(c.name)}（或别名）时，带上${esc(c.name)}的外貌</div>
+<div class="pc-dim small">开着 = 这一楼提到${esc(c.name)}（或别名）时，生图带上${esc(c.name)}的外貌</div>
 @@@ END
 
 @@@ OLD

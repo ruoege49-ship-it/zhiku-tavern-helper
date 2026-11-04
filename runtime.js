@@ -2098,10 +2098,9 @@ function castIn(text) {
     if (!t) return [];
     return currentCast().filter(x => x.on && fixedTags(x.char) && namesOf(x.char).some(n => t.includes(n))).map(x => x.char);
 }
-/** 标记生图：先看标记前面那段，没人再看整条回复；都没人就返回 null，只用标记里的词 */
-function markerPrompt(prompt, { near = '', whole = '' } = {}) {
-    let chars = castIn(near + '\n' + prompt);
-    if (!chars.length) chars = castIn(whole);
+/** 标记生图：按楼层看，这一楼提到谁就带谁；谁都没提到就返回 null，只用标记里的词 */
+function markerPrompt(prompt, { whole = '' } = {}) {
+    const chars = castIn(whole + '\n' + prompt);
     if (!chars.length) return null;
     const picks = chars.slice(0, 4).map((ch, i, a) => ({ char: ch, tags: '', x: (i + 1) / (a.length + 1), y: 0.5 }));
     return { ...buildChatPrompt(prompt, picks), cast: chars };
@@ -2490,7 +2489,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
                 entry.state='生成中…';decorate(id);
                 try {
                     const prompt=promptOverride??msg.extra?.zhikuImages?.[key]?.prompt??token.prompt;
-                    const image=await generate(prompt,{near:source.slice(Math.max(0,token.index-800),token.index),whole:source});if(!current())return 0;
+                    const image=await generate(prompt,{whole:source});if(!current())return 0;
                     entry.state='保存中…';decorate(id);
                     const {url}=await upload(image,'marker_'+Date.now());if(!current())return 0;
                     if(!url)throw new Error('图片上传未返回地址');
@@ -3741,7 +3740,7 @@ function viewCharEdit(d) {
       })()}
     </section>
 
-    ${castRow ? `<section class="pc-card pc-pad pc-mt"><div class="pc-row-between"><b>这次聊天</b>${sw2(castRow.on, `data-cast="${esc(c.key)}"`)}</div><div class="pc-dim small">开着 = 生图标记前面的正文提到${esc(c.name)}（或别名）时，带上${esc(c.name)}的外貌</div></section>` : ''}
+    ${castRow ? `<section class="pc-card pc-pad pc-mt"><div class="pc-row-between"><b>这次聊天</b>${sw2(castRow.on, `data-cast="${esc(c.key)}"`)}</div><div class="pc-dim small">开着 = 这一楼提到${esc(c.name)}（或别名）时，生图带上${esc(c.name)}的外貌</div></section>` : ''}
 
     <details class="pc-fold"><summary><b>不想出现的</b><i>${esc(c.negative) || '这个角色专用的负面词'}</i></summary><div class="pc-fold-in">
       <textarea class="pc-textarea small mono" data-charneg placeholder="比如 beard, glasses">${esc(c.negative)}</textarea></div></details>
