@@ -1689,7 +1689,7 @@ async function extractAppearance(name, description) {
     const sys = `你从角色设定里挑出画图用的外貌标签。只挑不会变的外貌：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身等。衣服另外放。
 ${PAIRS}
 只输出 JSON：{"appearance": [...], "outfit": [...]}。设定里没写的不要编。`;
-    const j = pickJson(await askLLM(sys, `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, 16000)}`, { maxTokens: 2000 }));
+    const j = pickJson(await askLLM(sys, `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, 60000)}`, { maxTokens: 2000 }));
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x.en || '').trim(), zh: String(x.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
     return { appearance: norm(j.appearance), outfit: norm(j.outfit) };
 }
@@ -1700,7 +1700,7 @@ async function extractCast(cardName, description) {
 外貌只挑不会变的：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身等。衣服另外放。设定里没写的不要编。
 ${PAIRS}
 只输出 JSON：{"people": [{"name": "设定里的名字", "aliases": ["昵称、简称、别的叫法"], "appearance": [...], "outfit": [...]}]}`;
-    const j = pickJson(await askLLM(sys, `卡名：${cardName}\n设定：\n${String(description || '').slice(0, 16000)}`, { maxTokens: 8000 }));
+    const j = pickJson(await askLLM(sys, `卡名：${cardName}\n设定：\n${String(description || '').slice(0, 60000)}`, { maxTokens: 8000 }));
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
     return (Array.isArray(j.people) ? j.people : []).map(p => ({
         name: String(p?.name || '').trim().slice(0, 30),
@@ -1989,7 +1989,7 @@ async function descOfFull(c) {
         fromBook('绑定的世界书', await loadBook(dd.extensions?.world), only);
         if (!side && !parts.length) add('开场白', card?.first_mes || dd.first_mes);
     }
-    return parts.join('\n\n').slice(0, 16000);
+    return parts.join('\n\n').slice(0, 60000);
 }
 
 /** 卡里的配角 */
