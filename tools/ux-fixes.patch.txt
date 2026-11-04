@@ -1227,7 +1227,7 @@ return { avatarUrl, stCards, stPersonas, currentPersonaKey, getChar, saveChar, d
 @@@ OLD
     const j = pickJson(await askLLM(sys, `角色名：${name}\n设定：\n${String(description || '').slice(0, 6000)}`, { maxTokens: 900 }));
 @@@ NEW
-    const j = pickJson(await askLLM(sys, `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, 16000)}`, { maxTokens: 900 }));
+    const j = pickJson(await askLLM(sys, `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, 16000)}`, { maxTokens: 2000 }));
 @@@ END
 
 @@@ OLD
@@ -1504,4 +1504,40 @@ return { extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, 
 标签写：人数（1girl / 1boy / 2girls…）、出场角色的外貌和此刻的衣服、动作、表情、姿势、视线、场景、光线、构图。登记了外貌的角色照抄外貌标签。不写画师、不写画质词、不写中文。
 @@@ NEW
 标签写：人数（1girl / 1boy / 2girls…）、没说会自动补的角色的外貌、此刻的衣服、动作、表情、姿势、视线、场景、光线、构图。不写画师、不写画质词、不写中文。
+@@@ END
+
+═══ 19. AI 回答被截断（世界书大、人多，或思考模型把长度用完）时不再报「格式不对」：保留已经写完整的部分；读人设的长度上限调大；报错说清楚怎么办 ═══
+@@@ OLD
+    if (a < 0 || b < a) throw new Error('AI 没按格式回答：' + t.slice(0, 100));
+    try { return JSON.parse(t.slice(a, b + 1)); } catch { throw new Error('AI 回答的格式不对：' + t.slice(a, a + 100)); }
+@@@ NEW
+    if (!t.trim()) throw new Error('AI 回复是空的。思考模型（比如 deepseek-reasoner）可能把长度都用在思考上了，换 deepseek-chat 这类不思考的模型再试');
+    if (a < 0) throw new Error('AI 没按格式回答，可能拒绝了或没看懂，换个模型再试：' + t.slice(0, 100));
+    try { if (b > a) return JSON.parse(t.slice(a, b + 1)); } catch { /* 下面试着修 */ }
+    const fixed = repairJson(t.slice(a));
+    if (fixed) return fixed;
+    throw new Error('AI 的回答不完整（可能太长被截断了），换 deepseek-chat 这类不思考的模型，或者删掉没用的世界书条目再试：' + t.slice(a, a + 80));
+}
+/** 回答被截断时：退回到最后一个写完整的值，把没关上的括号补上 */
+function repairJson(s) {
+    const stack = [], cuts = [];
+    let inStr = false, esc = false;
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+        if (ch === '"') inStr = true;
+        else if (ch === '{' || ch === '[') stack.push(ch === '{' ? '}' : ']');
+        else if (ch === '}' || ch === ']') { stack.pop(); cuts.push([i + 1, stack.slice()]); }
+    }
+    for (let k = cuts.length - 1; k >= 0; k--) {
+        const [at, open] = cuts[k];
+        try { return JSON.parse(s.slice(0, at) + open.reverse().join('')); } catch { /* 再往前退 */ }
+    }
+    return null;
+@@@ END
+
+@@@ OLD
+    const j = pickJson(await askLLM(sys, `卡名：${cardName}\n设定：\n${String(description || '').slice(0, 16000)}`, { maxTokens: 3000 }));
+@@@ NEW
+    const j = pickJson(await askLLM(sys, `卡名：${cardName}\n设定：\n${String(description || '').slice(0, 16000)}`, { maxTokens: 8000 }));
 @@@ END
