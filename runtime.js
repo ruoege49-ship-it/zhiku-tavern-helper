@@ -1657,7 +1657,7 @@ async function askLLM(system, user, { maxTokens = 800 } = {}) {
     const ch = json.choices?.[0] || {};
     const content = String(ch.message?.content ?? ch.text ?? '');
     if (content.trim()) return content;
-    // 正文是空的：思考模型（deepseek-reasoner 之类）可能把长度都花在思考上了
+    // 正文是空的：带思考的模型可能把长度都花在思考上了
     if (ch.finish_reason === 'length') throw Object.assign(new Error('AI 的长度用完了还没写出回答'), { emptyLength: true });
     const think = String(ch.message?.reasoning_content ?? ch.message?.reasoning ?? '');
     return think.includes('{') ? think : content;
@@ -1671,12 +1671,12 @@ async function translateToTags(text, { expand = false } = {}) {
 function pickJson(raw) {
     const t = String(raw || '').replace(/<think>[\s\S]*?<\/think>/g, '').replace(/```(?:json)?/g, '');
     const a = t.indexOf('{'), b = t.lastIndexOf('}');
-    if (!t.trim()) throw new Error('AI 回复是空的。思考模型（比如 deepseek-reasoner）可能把长度都用在思考上了，换 deepseek-chat 这类不思考的模型再试');
+    if (!t.trim()) throw new Error('AI 回复是空的。带思考的模型可能把长度都用在思考上了：换不带思考的模型，或者在模型设置里关掉思考（推理）再试');
     if (a < 0) throw new Error('AI 没按格式回答，可能拒绝了或没看懂，换个模型再试：' + t.slice(0, 100));
     try { if (b > a) return JSON.parse(t.slice(a, b + 1)); } catch { /* 下面试着修 */ }
     const fixed = repairJson(t.slice(a));
     if (fixed) return fixed;
-    throw new Error('AI 的回答不完整（可能太长被截断了），换 deepseek-chat 这类不思考的模型，或者删掉没用的世界书条目再试：' + t.slice(a, a + 80));
+    throw new Error('AI 的回答不完整（可能太长被截断了）：换不带思考的模型、关掉思考（推理），或者关掉没用的世界书条目再试：' + t.slice(a, a + 80));
 }
 /** 回答被截断时：退回到最后一个写完整的值，把没关上的括号补上 */
 function repairJson(s) {
@@ -1722,7 +1722,7 @@ async function askRoomy(sys, user, opts) {
         const raw = await askLLM(sys, user, { ...opts, maxTokens: Math.max(16000, (opts?.maxTokens || 800) * 4) });
         if (answerOf(raw) || String(raw || '').includes('{')) return raw;
     } catch (e) { if (!e.emptyLength && !/max_tokens|max tokens|max_completion/i.test(String(e?.message))) throw e; }
-    throw new Error('AI 回复是空的：加大长度再试也没写出回答，多半是思考模型一直在思考。换 deepseek-chat 这类不思考的模型再试');
+    throw new Error('AI 回复是空的：加大长度再试也没写出回答，多半是模型一直在思考。换不带思考的模型，或者在模型设置里关掉思考（推理）再试');
 }
 async function askShrinking(sys, userFor, opts) {
     const TOO_LONG = /context|length|too long|too large|token|maximum|exceed|413|504|524|timeout|超出|过长|太长|上限/i;
