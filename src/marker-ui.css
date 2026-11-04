@@ -38,3 +38,8 @@
 .pc-image-dialog img{flex-basis:100%;max-width:100%;max-height:75vh;object-fit:contain}
 .pc-image-dialog textarea{flex-basis:100%;width:100%;min-height:160px;font:14px/1.5 sans-serif;scrollbar-width:none}
 .pc-image-dialog button{position:static;padding:6px 12px;min-height:32px;width:auto;font-size:14px}
+
+/* 同一个标记的多个版本 */
+.mes_text .pc-version-nav { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 6px; font-size: 12px; }
+.mes_text .pc-version-nav button { padding: 3px 10px; border-radius: 6px; border: 1px solid var(--SmartThemeBorderColor, rgba(128,128,128,.4)); background: transparent; color: inherit; cursor: pointer; }
+.mes_text .pc-version-nav button:disabled { opacity: .35; cursor: default; }

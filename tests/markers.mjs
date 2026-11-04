@@ -4,11 +4,11 @@ assert.equal(parseImageMarkers('plain','image###','###').length,0);
 assert.equal(parseImageMarkers('image###partial','image###','###').length,0);
 assert.equal(parseImageMarkers('image###a\nb### image###b###','image###','###').length,2);
 assert.equal(parseImageMarkers('<img>a.b</img>','<img>','</img>')[0].prompt,'a.b');
-let count=0,active=0,peak=0,saves=0,block=null,fail=false;
+let uploads=0,count=0,active=0,peak=0,saves=0,block=null,fail=false;
 const notices=[],data={options:{}};
 const msg={mes:'before image###sunset### middle image###sea### after',swipe_id:0,swipes:[]};msg.swipes=[msg.mes];
 const c={chat:[msg],chatId:'one',extensionSettings:{'st-chatu8':{startTag:'image###',endTag:'###'},regex:[{id:'unrelated'}]},saveSettingsDebounced(){},async saveChat(){saves++;},updateMessageBlock(){}};
-const controller=createMarkerController({context:()=>c,getData:()=>data,generate:async prompt=>{count++;active++;peak=Math.max(peak,active);try{if(block)await block;if(fail)throw Error('test backend failure');return 'data:image/png;base64,test';}finally{active--;}},upload:async()=>({url:'/user/images/test.png'}),notify:(...a)=>notices.push(a)});
+const controller=createMarkerController({context:()=>c,getData:()=>data,generate:async prompt=>{count++;active++;peak=Math.max(peak,active);try{if(block)await block;if(fail)throw Error('test backend failure');return 'data:image/png;base64,test';}finally{active--;}},upload:async()=>({url:'/user/images/test'+(++uploads)+'.png'}),notify:(...a)=>notices.push(a)});
 controller.syncRegex();controller.syncRegex();
 assert.equal(c.extensionSettings.regex.length,3);
 let rule=c.extensionSettings.regex.find(r=>r.id===MARKER_REGEX_ID);
@@ -40,6 +40,11 @@ msg.mes='<status>开头加了状态栏</status>\n'+msg.mes;await controller.proc
 msg.mes='image###twin###';let go;block=new Promise(r=>go=r);const first=controller.process(0);await Promise.resolve();
 const clone={...msg,extra:{...msg.extra}};c.chat[0]=clone;const second=controller.process(0);go();await Promise.all([first,second]);block=null;
 assert.equal(count,before+2,'replaced message object must not start a second request');c.chat[0]=msg;}
+// 重新生成保留旧版本；删除只删当前这一版
+{msg.mes='image###ver###';await controller.process(0);const k=()=>Object.keys(msg.extra.zhikuImages).find(x=>x.endsWith(':image###ver###'));
+const firstUrl=msg.extra.zhikuImages[k()].url;await controller.process(0,{manual:true});const rec=msg.extra.zhikuImages[k()];
+assert.equal(rec.versions.length,2,'regenerate must keep the old version');assert.equal(rec.versions[0].url,firstUrl);assert.notEqual(rec.url,firstUrl);
+await controller.process(0,{manual:true});assert.equal(msg.extra.zhikuImages[k()].versions.length,3);}
 data.options.imageStartTag='[draw:';data.options.imageEndTag=']';controller.syncRegex();rule=c.extensionSettings.regex.find(r=>r.id===MARKER_REGEX_ID);
 assert.equal('text [draw:sunset] tail'.replace(regex(),''),'text  tail');
 data.options.markerAuto=false;msg.mes='[draw:off]';const before=count;await controller.process(0);assert.equal(count,before);
@@ -49,4 +54,4 @@ const oldRecords=JSON.stringify(msg.extra.zhikuImages);await controller.process(
 assert.equal(JSON.stringify(msg.extra.zhikuImages),oldRecords);assert.equal(msg.mes,'[draw:save-failure]');c.saveChat=priorSave;
 const countBeforeStop=count;
 controller.stop();msg.mes='[draw:stopped]';await controller.process(0,{manual:true});assert.equal(count,countBeforeStop);
-console.log('PASS: exact/custom/multiline markers, prompt-only filter, deduplication, serial queue, separate image records, preserved message/swipe text, edits after the marker keep results, no regeneration after shifts or object swaps, failure retry, chat switch protection, auto toggle and stop.');
+console.log('PASS: exact/custom/multiline markers, prompt-only filter, deduplication, serial queue, separate image records, preserved message/swipe text, edits after the marker keep results, no regeneration after shifts or object swaps, versions kept on regenerate, failure retry, chat switch protection, auto toggle and stop.');

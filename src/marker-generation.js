@@ -18,7 +18,7 @@ export function parseImageMarkers(text, start, end) {
 export function createMarkerController({context,getData,generate,upload,notify,document:doc=globalThis.document}) {
     let queue=Promise.resolve(), stopped=false;
     const pending=new WeakMap(), failed=new WeakMap();
-    const imageBindings=new WeakSet(), overlays=new Set(), holds=new Set(), inflight=new Set();
+    const imageBindings=new WeakSet(), overlays=new Set(), holds=new Set(), inflight=new Set(), keepOpen=new Set();
     function settings() {
         const opts=getData().options;
         const old=context().extensionSettings['st-chatu8'] || {};
@@ -72,6 +72,17 @@ export function createMarkerController({context,getData,generate,upload,notify,d
                 const header=doc.createElement('summary');header.textContent='图片 · 点击展开';
                 const img=doc.createElement('img');img.src=record.url;img.className='pc-result-image';img.alt='生成图片';
                 wrapper.append(header,img);slot.append(wrapper);
+                const vs=Array.isArray(record.versions)?record.versions:[];
+                if(vs.length>1){
+                    const cur=Math.max(0,vs.findIndex(v=>v.url===record.url));
+                    header.textContent=`图片 · 第 ${cur+1}/${vs.length} 版 · 点击展开`;
+                    const nav=doc.createElement('div');nav.className='pc-version-nav';
+                    const step=(text,to)=>{const b=doc.createElement('button');b.type='button';b.textContent=text;b.disabled=!vs[to];
+                        b.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();void switchVersion(id,msg,token,to);});return b;};
+                    const n=doc.createElement('span');n.textContent=`${cur+1} / ${vs.length}`;
+                    nav.append(step('‹ 上一版',cur-1),n,step('下一版 ›',cur+1));wrapper.append(nav);
+                }
+                if(keepOpen.delete(id+'|'+token.index))wrapper.open=true;
                 img.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(!img._pcHeld)preview(id,msg,token,index,record);});
                 bindHold(img,edit);
                 button.textContent=label(msg,token,record);
@@ -107,8 +118,18 @@ export function createMarkerController({context,getData,generate,upload,notify,d
         if(context().chat?.[id]!==msg)throw new Error('聊天已变化，请重新操作');
         const records=msg.extra?.zhikuImages,key=findRecordKey(msg,token)||recordKey(msg,token),old=records?.[key];
         if(!old)return;
-        records[key]={deleted:true};
+        // 有别的版本就只删当前这张，换到剩下的最后一张
+        const rest=(old.versions||[]).filter(v=>v.url!==old.url);
+        records[key]=rest.length?{...old,url:rest[rest.length-1].url,prompt:rest[rest.length-1].prompt,versions:rest}:{deleted:true};
         try{await context().saveChat();}catch(e){records[key]=old;throw e;}
+        decorate(id);
+    }
+    async function switchVersion(id,msg,token,to){
+        if(context().chat?.[id]!==msg)return;
+        const k=findRecordKey(msg,token),rec=k?msg.extra.zhikuImages[k]:null,v=rec?.versions?.[to];
+        if(!v)return;
+        const was={url:rec.url,prompt:rec.prompt};rec.url=v.url;rec.prompt=v.prompt;keepOpen.add(id+'|'+token.index);
+        try{await context().saveChat();}catch(e){Object.assign(rec,was);notify(e.message||String(e),'error');}
         decorate(id);
     }
     function preview(id,msg,token,index,record){
@@ -209,7 +230,11 @@ export function createMarkerController({context,getData,generate,upload,notify,d
                     entry.state='保存中…';decorate(id);
                     const {url}=await upload(image,'marker_'+Date.now());if(!current())return 0;
                     if(!url)throw new Error('图片上传未返回地址');
-                    const hadExtra=!!msg.extra;msg.extra ||= {};const hadRecords=!!msg.extra.zhikuImages,records=msg.extra.zhikuImages ||= {},old=records[key];records[key]={url:String(url),prompt};
+                    const hadExtra=!!msg.extra;msg.extra ||= {};const hadRecords=!!msg.extra.zhikuImages,records=msg.extra.zhikuImages ||= {},old=records[key];
+                    // 重新生成不覆盖：以前的版本留着，可以翻回去（最多 10 个）
+                    const prevKey=findRecordKey(msg,token),prev=prevKey&&records[prevKey]?.url?records[prevKey]:null;
+                    const versions=[...(prev?.versions||(prev?[{url:prev.url,prompt:prev.prompt}]:[])),{url:String(url),prompt}].slice(-10);
+                    records[key]={url:String(url),prompt,versions};
                     try{await c.saveChat();}catch(e){if(old)records[key]=old;else delete records[key];if(!hadRecords&&!Object.keys(records).length)delete msg.extra.zhikuImages;if(!hadExtra&&!Object.keys(msg.extra).length)delete msg.extra;throw e;}
                     failed.get(msg)?.delete(key);return 1;
                 }catch(e){let errors=failed.get(msg);if(!errors){errors=new Set();failed.set(msg,errors);}errors.add(key);notify(e.message||String(e),'error');return 0;}
