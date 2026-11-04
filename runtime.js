@@ -4472,6 +4472,11 @@ function viewSettings(d) {
       <div class="pc-hint">${d.options.illustMode === 'inline' ? '每次发消息时告诉聊天 AI：在有画面感的地方顺手写一行生图标记。不多花请求，但要模型听话；破限或预设管得很死的话可能不写。' : d.options.illustMode === 'after' ? '回复写完后，用「AI」设置里选的 API 另外请求一次，挑画面写标签，插回正文。多一次请求，但不改聊天 AI 的输出，跟智绘姬的「自动 LLM 请求生图」一样。' : '打开后不用自己写标记，回复里会自动出现生图标记，再按上面的开关自动出图。'}</div>
       ${d.options.illustMode && d.options.illustMode !== 'off' ? `<label class="pc-field"><span>每条回复最多几张</span><select data-illmax>${[1, 2, 3].map(n => `<option value="${n}" ${(Number(d.options.illustMax) || 1) === n ? 'selected' : ''}>${n}</option>`).join('')}</select></label>` : ''}`);
 
+    const nightMode = d.options.nightMode || 'day';
+    const look = setFold('look', '外观', { day: '日间', night: '夜间', auto: '跟随酒馆' }[nightMode] || '日间', `
+      <div class="pc-seg three">${[['day', '日间'], ['night', '夜间'], ['auto', '跟随酒馆']].map(([v, t]) => `<button class="${nightMode === v ? 'on' : ''}" data-act="nightmode" data-mode="${v}">${t}</button>`).join('')}</div>
+      <div class="pc-hint">「跟随酒馆」：酒馆用深色主题时自动换成夜间，每次打开智库时检查一次。</div>`);
+
     const entry = setFold('entry', '入口', ['魔棒', d.options.showStub ? '小票根' : '', d.options.showChip ? '输入框上方' : ''].filter(Boolean).join(' · '), `
       ${sw('showStub', '界面上显示小票根', '点一下切换画师串，长按打开画师库，可以上下拖动')}
       ${sw('showChip', '聊天输入框上方显示当前画师串')}
@@ -4506,7 +4511,7 @@ function viewSettings(d) {
         <div class="pc-actions wrap"><a class="pc-btn dark" href="https://github.com/ruoege49-ship-it/zhiku-tavern-helper" target="_blank" rel="noopener">仓库 / 更新</a><a class="pc-btn" href="https://github.com/damoshen123/st-chatu8" target="_blank" rel="noopener">智绘姬原仓库</a></div></div>
       <div class="pc-about-note">看图提取需要能识图的模型 · 原脚本 AFPL v9，署名保留</div>`);
 
-    return `<h2 class="pc-pagetitle">设置</h2><div class="pc-marker-primary" style="padding:16px;margin-bottom:16px;border-radius:14px;background:var(--SmartThemeBlurTintColor,rgba(128,128,128,.12))">${sw('markerAuto', '开启标记自动生图', '默认开启 · 回复出现完整生图标记时自动生成，提示词默认折叠')}</div>${chat}${nai}${ai}${tpl}${entry}${share}${ban}${data}${about}<div style="height:24px"></div>`;
+    return `<h2 class="pc-pagetitle">设置</h2><div class="pc-marker-primary" style="padding:16px;margin-bottom:16px;border-radius:14px;background:var(--SmartThemeBlurTintColor,rgba(128,128,128,.12))">${sw('markerAuto', '开启标记自动生图', '默认开启 · 回复出现完整生图标记时自动生成，提示词默认折叠')}</div>${chat}${nai}${ai}${tpl}${look}${entry}${share}${ban}${data}${about}<div style="height:24px"></div>`;
 }
 
 const VIEWS = { cast: viewCast, charedit: viewCharEdit, outfit: viewOutfit, studio: viewStudio, book: viewBook, artist: viewArtist, group: viewGroup, batch: viewBatch, vibe: viewVibe, lobby: viewLobby, settings: viewSettings };
@@ -4584,6 +4589,7 @@ async function onClick(ev, outside = false) {
             }
             case 'naimode': { const n = N.settings(); n.naiMode = el.dataset.mode; N.save(); ui.naiTest = null; render(); break; }
             case 'illmode': { getData().options.illustMode = el.dataset.mode; commit(); render(); break; }
+            case 'nightmode': { getData().options.nightMode = el.dataset.mode; commit(); render(); break; }
             case 'togglekey': ui.showKey = !ui.showKey; render(); break;
             case 'naitest': {
                 el.disabled = true; el.textContent = '测试中…';
@@ -5985,6 +5991,71 @@ async function start() {
     setTimeout(() => __mod_marker.refresh(), 0);
     setTimeout(() => __mod_marker.refresh(), 0);
     cleanups.push(() => {__mod_marker.stop();__mod_nai.stopQueue();});
+    // 夜间模式
+    const NIGHT_VARS = '--pc-mist:#2f4642;--pc-ink:#ece2d0;--pc-ink-soft:#b3a291;--pc-paper:#2a2521;--pc-paper-2:#352f29;--pc-paper-user:#322b24;--pc-gold:#d9a05a;--pc-danger:#e0857a;--pc-dash:rgba(236,226,208,.45);--pc-shadow:0 4px 0 rgba(0,0,0,.45);';
+    /** 写死的浅色 → 深色。背景和文字分开换：深色按钮上的浅字，到了夜里按钮变浅，字就要变深 */
+    const nightColor = (value, prop) => {
+        const bg = /background|shadow|outline/.test(prop);
+        // 浏览器读回来的颜色是 rgb() 写法，十六进制和 rgb() 都认
+        return value
+            .replace(/#7ea29c|rgb\(126, 162, 156\)/gi, '#2f4642')
+            .replace(/#cdbfa8|rgb\(205, 191, 168\)/gi, '#4a4038')
+            .replace(/#fbf8f0|rgb\(251, 248, 240\)/gi, bg ? '#302a25' : '#1f1b17')
+            .replace(/#7a3a32|rgb\(122, 58, 50\)/gi, '#e0958a')
+            .replace(/rgba\(\s*24[34],\s*23[89],\s*22[68],/g, 'rgba(38, 34, 30,')
+            .replace(/rgba\(\s*58,\s*42,\s*34,/g, 'rgba(236, 226, 208,')
+            .replace(/rgba\(\s*255,\s*255,\s*255,\s*0?\.85\)/g, 'rgba(42, 37, 33, .85)');
+    };
+    const nightStyle = DOC.createElement('style');
+    nightStyle.id = 'pc-night-style';
+    const buildNight = () => {
+        // :where() 不加优先级：夜间覆盖只顶替原来那条规则，不会盖过更具体的规则
+        const out = [`html.pc-night{${NIGHT_VARS}}`, ':where(html.pc-night) .pc-overlay, :where(html.pc-night) .pc-sheet, :where(html.pc-night) .pc-modal{color-scheme:dark;}'];
+        const sheet = DOC.getElementById('pc-css')?.sheet;
+        const walk = rules => {
+            for (const r of rules || []) {
+                if (r.cssRules && !r.selectorText) { // @media 之类
+                    const inner = [];
+                    const keep = out.length;
+                    walk(r.cssRules);
+                    inner.push(...out.splice(keep));
+                    if (inner.length && r.conditionText) out.push(`@media ${r.conditionText}{${inner.join('')}}`);
+                    continue;
+                }
+                if (!r.selectorText || /^:root$/.test(r.selectorText.trim())) continue;
+                const decl = [];
+                for (let i = 0; i < r.style.length; i++) {
+                    const prop = r.style[i], val = r.style.getPropertyValue(prop), night = nightColor(val, prop);
+                    if (night !== val) decl.push(`${prop}:${night}${r.style.getPropertyPriority(prop) ? ' !important' : ''}`);
+                }
+                if (decl.length) out.push(`${r.selectorText.split(',').map(x => ':where(html.pc-night) ' + x.trim().replace(/^html(?=[.#:\[\s]|$)/, '')).join(', ')}{${decl.join(';')}}`);
+            }
+        };
+        try { walk(sheet?.cssRules); } catch (e) { console.warn('[智库] 夜间样式', e); }
+        // 写在青绿底上的浅色字（页面标题）夜里底变深，字换成浅色
+        out.push(':where(html.pc-night) .pc-pagetitle{color:var(--pc-ink)}');
+        nightStyle.textContent = out.join('\n');
+    };
+    buildNight();
+    DOC.head.appendChild(nightStyle);
+    cleanups.push(() => { nightStyle.remove(); DOC.documentElement.classList.remove('pc-night'); });
+    /** 酒馆现在是不是深色：看酒馆正文文字是不是浅色 */
+    const tavernDark = () => {
+        const m = String(P.getComputedStyle(DOC.body).getPropertyValue('--SmartThemeBodyColor') || P.getComputedStyle(DOC.body).color).match(/\d+(\.\d+)?/g);
+        if (!m || m.length < 3) return !!P.matchMedia?.('(prefers-color-scheme: dark)').matches;
+        const [r, g, b] = m.map(Number);
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b > 140;
+    };
+    const applyNight = () => {
+        const mode = getData().options.nightMode || 'day';
+        DOC.documentElement.classList.toggle('pc-night', mode === 'night' || (mode === 'auto' && tavernDark()));
+    };
+    applyNight();
+    cleanups.push(onChange(applyNight));
+    // 跟随酒馆时，换了酒馆主题也跟上：每次打开智库窗口前再看一次
+    const nightOnOpen = ev => { if (ev.target?.closest?.('#pc-stub, #pc-chip, #pc-menu-btn, [data-zhiku="open"]')) setTimeout(applyNight, 0); };
+    DOC.addEventListener('click', nightOnOpen, true);
+    cleanups.push(() => DOC.removeEventListener('click', nightOnOpen, true));
     // 第一次用：装过智绘姬的话，把 NovelAI key 和画师搬过来
     const ns = N.settings();
     if (!ns.__imported) {
