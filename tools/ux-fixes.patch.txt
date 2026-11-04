@@ -2097,3 +2097,40 @@ async function deleteVibeGroup(id) {
             case 'vibegdel': await deleteVibeGroup(el.dataset.id); break;
             case 'vibedel': {
 @@@ END
+
+═══ 27. 读人设时设定太长、模型上下文放不下（DeepSeek 等报超长、请求太大、超时）：自动缩到 3 万字、1.5 万字再试，不用手动删世界书 ═══
+@@@ OLD
+    const j = pickJson(await askLLM(sys, `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, 60000)}`, { maxTokens: 2000 }));
+@@@ NEW
+    const j = await askShrinking(sys, limit => `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, limit)}`, { maxTokens: 2000 });
+@@@ END
+
+@@@ OLD
+    const j = pickJson(await askLLM(sys, `卡名：${cardName}\n设定：\n${String(description || '').slice(0, 60000)}`, { maxTokens: 8000 }));
+@@@ NEW
+    const j = await askShrinking(sys, limit => `卡名：${cardName}\n设定：\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000 });
+@@@ END
+
+@@@ OLD
+/** 一张卡（连世界书）里所有人：[{ name, aliases, appearance, outfit }] */
+@@@ NEW
+/** 设定很长时：先发 6 万字；模型说太长（上下文不够、请求太大、超时）就缩到 3 万、1.5 万再试。设定是按描述在前、世界书在后排的，缩的时候先丢后面的 */
+async function askShrinking(sys, userFor, opts) {
+    const TOO_LONG = /context|length|too long|too large|token|maximum|exceed|413|504|524|timeout|超出|过长|太长|上限/i;
+    let last;
+    for (const limit of [60000, 30000, 15000]) {
+        let raw;
+        try { raw = await askLLM(sys, userFor(limit), opts); }
+        catch (e) {
+            last = e;
+            if (!TOO_LONG.test(String(e?.message || e))) throw e;
+            console.warn(`[智库] 设定 ${limit} 字太长，缩短再试`, e);
+            continue;
+        }
+        // 只有请求本身报太长才缩；回答格式的问题交给 pickJson 报
+        return pickJson(raw);
+    }
+    throw new Error('设定太长，缩到 1.5 万字模型还是放不下：换个上下文更大的模型，或者关掉没用的世界书条目。' + (last?.message ? '（' + String(last.message).slice(0, 120) + '）' : ''));
+}
+/** 一张卡（连世界书）里所有人：[{ name, aliases, appearance, outfit }] */
+@@@ END

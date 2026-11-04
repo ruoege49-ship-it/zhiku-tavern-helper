@@ -1697,18 +1697,36 @@ async function extractAppearance(name, description) {
     const sys = `你从角色设定里挑出画图用的外貌标签。只挑不会变的外貌：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身等。衣服另外放。
 ${PAIRS}
 只输出 JSON：{"appearance": [...], "outfit": [...]}。设定里没写的不要编。`;
-    const j = pickJson(await askLLM(sys, `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, 60000)}`, { maxTokens: 2000 }));
+    const j = await askShrinking(sys, limit => `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, limit)}`, { maxTokens: 2000 });
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x.en || '').trim(), zh: String(x.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
     return { appearance: norm(j.appearance), outfit: norm(j.outfit) };
 }
 
+/** 设定很长时：先发 6 万字；模型说太长（上下文不够、请求太大、超时）就缩到 3 万、1.5 万再试。设定是按描述在前、世界书在后排的，缩的时候先丢后面的 */
+async function askShrinking(sys, userFor, opts) {
+    const TOO_LONG = /context|length|too long|too large|token|maximum|exceed|413|504|524|timeout|超出|过长|太长|上限/i;
+    let last;
+    for (const limit of [60000, 30000, 15000]) {
+        let raw;
+        try { raw = await askLLM(sys, userFor(limit), opts); }
+        catch (e) {
+            last = e;
+            if (!TOO_LONG.test(String(e?.message || e))) throw e;
+            console.warn(`[智库] 设定 ${limit} 字太长，缩短再试`, e);
+            continue;
+        }
+        // 只有请求本身报太长才缩；回答格式的问题交给 pickJson 报
+        return pickJson(raw);
+    }
+    throw new Error('设定太长，缩到 1.5 万字模型还是放不下：换个上下文更大的模型，或者关掉没用的世界书条目。' + (last?.message ? '（' + String(last.message).slice(0, 120) + '）' : ''));
+}
 /** 一张卡（连世界书）里所有人：[{ name, aliases, appearance, outfit }] */
 async function extractCast(cardName, description) {
     const sys = `你从角色卡和世界书里找出所有有外貌描写的角色（主角、配角都要，{{user}} / 玩家本人不要），每人挑画图用的外貌标签。
 外貌只挑不会变的：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身等。衣服另外放。设定里没写的不要编。
 ${PAIRS}
 只输出 JSON：{"people": [{"name": "设定里的名字", "aliases": ["昵称、简称、别的叫法"], "appearance": [...], "outfit": [...]}]}`;
-    const j = pickJson(await askLLM(sys, `卡名：${cardName}\n设定：\n${String(description || '').slice(0, 60000)}`, { maxTokens: 8000 }));
+    const j = await askShrinking(sys, limit => `卡名：${cardName}\n设定：\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000 });
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
     return (Array.isArray(j.people) ? j.people : []).map(p => ({
         name: String(p?.name || '').trim().slice(0, 30),
