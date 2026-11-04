@@ -320,6 +320,7 @@ function createFromString(data, { name, text, note = '', collections = [], neg =
         note, extra, neg, collections, fav: false, images: [], createdAt: Date.now(), usedAt: 0,
         members: members.map(m => ({ artistId: ensureArtist(data, m.tag).id, weight: m.weight })),
     };
+    if (String(text || '').trim()) g.raw = String(text).trim();
     data.groups[g.id] = g;
     return { type: 'group', id: g.id };
 }
@@ -359,10 +360,23 @@ function ticketName(data, ref) {
     return t.type === 'group' ? t.item.name : t.item.tag.replace(/^artist:/, '');
 }
 
+/** 画师组的内容指纹：画师 + 权重 + 其他词。原样保存的那串和现在的画师、权重对得上，才原样输出 */
+function groupSig(members, extra) {
+    return members.map(m => artistKey(m.tag) + '@' + round2(Number(m.weight ?? 1))).join('|') + '#' + String(extra || '').replace(/\s+/g, ' ').trim();
+}
+const rawSigCache = new Map();
+function rawStillValid(data, g) {
+    if (!g.raw) return false;
+    let sig = rawSigCache.get(g.raw);
+    if (sig === undefined) { const p = parseArtistString(g.raw); sig = groupSig(p.members, p.extra); rawSigCache.set(g.raw, sig); }
+    return sig === groupSig(g.members.map(m => ({ tag: data.artists[m.artistId]?.tag || '', weight: m.weight })), g.extra);
+}
 function ticketString(data, ref) {
     const t = resolveTicket(data, ref);
     if (!t) return '';
     if (t.type === 'artist') return t.item.tag;
+    // 用户写的那串原样发：{artist:a}、1.2::a, b::、顺序、小数位都不动
+    if (rawStillValid(data, t.item)) return t.item.raw;
     const parts = t.item.members
         .map(m => ({ a: data.artists[m.artistId], w: Number(m.weight) || 1 }))
         .filter(x => x.a)
@@ -434,9 +448,10 @@ const tokKey = t => t.text.toLowerCase().replace(/_/g, ' ').replace(/\s+/g, ' ')
 function replaceArtists(text, newStr, oldExtra = '') {
     const drop = new Set(tokenize(oldExtra).map(tokKey));
     const keep = tokenize(text).filter(t => !t.isArtist && !drop.has(tokKey(t)));
-    const seen = new Set();
-    const out = [];
-    for (const t of [...tokenize(newStr), ...keep]) {
+    // 新画师串原样放最前面，不拆开重写
+    const seen = new Set(tokenize(newStr).map(tokKey));
+    const out = String(newStr || '').trim() ? [String(newStr).trim()] : [];
+    for (const t of keep) {
         const k = tokKey(t);
         if (seen.has(k)) continue;
         seen.add(k);
@@ -1042,6 +1057,8 @@ async function testConnection() {
         if (!r.ok) return { ok: false, text: `NovelAI 返回 ${r.status}` };
         return { ok: true, text: '能用' + anlasText(await r.json()) };
     } catch (e) {
+        // 「Failed to fetch」：查余额的 api.novelai.net 被网络或浏览器拦了。生图走 image.novelai.net，不一定受影响
+        if (s.naiMode === 'key' && e instanceof TypeError) return { ok: true, warn: true, text: '查不到余额：这台设备连不上 api.novelai.net（网络或浏览器拦了）。生图走的是另一个地址，去生图页试一张，能出图就是能用' };
         return { ok: false, text: '连不上：' + (e?.message || e) };
     }
 }
@@ -1089,15 +1106,29 @@ function vibeSupported() {
 
 /** 把一张图编码成当前模型能用的氛围（NovelAI 会扣一点点数）。imageB64 不带 data: 前缀 */
 function encodeVibe(...args){return __naiGate.run(()=>encodeVibeRequest(...args));}
+/** 氛围图统一转成 PNG（长边不超过 1024）再编码：手机图片常是 JPEG / WebP，NovelAI 编码时可能直接 500 */
+async function vibePng(b64) {
+    try {
+        const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = 'data:image/png;base64,' + b64; });
+        const sc = Math.min(1, 1024 / Math.max(img.naturalWidth, img.naturalHeight));
+        const c = DOC.createElement('canvas');
+        c.width = Math.max(1, Math.round(img.naturalWidth * sc)); c.height = Math.max(1, Math.round(img.naturalHeight * sc));
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        return c.toDataURL('image/png').split(',')[1];
+    } catch { return b64; }
+}
 async function encodeVibeRequest(imageB64, infoExtracted = 1, model = settings().novelaimode) {
     const key = authKey();
-    const r = await http(siteUrl('/ai/encode-vibe'), {
+    const image = await vibePng(imageB64);
+    const send = () => http(siteUrl('/ai/encode-vibe'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: 'Bearer ' + key } : {}) },
-        body: JSON.stringify({ image: imageB64, information_extracted: infoExtracted, model }),
+        body: JSON.stringify({ image, information_extracted: infoExtracted, model }),
     });
+    let r = await send();
+    if (r.status >= 500) { await new Promise(ok => setTimeout(ok, 2000)); r = await send(); }
     const buf = new Uint8Array(await r.arrayBuffer());
-    if (!r.ok) throw Object.assign(new Error(explain(r.status, new TextDecoder().decode(buf))),{status:r.status,retryAfter:r.headers?.get('Retry-After')});
+    if (!r.ok) throw Object.assign(new Error(explain(r.status, new TextDecoder().decode(buf)) + (settings().naiMode === 'site' ? '。第三方站点可能不支持氛围' : '')),{status:r.status,retryAfter:r.headers?.get('Retry-After')});
     if (buf.length < 100) throw new Error('编码结果不对，可能 key 或站点有问题');
     return toB64(buf);
 }
@@ -1225,16 +1256,21 @@ async function vibeRefs() {
     if (!g?.vibes?.length || !N.vibeSupported()) return null;
     const key = N.encKey();
     const list = [];
+    const failed = [];
+    let lastErr = null;
     for (const v of g.vibes) {
         v.encodings ||= {};
         if (!v.encodings[key]) {
             if (!v.path) continue; // 官网文件导入的，没有原图，只能用文件里带的模型
-            const b64 = (await urlToDataUrl('/' + v.path.replace(/^\/+/, ''))).split(',')[1];
-            v.encodings[key] = await N.encodeVibe(b64, v.info || 1);
-            commit({ silent: true });
+            try {
+                const b64 = (await urlToDataUrl('/' + v.path.replace(/^\/+/, ''))).split(',')[1];
+                v.encodings[key] = await N.encodeVibe(b64, v.info || 1);
+                commit({ silent: true });
+            } catch (e) { failed.push(v.name || '参考图'); lastErr = e; continue; } // 编码失败：这张图先不带它，别让整张图失败
         }
         list.push({ data: v.encodings[key], strength: Number(v.strength ?? 0.6) });
     }
+    if (failed.length) toastr.warning(`氛围「${failed.join('、')}」编码失败，这张先不带${list.length ? '它' : '氛围'}出图：${lastErr?.message || ''}`, '氛围', { timeOut: 8000 });
     if (!list.length) return null;
     const total = list.reduce((a, b) => a + b.strength, 0);
     const is45 = N.settings().novelaimode.includes('4-5');
@@ -1801,7 +1837,17 @@ ${PAIRS}
     return normPairs(j.appearance);
 }
 
-return { hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage };
+/** 穿搭管理器里的一段服装描述（可带单品描述）→ 标签，配饰标 acc */
+async function outfitFromText(name, desc, accDescs = []) {
+    const sys = `把下面这套衣服的文字描述改写成 NovelAI 标签。只写衣服、鞋袜、配饰、发饰，不写长相、动作、表情、背景、画风；描述里没写的不要编。颜色、材质、款式能写就写进标签。
+每个标签写成 {"en": "英文 Danbooru 标签", "zh": "简短中文意思", "acc": 是不是配饰}。眼镜、首饰、帽子、发饰、包、手套、围巾、手表、面具这类 acc 写 true，其余写 false。只用常见的 Danbooru 标签。
+只输出 JSON：{"tags": [...]}`;
+    const user = `穿搭名：${name || '（没写）'}\n描述：${String(desc || '').slice(0, 3000)}${accDescs.length ? '\n单品：\n' + accDescs.map(a => '- ' + String(a).slice(0, 600)).join('\n') : ''}`;
+    const j = pickJson(await askLLM(sys, user, { maxTokens: 900 }));
+    return (Array.isArray(j.tags) ? j.tags : []).map(x => ({ en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim(), ...(x?.acc === true ? { acc: true } : x?.acc === false ? { acc: false } : {}) })).filter(x => x.en && !hasChinese(x.en));
+}
+
+return { hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
 })();
 
 // ───── chars.js ─────
@@ -2739,6 +2785,8 @@ const SYM = {
 };
 /** 画师串里拉黑的画师标红 */
 function markStr(d, str) {
+    // 没有拉黑的画师就原样显示，写法不变
+    if (!M.tokenize(str).some(t => t.isArtist && M.banInfo(d, t.text))) return esc(str);
     const out = [];
     for (const t of M.tokenize(str)) {
         const raw = t.raw || (Math.abs(t.weight - 1) < 0.001 ? t.text : `${M.fmtWeight(t.weight)}::${t.text}::`);
@@ -3253,6 +3301,164 @@ const av = (c, cls = 'pc-av') => { const u = C.avatarUrl(c); return `<span class
 const IMG_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/></svg>';
 const castTop = () => `<div class="pc-seg"><button class="${ui.castTop !== 'wardrobe' ? 'on' : ''}" data-act="casttop" data-v="chars">角色</button><button class="${ui.castTop === 'wardrobe' ? 'on' : ''}" data-act="casttop" data-v="wardrobe">衣柜 · ${C.wardrobe().length}</button></div>`;
 
+// ───────────── 从穿搭管理器导入（只读它的数据，不改它） ─────────────
+const OM_BASE = '/api/plugins/outfit-manager';
+const OM_SHARED = '__shared__';
+/** 一个分区（User / 某个角色）→ 要导入的衣服列表 */
+function omOutfits(part, assets) {
+    const accs = Array.isArray(part?.accessories) ? part.accessories : [];
+    return (Array.isArray(part?.outfits) ? part.outfits : []).filter(o => o && (o.description || o.imageData || o.name)).map(o => {
+        const kits = Array.isArray(o.kits) ? o.kits : [];
+        const kit = kits.find(k => k && k.id === o.activeKitId) || kits[0];
+        const off = new Set(kit?.disabledAccIds || []);
+        const acc = (kit?.accIds || []).filter(id => !off.has(id)).map(id => accs.find(a => a && a.id === id)).filter(Boolean);
+        return { id: String(o.id || ''), name: String(o.name || '').trim(), desc: String(o.description || '').trim(), image: omImage(o.imageData, assets), accDescs: acc.map(a => [a.name, a.description].filter(Boolean).join('：')).filter(Boolean) };
+    });
+}
+function omImage(v, assets) {
+    v = typeof v === 'string' ? v : '';
+    if (!v || v.startsWith('data:')) return v;
+    const k = v.startsWith(OM_BASE + '/images/') ? v.slice((OM_BASE + '/images/').length) : '';
+    if (k && assets?.[k]) return assets[k];
+    return v.startsWith('/') || /^https?:/.test(v) ? v : '';
+}
+/** 它导出的 .json（完整备份 / 只 User / 单个角色 / 全部角色）→ 分组 */
+function omGroupsFromJson(j) {
+    if (!j || typeof j !== 'object') throw new Error('不是穿搭管理器导出的文件');
+    const assets = j._assets || {};
+    const groups = [];
+    const add = (label, isUser, part) => { const outfits = omOutfits(part, assets); if (outfits.length) groups.push({ label, isUser, outfits }); };
+    if (j.type === 'char') add(String(j.charName || '角色'), false, j);
+    else {
+        if (j.type !== 'chars_all' && Array.isArray(j.outfits)) add('User', true, j);
+        for (const [name, part] of Object.entries(j.chars || {})) add(name === OM_SHARED ? '通用衣柜' : name, false, part);
+    }
+    if (!groups.length) throw new Error('文件里没有穿搭');
+    return groups;
+}
+/** v2 数据：meta + 分区 → 分组 */
+function omGroupsFromParts(meta, getPart) {
+    const groups = [];
+    const add = (label, isUser, part) => { const outfits = omOutfits(part, {}); if (outfits.length) groups.push({ label, isUser, outfits }); };
+    add('User', true, getPart('user:__default__'));
+    for (const ci of meta?.charIndex || []) if (ci?.partKey) add(ci.name === OM_SHARED || ci.id === OM_SHARED ? '通用衣柜' : String(ci.name || '角色'), false, getPart(ci.partKey));
+    return groups;
+}
+/** 直接读：先找它的后端，再找浏览器里的 IndexedDB，最后是最老的 localStorage */
+async function omReadLocal() {
+    try {
+        const r = await fetch(OM_BASE + '/partitions/keys', { credentials: 'same-origin' });
+        const j = r.ok ? await r.json().catch(() => null) : null;
+        if (j?.ok && Array.isArray(j.keys)) {
+            const parts = {};
+            for (const k of j.keys) {
+                const pr = await fetch(OM_BASE + '/partitions/' + encodeURIComponent(k), { credentials: 'same-origin' });
+                const pj = pr.ok ? await pr.json().catch(() => null) : null;
+                if (pj?.ok && pj.data) parts[k] = pj.data;
+            }
+            const groups = omGroupsFromParts(parts.meta, k => parts[k]);
+            if (groups.length) return groups;
+        }
+    } catch { /* 没装后端 */ }
+    const idb = P.indexedDB || indexedDB;
+    try {
+        if (idb.databases) { const list = await idb.databases(); if (!list.some(x => x.name === 'outfit_mgr_db')) throw 0; }
+        const db = await new Promise((ok, bad) => {
+            const req = idb.open('outfit_mgr_db');
+            req.onupgradeneeded = e => e.target.transaction.abort(); // 不存在就别新建
+            req.onsuccess = () => ok(req.result); req.onerror = () => bad(req.error);
+        });
+        try {
+            if (db.objectStoreNames.contains('data')) {
+                const all = await new Promise((ok, bad) => {
+                    const st = db.transaction('data', 'readonly').objectStore('data');
+                    const out = {}; const cur = st.openCursor();
+                    cur.onsuccess = e => { const c = e.target.result; if (c) { out[c.key] = c.value; c.continue(); } else ok(out); };
+                    cur.onerror = () => bad(cur.error);
+                });
+                const groups = all.meta ? omGroupsFromParts(all.meta, k => all[k]) : all.main ? omGroupsFromJson(all.main) : [];
+                if (groups.length) return groups;
+            }
+        } finally { db.close(); }
+    } catch { /* 没有 */ }
+    try { const raw = (P.localStorage || localStorage).getItem('outfit_mgr_v4'); if (raw) return omGroupsFromJson(JSON.parse(raw)); } catch { /* 没有 */ }
+    throw new Error('这个酒馆里没找到穿搭管理器的数据。可以在它里面点「导出」，再选那个 .json 导入');
+}
+function omDefaultTarget(g, people) {
+    if (g.isUser) return C.currentPersonaKey?.() || '';
+    return people.find(p => p.name === g.label)?.key || '';
+}
+function openOmImport() {
+    const people = [...C.stCards(), ...C.stPersonas()];
+    const box = modal(`<h3 class="pc-h3">从穿搭管理器导入</h3>
+      <div class="pc-dim small">只读它的数据，不会改动穿搭管理器。文字描述会用 AI 转成标签。</div>
+      <div class="pc-actions wrap pc-mt-s" data-om-src><button class="pc-btn dark" type="button" data-om="local">读这个酒馆里的</button><label class="pc-btn">选导出的 .json<input type="file" accept=".json,application/json" data-om-file hidden></label></div>
+      <div data-om-body></div>
+      <p class="pc-dim small" data-om-status role="status" aria-live="polite"></p>
+      <div class="pc-actions"><button class="pc-btn" type="button" data-om="close">关闭</button><button class="pc-btn dark" type="button" data-om="go" hidden>开始导入</button></div>`);
+    box.style.maxHeight = '90dvh'; box.style.overflowY = 'auto';
+    const body = box.querySelector('[data-om-body]'), status = box.querySelector('[data-om-status]'), goBtn = box.querySelector('[data-om="go"]');
+    let groups = null, running = false, stop = false;
+    const say = t => { status.textContent = t; };
+    const show = gs => {
+        groups = gs;
+        const opt = sel => `<option value="" ${!sel ? 'selected' : ''}>只存进衣柜</option>` + people.map(p => `<option value="${esc(p.key)}" ${p.key === sel ? 'selected' : ''}>给${esc(p.name)}${p.kind === 'user' ? '（人设）' : ''}</option>`).join('');
+        body.innerHTML = `<div class="pc-mt-s">${gs.map((g, i) => `<div class="pc-om-row"><label class="pc-switch"><input type="checkbox" data-om-on="${i}" checked><span></span><b>${esc(g.label)}</b><i class="pc-dim" style="font-style:normal;font-size:12px">${g.outfits.length} 套</i></label>
+          <select class="pc-mini-select" data-om-to="${i}">${opt(omDefaultTarget(g, people))}</select></div>`).join('')}</div>
+          <label class="pc-switch"><input type="checkbox" data-om-vision ${T.currentApi ? 'checked' : ''}><span></span>只有图没写描述的，用 AI 看图<small>要能识图的模型</small></label>`;
+        goBtn.hidden = false;
+        say(`找到 ${gs.reduce((a, g) => a + g.outfits.length, 0)} 套。选好给谁，点「开始导入」。`);
+    };
+    box.addEventListener('click', async ev => {
+        const act = ev.target.closest('[data-om]')?.dataset.om;
+        if (act === 'close') { if (running) { stop = true; say('正在停…'); } else box.closeModal(); }
+        if (act === 'local' && !running) { say('正在找…'); try { show(await omReadLocal()); } catch (e) { say(e.message); } }
+        if (act === 'go' && !running && groups) await run();
+    });
+    box.querySelector('[data-om-file]').addEventListener('change', async ev => {
+        const f = ev.target.files[0]; ev.target.value = '';
+        if (!f || running) return;
+        try { show(omGroupsFromJson(JSON.parse(await f.text()))); } catch (e) { say('读不了：' + e.message); }
+    });
+    async function run() {
+        const d = getData();
+        const vision = !!box.querySelector('[data-om-vision]')?.checked;
+        const jobs = [];
+        groups.forEach((g, i) => { if (box.querySelector(`[data-om-on="${i}"]`)?.checked) for (const o of g.outfits) jobs.push({ o, to: box.querySelector(`[data-om-to="${i}"]`)?.value || '' }); });
+        if (!jobs.length) { say('一组都没选'); return; }
+        running = true; stop = false; goBtn.disabled = true;
+        box.querySelectorAll('[data-om-src] button, [data-om-src] input, [data-om-on], [data-om-to], [data-om-vision]').forEach(x => { x.disabled = true; });
+        const seen = new Set([...C.wardrobe().map(x => x.o.from).filter(Boolean)]);
+        let done = 0, skipped = 0, noTags = 0;
+        for (let n = 0; n < jobs.length && !stop; n++) {
+            const { o, to } = jobs[n];
+            const from = 'om:' + o.id;
+            if (o.id && seen.has(from)) { skipped++; continue; }
+            say(`正在导入 ${n + 1}/${jobs.length}：${o.name || '没名字的穿搭'}`);
+            let tags = [], image = '', name = o.name;
+            let du = '';
+            if (o.image) { try { du = o.image.startsWith('data:') ? o.image : await urlToDataUrl(o.image); } catch { du = ''; } }
+            try {
+                if (o.desc || o.accDescs.length) tags = await T.outfitFromText(o.name, o.desc, o.accDescs);
+                else if (du && vision) { const r = await T.outfitFromImage(await shrinkDataUrl(du, 1024, 0.88)); tags = r.tags; name ||= r.name; }
+            } catch (e) { console.warn('[智库] 穿搭管理器导入：转标签失败', e); }
+            if (du) { try { image = (await uploadImage(await shrinkDataUrl(du, 768), `outfit_${M.uid('')}`)).path; } catch { image = ''; } }
+            if (!tags.length) noTags++;
+            const out = { id: M.uid('o_'), name: (name || '导入的穿搭').slice(0, 20), tags, ...(image ? { image } : {}), from, ...(o.desc ? { note: o.desc.slice(0, 2000) } : {}) };
+            if (to) { const c = C.getChar(to); if (c) { c.outfits.push(out); if (!c.outfitId) c.outfitId = out.id; C.saveChar(c); } else d.outfits[out.id] = out; }
+            else d.outfits[out.id] = out;
+            seen.add(from); done++;
+            commit({ silent: true });
+        }
+        running = false; goBtn.disabled = false;
+        commit();
+        say(`${stop ? '停了。' : '好了。'}导入 ${done} 套${skipped ? `，${skipped} 套以前导过、跳过了` : ''}${noTags ? `，${noTags} 套没转出标签（AI 没接上或只有图），打开改一下` : ''}。`);
+        goBtn.hidden = true;
+        ui.view = 'cast'; ui.castTop = 'wardrobe'; ui.wardFilter = 'all';
+        render();
+    }
+}
+
 function viewWardrobe(d) {
     const all = C.wardrobe();
     const owners = [...new Map(all.filter(x => x.owner).map(x => [x.owner.key, x.owner])).values()];
@@ -3264,6 +3470,7 @@ function viewWardrobe(d) {
       <label class="pc-btn dark">${IMG_ICON} 图片<input type="file" accept="image/*" data-wardimg hidden></label>
       <button class="pc-btn" data-act="wardai">✦ AI 设计</button>
       <button class="pc-btn" data-act="wardnew">＋ 自己写</button>
+      <button class="pc-btn" data-act="omimport">从穿搭管理器导入</button>
     </div>
     <label class="pc-search pc-mt-s"><span class="pc-sr">搜索</span>${ICON.search}<input data-bind="wardSearch" value="${esc(ui.wardSearch)}" placeholder="搜衣服名、标签"></label>
     <div class="pc-chips">${[['all', '全部'], ...owners.map(c => [c.key, c.name]), ['none', '没给谁穿']].map(([k, t]) => `<button class="pc-pill ${ui.wardFilter === k ? 'on' : 'dashed'}" data-act="wardfilter" data-v="${esc(k)}">${esc(t)}</button>`).join('')}</div>
@@ -3489,6 +3696,7 @@ async function charAction(act, el) {
         case 'casttop': ui.castTop = el.dataset.v; render(); return true;
         case 'wardfilter': ui.wardFilter = el.dataset.v; render(); return true;
         case 'wardnew': ui.outfit = { draft: true, name: '', tags: [], image: '', dest: '' }; ui.view = 'outfit'; render(); return true;
+        case 'omimport': openOmImport(); return true;
         case 'wardai': {
             const want = await promptText('想要什么样的衣服？（比如：冬天的校服、去海边、正式晚宴、哥特风）', '');
             if (!want) return true;
@@ -4078,7 +4286,7 @@ function viewSettings(d) {
     const sw = (key, text, small = '') => `<label class="pc-switch"><input type="checkbox" data-opt="${key}" ${d.options[key] ? 'checked' : ''}><span></span>${esc(text)}${small ? `<small>${esc(small)}</small>` : ''}</label>`;
     const n = settingsST();
     const modeBtn = (v, t) => `<button class="${n.naiMode === v ? 'on' : ''}" data-act="naimode" data-mode="${v}">${t}</button>`;
-    const naiStatus = ui.naiTest ? `${ui.naiTest.ok ? '✓' : '✗'} ${esc(ui.naiTest.text)}` : N.isReady() ? '已填好' : '<span class="pc-warn-text">还没填 key</span>';
+    const naiStatus = ui.naiTest ? `${ui.naiTest.warn ? '!' : ui.naiTest.ok ? '✓' : '✗'} ${esc(ui.naiTest.text)}` : N.isReady() ? '已填好' : '<span class="pc-warn-text">还没填 key</span>';
     const nai = setFold('nai', 'NovelAI', naiStatus, `
       <div class="pc-seg three">${modeBtn('key', '填我的 key')}${modeBtn('tavern', '用酒馆里的')}${modeBtn('site', '第三方站点')}</div>
       ${n.naiMode === 'key' ? `
@@ -4089,7 +4297,7 @@ function viewSettings(d) {
       ${n.naiMode === 'site' ? `
       <label class="pc-field"><span>站点地址</span><input data-st="naiSite" value="${esc(n.naiSite)}" placeholder="https://…"></label>
       <label class="pc-field"><span>站点给的 key</span><input data-st="naiSiteKey" type="password" value="${esc(n.naiSiteKey)}"></label>` : ''}
-      <div class="pc-row-between pc-mt-s"><button class="pc-btn dark" data-act="naitest">测试</button><span class="${ui.naiTest?.ok ? '' : 'pc-warn-text'}">${ui.naiTest ? (ui.naiTest.ok ? '✓ ' : '✗ ') + esc(ui.naiTest.text) : ''}</span></div>
+      <div class="pc-row-between pc-mt-s"><button class="pc-btn dark" data-act="naitest">测试</button><span class="${ui.naiTest?.ok && !ui.naiTest?.warn ? '' : 'pc-warn-text'}">${ui.naiTest ? (ui.naiTest.warn ? '! ' : ui.naiTest.ok ? '✓ ' : '✗ ') + esc(ui.naiTest.text) : ''}</span></div>
       <label class="pc-field"><span>模型</span><select data-st="novelaimode">${N.MODELS.map(([v, t]) => `<option value="${v}" ${v === n.novelaimode ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
       <details class="pc-details"><summary>更多生图参数</summary>${paramFields(n, { withSize: true })}
         <label class="pc-switch"><input type="checkbox" data-st-check="addFurryDataset" ${String(n.addFurryDataset) === 'true' ? 'checked' : ''}><span></span>兽人数据集（fur dataset）</label></details>`, !N.isReady());
@@ -4320,6 +4528,7 @@ async function onClick(ev, outside = false) {
                 const p = M.parseArtistString(text);
                 g.members = p.members.map(m => ({ artistId: M.ensureArtist(d, m.tag).id, weight: m.weight }));
                 g.extra = p.extra;
+                g.raw = text.trim();
                 commit();
                 break;
             }
@@ -5549,7 +5758,11 @@ function injectCss() {
 .pc-outsec-h { display: flex; align-items: baseline; gap: 8px; }
 .pc-outsec-h small { color: var(--pc-ink-soft); font-size: 12px; }
 .pc-outsec .pc-pairs { margin-top: 6px; }
-#pc-root.pc-overlay, .pc-sheet-backdrop, .pc-modal-backdrop { position: fixed !important; top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important; width: 100vw !important; height: 100vh !important; height: 100dvh !important; max-width: none !important; max-height: none !important; margin: 0 !important; transform: none !important; filter: none !important; opacity: 1 !important; }
+.pc-om-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 6px 0; border-bottom: 1.5px dashed rgba(58, 42, 34, .2); }
+.pc-om-row .pc-switch { flex: 1 1 160px; min-width: 0; }
+.pc-om-row .pc-mini-select { max-width: 55%; min-width: 0; }
+.pc-modal { box-sizing: border-box; overflow-x: hidden; }
+#pc-root.pc-overlay, .pc-sheet-backdrop, .pc-modal-backdrop { position: fixed !important; top: 0 !important; left: 0 !important; right: 0 !important; bottom: 0 !important; width: 100vw !important; height: 100vh !important; height: 100dvh !important; max-width: none !important; max-height: none !important; margin: 0 !important; box-sizing: border-box !important; transform: none !important; filter: none !important; opacity: 1 !important; }
 #pc-root.pc-overlay { background-color: #7ea29c !important; background-image: radial-gradient(rgba(28, 34, 38, .22) 1px, transparent 1.5px), linear-gradient(var(--pc-mist), var(--pc-mist)) !important; background-size: 7px 7px, auto !important; }
 #pc-root.pc-overlay:not(.open) { display: none !important; }
 #pc-root.pc-overlay.open { display: block !important; }
