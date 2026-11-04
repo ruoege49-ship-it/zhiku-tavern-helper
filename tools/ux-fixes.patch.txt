@@ -1669,24 +1669,55 @@ ${chat}${nai}${ai}${tpl}${look}${entry}
 .pc-field.span4 { grid-column: 1 / -1; } @media (max-width: 420px) { .pc-grid4 > .pc-field.span2 { grid-column: span 1; } }
 @@@ END
 
-═══ 22. 历史生图：生图页和聊天标记生成的图都记下来（最近 40 张，图存在酒馆里），生图页最下面可以翻看、清空记录 ═══
+═══ 22. 历史生图（参考智绘姬的图片缓存）：生图页和聊天标记的图都记下来，最多 300 张；每张另存一张小缩略图，画廊只加载缩略图；记下提示词、种子、尺寸、模型，可以「用这组参数再生成」；可以多选下载、删除（真删文件）、清理 7 天 / 30 天前的 ═══
+@@@ OLD
+        chars: (opts.chars || []).map(c => c.prompt),
+        seed: params.seed,
+    };
+@@@ NEW
+        chars: (opts.chars || []).map(c => c.prompt),
+        seed: params.seed,
+        model,
+    };
+@@@ END
+
 @@@ OLD
 const __mod_marker=createMarkerController({
 @@@ NEW
-/** 记一张生成过的图（只记地址，图本身已经存在酒馆的 user/images 里） */
-function pcAddHistory(url, prompt, from) {
-    if (!url) return;
-    const d = __mod_store.getData();
-    d.history = [{ url: String(url), prompt: String(prompt || '').slice(0, 600), from, at: Date.now() }, ...(Array.isArray(d.history) ? d.history : []).filter(h => h.url !== url)].slice(0, 40);
-    __mod_store.commit();
+/** 缩略图：长边 360、JPEG，历史画廊只加载它 */
+async function pcMakeThumb(dataUrl) {
+    const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = dataUrl; });
+    const sc = Math.min(1, 360 / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = DOC.createElement('canvas');
+    c.width = Math.max(1, Math.round(img.naturalWidth * sc)); c.height = Math.max(1, Math.round(img.naturalHeight * sc));
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.82);
 }
+/** 记一张生成过的图：原图地址、缩略图、提示词和参数。图本身存在酒馆的 user/images 里 */
+async function pcRecordImage({ dataUrl, url, raw = '', sent = null, from }) {
+    if (!url) return;
+    let thumb = '';
+    try { thumb = (await __mod_store.uploadImage(await pcMakeThumb(dataUrl), 'thumb_' + Date.now())).url; } catch (e) { console.warn('[智库] 缩略图没存上', e); }
+    const d = __mod_store.getData();
+    const cut = (v, n) => String(v || '').slice(0, n);
+    const entry = { id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), url: String(url), thumb, raw: cut(raw, 800), prompt: cut(sent?.prompt, 800), negative: cut(sent?.negative, 400), seed: sent?.seed ?? '', size: cut(sent?.size, 20), model: cut(sent?.model, 40), from, at: Date.now() };
+    d.history = [entry, ...(Array.isArray(d.history) ? d.history : []).filter(h => h.url !== entry.url)].slice(0, 300);
+    __mod_store.commit({ silent: !DOC.querySelector('#pc-root.open') });
+}
+let pcMarkerRaw = '';
 const __mod_marker=createMarkerController({
+@@@ END
+
+@@@ OLD
+generate:async (prompt,where)=>{const d=__mod_store.getData();
+@@@ NEW
+generate:async (prompt,where)=>{const d=__mod_store.getData();pcMarkerRaw=prompt;
 @@@ END
 
 @@@ OLD
         upload:__mod_store.uploadImage,notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
 @@@ NEW
-        upload:async(image,name)=>{const r=await __mod_store.uploadImage(image,name);try{pcAddHistory(r?.url,'','chat');}catch{}return r;},notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
+        upload:async(image,name)=>{const r=await __mod_store.uploadImage(image,name);void pcRecordImage({dataUrl:image,url:r?.url,raw:pcMarkerRaw,sent:__mod_engine.runtime.lastSent,from:'chat'}).catch(e=>console.warn('[智库] 历史生图没存上',e));return r;},notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
 @@@ END
 
 @@@ OLD
@@ -1696,8 +1727,8 @@ const __mod_marker=createMarkerController({
         st.result = await E.generate(studioParts());
         st.sent = E.runtime.lastSent;
         // 存进酒馆，记到历史生图里；关掉智库、刷新页面后也能找回来
-        const sentPrompt = st.sent?.prompt || st.pos;
-        uploadImage(st.result, 'studio_' + Date.now()).then(r => pcAddHistory(r?.url, sentPrompt, 'studio')).catch(e => console.warn('[智库] 历史生图没存上', e));
+        const shot = { dataUrl: st.result, raw: st.pos, sent: st.sent, from: 'studio' };
+        uploadImage(shot.dataUrl, 'studio_' + Date.now()).then(r => pcRecordImage({ ...shot, url: r.url })).catch(e => console.warn('[智库] 历史生图没存上', e));
 @@@ END
 
 @@@ OLD
@@ -1707,21 +1738,104 @@ const __mod_marker=createMarkerController({
 @@@ NEW
     </section>` : ''}
 
-    ${(() => {
-        const hist = Array.isArray(d.history) ? d.history : [];
-        if (!hist.length) return '';
-        return fold('history', '历史生图', `最近 ${hist.length} 张`, `
-      <div class="pc-hist">${hist.map(h => `<button class="pc-hist-item" data-act="viewimg" data-src="${esc(h.url)}" title="${esc((h.from === 'chat' ? '聊天标记 · ' : '生图页 · ') + new Date(h.at).toLocaleString() + (h.prompt ? '\n' + h.prompt : ''))}"><img src="${esc(h.url)}" alt="" loading="lazy"><i>${h.from === 'chat' ? '聊天' : '生图'}</i></button>`).join('')}</div>
-      <div class="pc-row-between pc-mt-s"><span class="pc-dim small">点图放大；图存在酒馆的 user/images 里</span><button class="pc-pill dashed tiny" data-act="clearhistory">清空记录</button></div>
-      <style>.pc-hist{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.pc-hist-item{position:relative;padding:0;border:0;border-radius:10px;overflow:hidden;aspect-ratio:2/3;background:var(--pc-paper-2);cursor:pointer}.pc-hist-item img{width:100%;height:100%;object-fit:cover;display:block}.pc-hist-item i{position:absolute;left:4px;bottom:4px;font-style:normal;font-size:10px;padding:0 5px;border-radius:6px;background:rgba(0,0,0,.55);color:#fff}@media (max-width:420px){.pc-hist{grid-template-columns:repeat(3,minmax(0,1fr))}}</style>`);
-    })()}
+    ${historyFold(d)}
 
     ${fold('scene', '固定提示词',
+@@@ END
+
+@@@ OLD
+function viewStudio(d) {
+@@@ NEW
+// ───────────── 历史生图 ─────────────
+const HIST_CSS = `<style>.pc-hist{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.pc-hist-item{position:relative;padding:0;border:0;border-radius:10px;overflow:hidden;aspect-ratio:2/3;background:var(--pc-paper-2);cursor:pointer}.pc-hist-item img{width:100%;height:100%;object-fit:cover;display:block}.pc-hist-item i{position:absolute;left:4px;bottom:4px;font-style:normal;font-size:10px;padding:0 5px;border-radius:6px;background:rgba(0,0,0,.55);color:#fff}.pc-hist-item.sel{outline:3px solid var(--pc-gold);outline-offset:-3px}.pc-hist-item b{position:absolute;right:5px;top:5px;width:20px;height:20px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.35);display:grid;place-items:center;color:#fff;font-size:12px}.pc-hist-item.sel b{background:var(--pc-gold)}.pc-hist-detail img{width:100%;border-radius:12px;display:block}.pc-hist-meta{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12px;margin-top:8px}.pc-hist-meta dt{color:var(--pc-ink-soft)}.pc-hist-meta dd{margin:0;word-break:break-all}@media (max-width:420px){.pc-hist{grid-template-columns:repeat(3,minmax(0,1fr))}}</style>`;
+const histList = () => (Array.isArray(getData().history) ? getData().history : []);
+function historyFold(d) {
+    const hist = histList();
+    if (!hist.length) return '';
+    const h = ui.hist ||= { select: false, picked: [], show: 60 };
+    const shown = hist.slice(0, h.show);
+    return fold('history', '历史生图', `${hist.length} 张`, `${HIST_CSS}
+      <div class="pc-chips wrap" style="margin-top:0">
+        <button class="pc-pill ${h.select ? 'on' : 'dashed'} tiny" data-act="histselect">${h.select ? '完成' : '多选'}</button>
+        ${h.select ? `<button class="pc-pill dashed tiny" data-act="histall">${h.picked.length === hist.length ? '全不选' : '全选'}</button>
+        <button class="pc-pill dashed tiny" data-act="histdownload" ${h.picked.length ? '' : 'disabled'}>下载选中（${h.picked.length}）</button>
+        <button class="pc-pill dashed tiny danger" data-act="histdelete" ${h.picked.length ? '' : 'disabled'}>删除选中</button>` : `
+        <button class="pc-pill dashed tiny" data-act="histclean" data-days="7">清理 7 天前</button>
+        <button class="pc-pill dashed tiny" data-act="histclean" data-days="30">清理 30 天前</button>`}
+      </div>
+      <div class="pc-hist pc-mt-s">${shown.map(x => `<button class="pc-hist-item ${h.picked.includes(x.id || x.url) ? 'sel' : ''}" data-act="histopen" data-id="${esc(x.id || x.url)}"><img src="${esc(x.thumb || x.url)}" alt="" loading="lazy"><i>${x.from === 'chat' ? '聊天' : '生图'}</i>${h.select ? `<b>${h.picked.includes(x.id || x.url) ? '✓' : ''}</b>` : ''}</button>`).join('')}</div>
+      ${hist.length > shown.length ? `<div class="pc-center pc-mt-s"><button class="pc-pill dashed tiny" data-act="histmore">再显示 60 张（还有 ${hist.length - shown.length} 张）</button></div>` : ''}
+      <div class="pc-dim small pc-mt-s">图存在酒馆的 user/images 里。删除和清理会真的删掉图片文件，聊天里用到这张图的地方也会显示不出来。</div>`);
+}
+const histFind = id => histList().find(x => (x.id || x.url) === id);
+/** 删掉记录和文件（原图 + 缩略图） */
+function histRemove(entries) {
+    const gone = new Set(entries.map(x => x.id || x.url));
+    for (const x of entries) for (const u of [x.url, x.thumb]) if (u) deleteImageFile(String(u).replace(/^\/+/, ''));
+    getData().history = histList().filter(x => !gone.has(x.id || x.url));
+    if (ui.hist) ui.hist.picked = ui.hist.picked.filter(id => !gone.has(id));
+    commit();
+}
+function histDownload(entries) {
+    entries.forEach((x, i) => setTimeout(() => { const a = DOC.createElement('a'); a.href = x.url; a.download = `zhiku_${new Date(x.at).toISOString().slice(0, 19).replace(/[:T]/g, '-')}_${i + 1}.png`; DOC.body.appendChild(a); a.click(); a.remove(); }, i * 400));
+}
+function histDetail(x) {
+    const row = (k, v) => v === '' || v === undefined || v === null ? '' : `<dt>${k}</dt><dd>${esc(String(v))}</dd>`;
+    const box = modal(`<div class="pc-hist-detail">${HIST_CSS}<img src="${esc(x.url)}" alt="">
+      <dl class="pc-hist-meta">${row('来源', x.from === 'chat' ? '聊天标记' : '生图页')}${row('时间', new Date(x.at).toLocaleString())}${row('种子', x.seed)}${row('尺寸', x.size)}${row('模型', x.model)}</dl>
+      ${x.raw ? `<div class="pc-label">${x.from === 'chat' ? '标记里的提示词' : '正面提示词'}</div><p class="pc-quote small mono">${esc(x.raw)}</p>` : ''}
+      ${x.prompt ? `<details class="pc-details"><summary>实际发出去的内容</summary><div class="pc-label">正面</div><p class="pc-quote small mono">${esc(x.prompt)}</p>${x.negative ? `<div class="pc-label">负面</div><p class="pc-quote small mono">${esc(x.negative)}</p>` : ''}</details>` : ''}
+      <div class="pc-actions wrap pc-mt-s">
+        <button class="pc-btn dark" type="button" data-h="reuse">用这组参数再生成</button>
+        <a class="pc-btn" href="${esc(x.url)}" download="zhiku_${x.at}.png">下载</a>
+        <button class="pc-btn danger" type="button" data-h="delete">删除</button>
+        <button class="pc-btn" type="button" data-h="close">关闭</button>
+      </div></div>`);
+    box.style.maxHeight = '90dvh'; box.style.overflowY = 'auto';
+    box.addEventListener('click', async ev => {
+        const act = ev.target.closest('[data-h]')?.dataset.h;
+        if (act === 'close') box.closeModal();
+        if (act === 'delete') { if (!(await confirmBox('删掉这张图？图片文件也会删掉。', { ok: '删除', cancel: '算了' }))) return; histRemove([x]); box.closeModal(); render(); }
+        if (act === 'reuse') {
+            const st = ui.studio, n = N.settings();
+            st.pos = x.raw || x.prompt || st.pos;
+            const m = /^(\d+)\D+(\d+)$/.exec(String(x.size || ''));
+            if (m) { n.novelai_width = Number(m[1]); n.novelai_height = Number(m[2]); }
+            if (x.seed !== '' && x.seed !== undefined) n.novelai_seed = Number(x.seed) || 0;
+            N.save(); saveStudio();
+            box.closeModal(); ui.view = 'studio'; render();
+            toastr.info(x.seed ? `种子已设为 ${x.seed}，想随机就把种子改回 0` : '提示词已填好', '历史生图', { timeOut: 5000 });
+        }
+    });
+}
+
+function viewStudio(d) {
 @@@ END
 
 @@@ OLD
             case 'clearresult': ui.studio.result = null; ui.studio.sent = null; render(); break;
 @@@ NEW
             case 'clearresult': ui.studio.result = null; ui.studio.sent = null; render(); break;
-            case 'clearhistory': { if (!(await confirmBox('清空历史生图的记录？图片文件不会删。', { ok: '清空', cancel: '算了' }))) break; getData().history = []; commit(); render(); break; }
+            case 'histselect': { const h = ui.hist ||= { select: false, picked: [], show: 60 }; h.select = !h.select; h.picked = []; render(); break; }
+            case 'histall': { const h = ui.hist; const all = histList().map(x => x.id || x.url); h.picked = h.picked.length === all.length ? [] : all; render(); break; }
+            case 'histmore': { ui.hist.show += 60; render(); break; }
+            case 'histopen': {
+                const id = el.dataset.id, h = ui.hist ||= { select: false, picked: [], show: 60 };
+                if (h.select) { h.picked = h.picked.includes(id) ? h.picked.filter(x => x !== id) : [...h.picked, id]; render(); break; }
+                const x = histFind(id); if (x) histDetail(x);
+                break;
+            }
+            case 'histdownload': { histDownload(ui.hist.picked.map(histFind).filter(Boolean)); break; }
+            case 'histdelete': {
+                const list = ui.hist.picked.map(histFind).filter(Boolean);
+                if (!list.length || !(await confirmBox(`删掉选中的 ${list.length} 张？图片文件也会删掉，聊天里用到的地方会显示不出来。`, { ok: '删除', cancel: '算了' }))) break;
+                histRemove(list); ui.hist.select = false; render(); break;
+            }
+            case 'histclean': {
+                const days = Number(el.dataset.days), before = Date.now() - days * 86400000;
+                const list = histList().filter(x => (x.at || 0) < before);
+                if (!list.length) { toastr.info(`没有 ${days} 天前的图`, '历史生图'); break; }
+                if (!(await confirmBox(`删掉 ${days} 天前的 ${list.length} 张图？图片文件也会删掉，聊天里用到的地方会显示不出来。`, { ok: '删除', cancel: '算了' }))) break;
+                histRemove(list); render(); break;
+            }
 @@@ END

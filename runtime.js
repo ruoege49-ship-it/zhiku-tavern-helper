@@ -935,6 +935,7 @@ async function generateRequest(opts) {
         size: `${params.width}×${params.height}`,
         chars: (opts.chars || []).map(c => c.prompt),
         seed: params.seed,
+        model,
     };
     if (s.naiMode === 'tavern') {
         const body = {
@@ -2340,7 +2341,7 @@ function parseImageMarkers(text, start, end) {
 function createMarkerController({context,getData,generate,upload,notify,document:doc=globalThis.document}) {
     let queue=Promise.resolve(), stopped=false;
     const pending=new WeakMap(), failed=new WeakMap();
-    const imageBindings=new WeakSet(), overlays=new Set(), holds=new Set(), inflight=new Set();
+    const imageBindings=new WeakSet(), overlays=new Set(), holds=new Set(), inflight=new Set(), keepOpen=new Set();
     function settings() {
         const opts=getData().options;
         const old=context().extensionSettings['st-chatu8'] || {};
@@ -2394,6 +2395,17 @@ function createMarkerController({context,getData,generate,upload,notify,document
                 const header=doc.createElement('summary');header.textContent='图片 · 点击展开';
                 const img=doc.createElement('img');img.src=record.url;img.className='pc-result-image';img.alt='生成图片';
                 wrapper.append(header,img);slot.append(wrapper);
+                const vs=Array.isArray(record.versions)?record.versions:[];
+                if(vs.length>1){
+                    const cur=Math.max(0,vs.findIndex(v=>v.url===record.url));
+                    header.textContent=`图片 · 第 ${cur+1}/${vs.length} 版 · 点击展开`;
+                    const nav=doc.createElement('div');nav.className='pc-version-nav';
+                    const step=(text,to)=>{const b=doc.createElement('button');b.type='button';b.textContent=text;b.disabled=!vs[to];
+                        b.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();void switchVersion(id,msg,token,to);});return b;};
+                    const n=doc.createElement('span');n.textContent=`${cur+1} / ${vs.length}`;
+                    nav.append(step('‹ 上一版',cur-1),n,step('下一版 ›',cur+1));wrapper.append(nav);
+                }
+                if(keepOpen.delete(id+'|'+token.index))wrapper.open=true;
                 img.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(!img._pcHeld)preview(id,msg,token,index,record);});
                 bindHold(img,edit);
                 button.textContent=label(msg,token,record);
@@ -2429,8 +2441,18 @@ function createMarkerController({context,getData,generate,upload,notify,document
         if(context().chat?.[id]!==msg)throw new Error('聊天已变化，请重新操作');
         const records=msg.extra?.zhikuImages,key=findRecordKey(msg,token)||recordKey(msg,token),old=records?.[key];
         if(!old)return;
-        records[key]={deleted:true};
+        // 有别的版本就只删当前这张，换到剩下的最后一张
+        const rest=(old.versions||[]).filter(v=>v.url!==old.url);
+        records[key]=rest.length?{...old,url:rest[rest.length-1].url,prompt:rest[rest.length-1].prompt,versions:rest}:{deleted:true};
         try{await context().saveChat();}catch(e){records[key]=old;throw e;}
+        decorate(id);
+    }
+    async function switchVersion(id,msg,token,to){
+        if(context().chat?.[id]!==msg)return;
+        const k=findRecordKey(msg,token),rec=k?msg.extra.zhikuImages[k]:null,v=rec?.versions?.[to];
+        if(!v)return;
+        const was={url:rec.url,prompt:rec.prompt};rec.url=v.url;rec.prompt=v.prompt;keepOpen.add(id+'|'+token.index);
+        try{await context().saveChat();}catch(e){Object.assign(rec,was);notify(e.message||String(e),'error');}
         decorate(id);
     }
     function preview(id,msg,token,index,record){
@@ -2531,7 +2553,11 @@ function createMarkerController({context,getData,generate,upload,notify,document
                     entry.state='保存中…';decorate(id);
                     const {url}=await upload(image,'marker_'+Date.now());if(!current())return 0;
                     if(!url)throw new Error('图片上传未返回地址');
-                    const hadExtra=!!msg.extra;msg.extra ||= {};const hadRecords=!!msg.extra.zhikuImages,records=msg.extra.zhikuImages ||= {},old=records[key];records[key]={url:String(url),prompt};
+                    const hadExtra=!!msg.extra;msg.extra ||= {};const hadRecords=!!msg.extra.zhikuImages,records=msg.extra.zhikuImages ||= {},old=records[key];
+                    // 重新生成不覆盖：以前的版本留着，可以翻回去（最多 10 个）
+                    const prevKey=findRecordKey(msg,token),prev=prevKey&&records[prevKey]?.url?records[prevKey]:null;
+                    const versions=[...(prev?.versions||(prev?[{url:prev.url,prompt:prev.prompt}]:[])),{url:String(url),prompt}].slice(-10);
+                    records[key]={url:String(url),prompt,versions};
                     try{await c.saveChat();}catch(e){if(old)records[key]=old;else delete records[key];if(!hadRecords&&!Object.keys(records).length)delete msg.extra.zhikuImages;if(!hadExtra&&!Object.keys(msg.extra).length)delete msg.extra;throw e;}
                     failed.get(msg)?.delete(key);return 1;
                 }catch(e){let errors=failed.get(msg);if(!errors){errors=new Set();failed.set(msg,errors);}errors.add(key);notify(e.message||String(e),'error');return 0;}
@@ -2543,22 +2569,36 @@ function createMarkerController({context,getData,generate,upload,notify,document
     return {settings,syncRegex,process,decorate,decorateAll,refresh,stop(){stopped=true;for(const timer of holds)clearTimeout(timer);holds.clear();for(const el of overlays)el.remove();overlays.clear();if(doc)doc.querySelectorAll('.pc-image-actions').forEach(el=>el.remove());},idle(){return queue;}};
 }
 
-/** 记一张生成过的图（只记地址，图本身已经存在酒馆的 user/images 里） */
-function pcAddHistory(url, prompt, from) {
-    if (!url) return;
-    const d = __mod_store.getData();
-    d.history = [{ url: String(url), prompt: String(prompt || '').slice(0, 600), from, at: Date.now() }, ...(Array.isArray(d.history) ? d.history : []).filter(h => h.url !== url)].slice(0, 40);
-    __mod_store.commit();
+/** 缩略图：长边 360、JPEG，历史画廊只加载它 */
+async function pcMakeThumb(dataUrl) {
+    const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = dataUrl; });
+    const sc = Math.min(1, 360 / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = DOC.createElement('canvas');
+    c.width = Math.max(1, Math.round(img.naturalWidth * sc)); c.height = Math.max(1, Math.round(img.naturalHeight * sc));
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.82);
 }
+/** 记一张生成过的图：原图地址、缩略图、提示词和参数。图本身存在酒馆的 user/images 里 */
+async function pcRecordImage({ dataUrl, url, raw = '', sent = null, from }) {
+    if (!url) return;
+    let thumb = '';
+    try { thumb = (await __mod_store.uploadImage(await pcMakeThumb(dataUrl), 'thumb_' + Date.now())).url; } catch (e) { console.warn('[智库] 缩略图没存上', e); }
+    const d = __mod_store.getData();
+    const cut = (v, n) => String(v || '').slice(0, n);
+    const entry = { id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), url: String(url), thumb, raw: cut(raw, 800), prompt: cut(sent?.prompt, 800), negative: cut(sent?.negative, 400), seed: sent?.seed ?? '', size: cut(sent?.size, 20), model: cut(sent?.model, 40), from, at: Date.now() };
+    d.history = [entry, ...(Array.isArray(d.history) ? d.history : []).filter(h => h.url !== entry.url)].slice(0, 300);
+    __mod_store.commit({ silent: !DOC.querySelector('#pc-root.open') });
+}
+let pcMarkerRaw = '';
 const __mod_marker=createMarkerController({
         context:()=>SillyTavern.getContext(),getData:__mod_store.getData,document:DOC,
-        generate:async (prompt,where)=>{const d=__mod_store.getData();
+        generate:async (prompt,where)=>{const d=__mod_store.getData();pcMarkerRaw=prompt;
             // 正文里提到谁才带谁的外貌和角色参考；谁都没提到，就只用标记里的词
             const hit=__mod_chars.markerPrompt(prompt,where||{});
             const {positive,negative,chars}=hit||__mod_engine.composeStudio({pos:__mod_model.mergeTags(d.active?__mod_model.ticketString(d,d.active):'',prompt),neg:[d.active?__mod_model.ticketNeg(d,d.active):'',d.options.chatNegative||''].filter(Boolean).join(', ')});
             const bound=[...new Set((hit?.cast||[]).map(ch=>ch.charRef).filter(id=>id&&d.charRefGroups?.[id]))];
             const image=await __mod_engine.generateFull({positive,negative,...(chars?.length?{chars}:{}),director:bound.length?await __mod_engine.charRefs(bound):undefined});__mod_engine.afterChatImage();return image;},
-        upload:async(image,name)=>{const r=await __mod_store.uploadImage(image,name);try{pcAddHistory(r?.url,'','chat');}catch{}return r;},notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
+        upload:async(image,name)=>{const r=await __mod_store.uploadImage(image,name);void pcRecordImage({dataUrl:image,url:r?.url,raw:pcMarkerRaw,sent:__mod_engine.runtime.lastSent,from:'chat'}).catch(e=>console.warn('[智库] 历史生图没存上',e));return r;},notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
     });
 const __mod_ui = (() => {
 /**
@@ -2826,6 +2866,69 @@ function addArtistPrefix(text, names) {
     return s;
 }
 
+// ───────────── 历史生图 ─────────────
+const HIST_CSS = `<style>.pc-hist{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.pc-hist-item{position:relative;padding:0;border:0;border-radius:10px;overflow:hidden;aspect-ratio:2/3;background:var(--pc-paper-2);cursor:pointer}.pc-hist-item img{width:100%;height:100%;object-fit:cover;display:block}.pc-hist-item i{position:absolute;left:4px;bottom:4px;font-style:normal;font-size:10px;padding:0 5px;border-radius:6px;background:rgba(0,0,0,.55);color:#fff}.pc-hist-item.sel{outline:3px solid var(--pc-gold);outline-offset:-3px}.pc-hist-item b{position:absolute;right:5px;top:5px;width:20px;height:20px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.35);display:grid;place-items:center;color:#fff;font-size:12px}.pc-hist-item.sel b{background:var(--pc-gold)}.pc-hist-detail img{width:100%;border-radius:12px;display:block}.pc-hist-meta{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12px;margin-top:8px}.pc-hist-meta dt{color:var(--pc-ink-soft)}.pc-hist-meta dd{margin:0;word-break:break-all}@media (max-width:420px){.pc-hist{grid-template-columns:repeat(3,minmax(0,1fr))}}</style>`;
+const histList = () => (Array.isArray(getData().history) ? getData().history : []);
+function historyFold(d) {
+    const hist = histList();
+    if (!hist.length) return '';
+    const h = ui.hist ||= { select: false, picked: [], show: 60 };
+    const shown = hist.slice(0, h.show);
+    return fold('history', '历史生图', `${hist.length} 张`, `${HIST_CSS}
+      <div class="pc-chips wrap" style="margin-top:0">
+        <button class="pc-pill ${h.select ? 'on' : 'dashed'} tiny" data-act="histselect">${h.select ? '完成' : '多选'}</button>
+        ${h.select ? `<button class="pc-pill dashed tiny" data-act="histall">${h.picked.length === hist.length ? '全不选' : '全选'}</button>
+        <button class="pc-pill dashed tiny" data-act="histdownload" ${h.picked.length ? '' : 'disabled'}>下载选中（${h.picked.length}）</button>
+        <button class="pc-pill dashed tiny danger" data-act="histdelete" ${h.picked.length ? '' : 'disabled'}>删除选中</button>` : `
+        <button class="pc-pill dashed tiny" data-act="histclean" data-days="7">清理 7 天前</button>
+        <button class="pc-pill dashed tiny" data-act="histclean" data-days="30">清理 30 天前</button>`}
+      </div>
+      <div class="pc-hist pc-mt-s">${shown.map(x => `<button class="pc-hist-item ${h.picked.includes(x.id || x.url) ? 'sel' : ''}" data-act="histopen" data-id="${esc(x.id || x.url)}"><img src="${esc(x.thumb || x.url)}" alt="" loading="lazy"><i>${x.from === 'chat' ? '聊天' : '生图'}</i>${h.select ? `<b>${h.picked.includes(x.id || x.url) ? '✓' : ''}</b>` : ''}</button>`).join('')}</div>
+      ${hist.length > shown.length ? `<div class="pc-center pc-mt-s"><button class="pc-pill dashed tiny" data-act="histmore">再显示 60 张（还有 ${hist.length - shown.length} 张）</button></div>` : ''}
+      <div class="pc-dim small pc-mt-s">图存在酒馆的 user/images 里。删除和清理会真的删掉图片文件，聊天里用到这张图的地方也会显示不出来。</div>`);
+}
+const histFind = id => histList().find(x => (x.id || x.url) === id);
+/** 删掉记录和文件（原图 + 缩略图） */
+function histRemove(entries) {
+    const gone = new Set(entries.map(x => x.id || x.url));
+    for (const x of entries) for (const u of [x.url, x.thumb]) if (u) deleteImageFile(String(u).replace(/^\/+/, ''));
+    getData().history = histList().filter(x => !gone.has(x.id || x.url));
+    if (ui.hist) ui.hist.picked = ui.hist.picked.filter(id => !gone.has(id));
+    commit();
+}
+function histDownload(entries) {
+    entries.forEach((x, i) => setTimeout(() => { const a = DOC.createElement('a'); a.href = x.url; a.download = `zhiku_${new Date(x.at).toISOString().slice(0, 19).replace(/[:T]/g, '-')}_${i + 1}.png`; pcMount(a); a.click(); a.remove(); }, i * 400));
+}
+function histDetail(x) {
+    const row = (k, v) => v === '' || v === undefined || v === null ? '' : `<dt>${k}</dt><dd>${esc(String(v))}</dd>`;
+    const box = modal(`<div class="pc-hist-detail">${HIST_CSS}<img src="${esc(x.url)}" alt="">
+      <dl class="pc-hist-meta">${row('来源', x.from === 'chat' ? '聊天标记' : '生图页')}${row('时间', new Date(x.at).toLocaleString())}${row('种子', x.seed)}${row('尺寸', x.size)}${row('模型', x.model)}</dl>
+      ${x.raw ? `<div class="pc-label">${x.from === 'chat' ? '标记里的提示词' : '正面提示词'}</div><p class="pc-quote small mono">${esc(x.raw)}</p>` : ''}
+      ${x.prompt ? `<details class="pc-details"><summary>实际发出去的内容</summary><div class="pc-label">正面</div><p class="pc-quote small mono">${esc(x.prompt)}</p>${x.negative ? `<div class="pc-label">负面</div><p class="pc-quote small mono">${esc(x.negative)}</p>` : ''}</details>` : ''}
+      <div class="pc-actions wrap pc-mt-s">
+        <button class="pc-btn dark" type="button" data-h="reuse">用这组参数再生成</button>
+        <a class="pc-btn" href="${esc(x.url)}" download="zhiku_${x.at}.png">下载</a>
+        <button class="pc-btn danger" type="button" data-h="delete">删除</button>
+        <button class="pc-btn" type="button" data-h="close">关闭</button>
+      </div></div>`);
+    box.style.maxHeight = '90dvh'; box.style.overflowY = 'auto';
+    box.addEventListener('click', async ev => {
+        const act = ev.target.closest('[data-h]')?.dataset.h;
+        if (act === 'close') box.closeModal();
+        if (act === 'delete') { if (!(await confirmBox('删掉这张图？图片文件也会删掉。', { ok: '删除', cancel: '算了' }))) return; histRemove([x]); box.closeModal(); render(); }
+        if (act === 'reuse') {
+            const st = ui.studio, n = N.settings();
+            st.pos = x.raw || x.prompt || st.pos;
+            const m = /^(\d+)\D+(\d+)$/.exec(String(x.size || ''));
+            if (m) { n.novelai_width = Number(m[1]); n.novelai_height = Number(m[2]); }
+            if (x.seed !== '' && x.seed !== undefined) n.novelai_seed = Number(x.seed) || 0;
+            N.save(); saveStudio();
+            box.closeModal(); ui.view = 'studio'; render();
+            toastr.info(x.seed ? `种子已设为 ${x.seed}，想随机就把种子改回 0` : '提示词已填好', '历史生图', { timeOut: 5000 });
+        }
+    });
+}
+
 function viewStudio(d) {
     const s = settingsST();
     loadStudio();
@@ -2875,14 +2978,7 @@ function viewStudio(d) {
         <div class="pc-label">负面</div><p class="pc-quote small mono">${esc(st.sent.negative)}</p></details>` : ''}
     </section>` : ''}
 
-    ${(() => {
-        const hist = Array.isArray(d.history) ? d.history : [];
-        if (!hist.length) return '';
-        return fold('history', '历史生图', `最近 ${hist.length} 张`, `
-      <div class="pc-hist">${hist.map(h => `<button class="pc-hist-item" data-act="viewimg" data-src="${esc(h.url)}" title="${esc((h.from === 'chat' ? '聊天标记 · ' : '生图页 · ') + new Date(h.at).toLocaleString() + (h.prompt ? '\n' + h.prompt : ''))}"><img src="${esc(h.url)}" alt="" loading="lazy"><i>${h.from === 'chat' ? '聊天' : '生图'}</i></button>`).join('')}</div>
-      <div class="pc-row-between pc-mt-s"><span class="pc-dim small">点图放大；图存在酒馆的 user/images 里</span><button class="pc-pill dashed tiny" data-act="clearhistory">清空记录</button></div>
-      <style>.pc-hist{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.pc-hist-item{position:relative;padding:0;border:0;border-radius:10px;overflow:hidden;aspect-ratio:2/3;background:var(--pc-paper-2);cursor:pointer}.pc-hist-item img{width:100%;height:100%;object-fit:cover;display:block}.pc-hist-item i{position:absolute;left:4px;bottom:4px;font-style:normal;font-size:10px;padding:0 5px;border-radius:6px;background:rgba(0,0,0,.55);color:#fff}@media (max-width:420px){.pc-hist{grid-template-columns:repeat(3,minmax(0,1fr))}}</style>`);
-    })()}
+    ${historyFold(d)}
 
     ${fold('scene', '固定提示词', st.sceneOn === false ? '不发送' : !String(st.scene || '').trim() ? '跟着发送 · 还没写' : !sceneReady() ? '跟着发送 · 生成时转成标签' : `跟着发送 · ${M.tokenize(sceneTags()).length} 个词`, `
       <label class="pc-switch"><input type="checkbox" data-scene-on ${st.sceneOn !== false ? 'checked' : ''}><span></span>每次生成都带上<small>接在正面提示词后面、质量词前面一起发。不改你的正面提示词，也不进画师串。</small></label>
@@ -4633,7 +4729,28 @@ async function onClick(ev, outside = false) {
                 break;
             }
             case 'clearresult': ui.studio.result = null; ui.studio.sent = null; render(); break;
-            case 'clearhistory': { if (!(await confirmBox('清空历史生图的记录？图片文件不会删。', { ok: '清空', cancel: '算了' }))) break; getData().history = []; commit(); render(); break; }
+            case 'histselect': { const h = ui.hist ||= { select: false, picked: [], show: 60 }; h.select = !h.select; h.picked = []; render(); break; }
+            case 'histall': { const h = ui.hist; const all = histList().map(x => x.id || x.url); h.picked = h.picked.length === all.length ? [] : all; render(); break; }
+            case 'histmore': { ui.hist.show += 60; render(); break; }
+            case 'histopen': {
+                const id = el.dataset.id, h = ui.hist ||= { select: false, picked: [], show: 60 };
+                if (h.select) { h.picked = h.picked.includes(id) ? h.picked.filter(x => x !== id) : [...h.picked, id]; render(); break; }
+                const x = histFind(id); if (x) histDetail(x);
+                break;
+            }
+            case 'histdownload': { histDownload(ui.hist.picked.map(histFind).filter(Boolean)); break; }
+            case 'histdelete': {
+                const list = ui.hist.picked.map(histFind).filter(Boolean);
+                if (!list.length || !(await confirmBox(`删掉选中的 ${list.length} 张？图片文件也会删掉，聊天里用到的地方会显示不出来。`, { ok: '删除', cancel: '算了' }))) break;
+                histRemove(list); ui.hist.select = false; render(); break;
+            }
+            case 'histclean': {
+                const days = Number(el.dataset.days), before = Date.now() - days * 86400000;
+                const list = histList().filter(x => (x.at || 0) < before);
+                if (!list.length) { toastr.info(`没有 ${days} 天前的图`, '历史生图'); break; }
+                if (!(await confirmBox(`删掉 ${days} 天前的 ${list.length} 张图？图片文件也会删掉，聊天里用到的地方会显示不出来。`, { ok: '删除', cancel: '算了' }))) break;
+                histRemove(list); render(); break;
+            }
             case 'strtoggle': ui.strOpen[el.dataset.key] = !ui.strOpen[el.dataset.key]; render(); break;
             case 'addprefix': {
                 const names = el.dataset.name ? [el.dataset.name] : guessBareArtists(d, ui.studio.pos);
@@ -5247,8 +5364,8 @@ async function doGenerate() {
         st.result = await E.generate(studioParts());
         st.sent = E.runtime.lastSent;
         // 存进酒馆，记到历史生图里；关掉智库、刷新页面后也能找回来
-        const sentPrompt = st.sent?.prompt || st.pos;
-        uploadImage(st.result, 'studio_' + Date.now()).then(r => pcAddHistory(r?.url, sentPrompt, 'studio')).catch(e => console.warn('[智库] 历史生图没存上', e));
+        const shot = { dataUrl: st.result, raw: st.pos, sent: st.sent, from: 'studio' };
+        uploadImage(shot.dataUrl, 'studio_' + Date.now()).then(r => pcRecordImage({ ...shot, url: r.url })).catch(e => console.warn('[智库] 历史生图没存上', e));
     } catch (e) {
         toastr.error(e.message, '生成失败', { timeOut: 8000 });
     } finally {
