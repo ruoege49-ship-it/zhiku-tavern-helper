@@ -15,7 +15,9 @@ export function parseImageMarkers(text, start, end) {
     }
     return result;
 }
-export function createMarkerController({context,getData,generate,upload,notify,document:doc=globalThis.document}) {
+export function createMarkerController({context,getData,generate,upload,notify,document:doc=globalThis.document,resolveUrl=u=>u}) {
+    // 图存在本地浏览器时地址是 idb:xxx，要先换成能显示的地址；换不出来（存在别的设备上）就是空的
+    function showUrl(url,apply,missing){Promise.resolve(resolveUrl(url)).then(u=>{if(u)apply(u);else missing?.();},()=>missing?.());}
     let queue=Promise.resolve(), stopped=false;
     const pending=new WeakMap(), failed=new WeakMap();
     const imageBindings=new WeakSet(), overlays=new Set(), holds=new Set(), inflight=new Set(), keepOpen=new Set();
@@ -70,7 +72,8 @@ export function createMarkerController({context,getData,generate,upload,notify,d
             if(record?.url){
                 const wrapper=doc.createElement('details');wrapper.className='pc-result-collapse';
                 const header=doc.createElement('summary');header.textContent='图片 · 点击展开';
-                const img=doc.createElement('img');img.src=record.url;img.className='pc-result-image';img.alt='生成图片';
+                const img=doc.createElement('img');img.className='pc-result-image';img.alt='生成图片';
+                showUrl(record.url,u=>{img.src=u;},()=>{header.textContent='这张图存在别的设备 / 浏览器里，这里看不到，可以点「重新生成」';img.remove();});
                 wrapper.append(header,img);slot.append(wrapper);
                 const vs=Array.isArray(record.versions)?record.versions:[];
                 if(vs.length>1){
@@ -134,7 +137,7 @@ export function createMarkerController({context,getData,generate,upload,notify,d
     }
     function preview(id,msg,token,index,record){
         const {box,dismiss}=dialog(),img=doc.createElement('img'),download=doc.createElement('a'),edit=doc.createElement('button'),remove=doc.createElement('button');
-        img.src=record.url;download.href=record.url;download.download='image.png';download.textContent='下载';edit.type=remove.type='button';edit.textContent='编辑 / 重新生成';remove.textContent='删除当前图片';
+        showUrl(record.url,u=>{img.src=u;download.href=u;});download.download='image.png';download.textContent='下载';edit.type=remove.type='button';edit.textContent='编辑 / 重新生成';remove.textContent='删除当前图片';
         edit.onclick=()=>{dismiss();editPrompt(id,msg,token,index);};
         remove.onclick=async()=>{try{await deleteResult(id,msg,token);dismiss();}catch(e){notify(e.message,'error');}};
         box.append(img,download,edit,remove);
