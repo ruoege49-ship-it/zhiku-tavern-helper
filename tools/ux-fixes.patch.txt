@@ -2142,10 +2142,12 @@ async function askShrinking(sys, userFor, opts) {
     const ch = json.choices?.[0] || {};
     const content = String(ch.message?.content ?? ch.text ?? '');
     if (content.trim()) return content;
-    // 正文是空的：带思考的模型可能把长度都花在思考上了
-    if (ch.finish_reason === 'length') throw Object.assign(new Error('AI 的长度用完了还没写出回答'), { emptyLength: true });
     const think = String(ch.message?.reasoning_content ?? ch.message?.reasoning ?? '');
-    return think.includes('{') ? think : content;
+    if (think.includes('{') && ch.finish_reason !== 'length') return think;
+    // 正文是空的：把 API 实际返回的情况记下来，报错时给用户看，不靠猜
+    const u = json.usage || {}, rt = u.completion_tokens_details?.reasoning_tokens;
+    const diag = `模型 ${json.model || api.model || '?'}，结束原因 ${ch.finish_reason || '没给'}，这次限长 ${maxTokens}，用了 ${u.completion_tokens ?? '?'} token${rt !== undefined ? `（其中思考 ${rt}）` : think ? `（有 ${think.length} 字思考内容）` : ''}${!json.choices?.length ? '，返回里没有 choices：' + raw.slice(0, 80) : ''}`;
+    throw Object.assign(new Error('AI 回复是空的（' + diag + '）'), { emptyLength: true, diag });
 @@@ END
 
 @@@ OLD
@@ -2160,11 +2162,21 @@ async function askRoomy(sys, user, opts) {
         if (answerOf(raw) || String(raw || '').includes('{')) return raw;
     } catch (e) { if (!e.emptyLength) throw e; }
     console.warn('[智库] AI 回复是空的，加大长度再试一次');
+    let diag = '';
     try {
         const raw = await askLLM(sys, user, { ...opts, maxTokens: Math.max(16000, (opts?.maxTokens || 800) * 4) });
         if (answerOf(raw) || String(raw || '').includes('{')) return raw;
-    } catch (e) { if (!e.emptyLength && !/max_tokens|max tokens|max_completion/i.test(String(e?.message))) throw e; }
-    throw new Error('AI 回复是空的：加大长度再试也没写出回答，多半是模型一直在思考。换不带思考的模型，或者在模型设置里关掉思考（推理）再试');
+    } catch (e) { if (!e.emptyLength && !/max_tokens|max tokens|max_completion/i.test(String(e?.message))) throw e; diag = e.diag || String(e?.message || ''); }
+    throw new Error('AI 回复是空的，加大长度又试了一次还是空的。实际情况：' + (diag || '没有更多信息') + '。如果写着思考用了很多 token，换不带思考的模型或关掉思考；如果结束原因是 stop 但用了 0 token，多半是中转站或模型拒绝了这段设定');
 }
 async function askShrinking(sys, userFor, opts) {
+@@@ END
+
+═══ 29. AI 回复是空的时，报错里写清楚 API 实际返回了什么（结束原因、限长、用了多少 token、思考多少），不靠猜 ═══
+@@@ OLD
+        return String(await ctx.generateRaw({ prompt: user, systemPrompt: system, responseLength: maxTokens }) ?? '');
+@@@ NEW
+        const out = String(await ctx.generateRaw({ prompt: user, systemPrompt: system, responseLength: maxTokens }) ?? '');
+        if (!out.trim()) throw Object.assign(new Error('AI 回复是空的'), { emptyLength: true, diag: `通过酒馆现在连接的 API 转发，这次限长 ${maxTokens}；酒馆没把详细原因传回来，想看原因可以在智库设置「AI」里改成「单独填」再读一次` });
+        return out;
 @@@ END
