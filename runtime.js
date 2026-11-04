@@ -2483,7 +2483,8 @@ function createMarkerController({context,getData,generate,upload,notify,document
             if(!manual&&(msg.extra?.zhikuImages?.[key]||failed.get(msg)?.has(key)))return Promise.resolve(0);
             if(!map){map=new Map();pending.set(msg,map);}
             const entry={state:'排队中…',job:null};map.set(key,entry);
-            const current=()=>!stopped&&chatKey(context())===chat&&context().chat?.[id]===msg&&msg.swipe_id===swipe&&String(msg.mes||'')===source;
+            // 别的脚本改了这一楼其他地方（状态栏、正则）不算变：只要这个标记还在原位置，结果照样存
+            const current=()=>!stopped&&chatKey(context())===chat&&context().chat?.[id]===msg&&msg.swipe_id===swipe&&String(msg.mes||'').slice(token.index,token.index+token.raw.length)===token.raw;
             const job=queue.then(async()=>{
                 if(!current())return 0;
                 entry.state='生成中…';decorate(id);
@@ -2497,7 +2498,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
                     try{await c.saveChat();}catch(e){if(old)records[key]=old;else delete records[key];if(!hadRecords&&!Object.keys(records).length)delete msg.extra.zhikuImages;if(!hadExtra&&!Object.keys(msg.extra).length)delete msg.extra;throw e;}
                     failed.get(msg)?.delete(key);return 1;
                 }catch(e){let errors=failed.get(msg);if(!errors){errors=new Set();failed.set(msg,errors);}errors.add(key);notify(e.message||String(e),'error');return 0;}
-            }).finally(()=>{map.delete(key);if(!map.size)pending.delete(msg);if(current())decorate(id);});
+            }).finally(()=>{map.delete(key);if(!map.size)pending.delete(msg);if(!stopped&&chatKey(context())===chat)decorate(id);});
             entry.job=job;queue=job.catch(()=>{});return job;
         });
         decorate(id);return (await Promise.all(jobs)).reduce((a,b)=>a+b,0);

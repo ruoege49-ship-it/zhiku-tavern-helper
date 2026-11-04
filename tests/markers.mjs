@@ -25,6 +25,14 @@ msg.mes='image###retry###';fail=true;await controller.process(0);await controlle
 fail=false;await controller.process(0,{manual:true});assert.equal(count,4);
 msg.mes='image###switch###';let release;block=new Promise(r=>release=r);
 const pending=controller.process(0);await Promise.resolve();c.chatId='two';release();await pending;assert.equal(msg.mes,'image###switch###');block=null;
+// 生成途中别的脚本在这一楼末尾加了状态栏：标记还在原位置，结果照样存
+{const before=count;msg.mes='image###tail###';let go;block=new Promise(r=>go=r);
+const job=controller.process(0);await Promise.resolve();msg.mes+='\n<status>HP 10</status>';go();await job;block=null;
+assert.equal(count,before+1);assert(Object.keys(msg.extra.zhikuImages).some(k=>k.endsWith(':0:image###tail###')),'tail edit must keep the result');
+// 标记前面被改、标记挪了位置：不存
+msg.mes='image###moved###';block=new Promise(r=>go=r);const recs=Object.keys(msg.extra.zhikuImages).length;
+const job2=controller.process(0);await Promise.resolve();msg.mes='new intro '+msg.mes;go();await job2;block=null;
+assert.equal(Object.keys(msg.extra.zhikuImages).length,recs,'moved marker must not be saved');}
 data.options.imageStartTag='[draw:';data.options.imageEndTag=']';controller.syncRegex();rule=c.extensionSettings.regex.find(r=>r.id===MARKER_REGEX_ID);
 assert.equal('text [draw:sunset] tail'.replace(regex(),''),'text  tail');
 data.options.markerAuto=false;msg.mes='[draw:off]';const before=count;await controller.process(0);assert.equal(count,before);
@@ -34,4 +42,4 @@ const oldRecords=JSON.stringify(msg.extra.zhikuImages);await controller.process(
 assert.equal(JSON.stringify(msg.extra.zhikuImages),oldRecords);assert.equal(msg.mes,'[draw:save-failure]');c.saveChat=priorSave;
 const countBeforeStop=count;
 controller.stop();msg.mes='[draw:stopped]';await controller.process(0,{manual:true});assert.equal(count,countBeforeStop);
-console.log('PASS: exact/custom/multiline markers, prompt-only filter, deduplication, serial queue, separate image records, preserved message/swipe text, failure retry, chat switch protection, auto toggle and stop.');
+console.log('PASS: exact/custom/multiline markers, prompt-only filter, deduplication, serial queue, separate image records, preserved message/swipe text, edits after the marker keep results, failure retry, chat switch protection, auto toggle and stop.');
