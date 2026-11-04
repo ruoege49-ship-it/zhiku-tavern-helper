@@ -2043,3 +2043,57 @@ function viewBook(d) {
             case 'randstring': openStringMaker({ random: true }); break;
             case 'seldel': {
 @@@ END
+
+═══ 26. 氛围组的改名、删除直接放按钮：以前只能长按，很多人找不到，手机上长按还会弹出浏览器自己的菜单 ═══
+@@@ OLD
+    const i = await chooseBox(`氛围组「${g.name}」`, ['改名', '删除这一组']);
+    if (i === 0) { const n = await promptText('新名字', g.name); if (n) { g.name = n.slice(0, 20); commit(); } }
+    if (i === 1 && await confirmBox(`删除「${g.name}」和里面的 ${g.vibes.length} 张图？`)) {
+        for (const v of g.vibes) if (v.path) deleteImageFile(v.path);
+        delete d.vibeGroups[id];
+        if (d.vibeActive === id) d.vibeActive = null;
+        commit();
+    }
+}
+@@@ NEW
+    const i = await chooseBox(`氛围组「${g.name}」`, ['改名', '删除这一组']);
+    if (i === 0) await renameVibeGroup(id);
+    if (i === 1) await deleteVibeGroup(id);
+}
+async function renameVibeGroup(id) {
+    const g = getData().vibeGroups[id];
+    if (!g) return;
+    const n = await promptText('新名字', g.name);
+    if (n) { g.name = n.slice(0, 20); commit(); render(); }
+}
+async function deleteVibeGroup(id) {
+    const d = getData(), g = d.vibeGroups[id];
+    if (!g || !(await confirmBox(`删除「${g.name}」和里面的 ${g.vibes.length} 张图？`))) return;
+    for (const v of g.vibes) if (v.path) deleteImageFile(v.path);
+    delete d.vibeGroups[id];
+    if (d.vibeActive === id) d.vibeActive = null;
+    if (ui.vibeShow === id) ui.vibeShow = null;
+    commit(); render();
+}
+@@@ END
+
+@@@ OLD
+    ${groups.length ? '<div class="pc-tip">长按一组可以改名或删除</div>' : ''}
+    ${show ? `<section class="pc-card pc-pad pc-mt">
+      <div class="pc-row-between"><b>${esc(show.name)} · ${show.vibes.length} 张</b>
+        <label class="pc-pill dashed tiny">＋ 加图<input type="file" accept="image/*,.naiv4vibe,.json" multiple data-vibeadd="${show.id}" hidden></label></div>
+@@@ NEW
+    ${groups.length ? '<div class="pc-tip">点一组看里面的图，下面可以改名、删除整组；单张图点右边的 × 删除</div>' : ''}
+    ${show ? `<section class="pc-card pc-pad pc-mt">
+      <div class="pc-row-between"><b>${esc(show.name)} · ${show.vibes.length} 张</b>
+        <label class="pc-pill dashed tiny">＋ 加图<input type="file" accept="image/*,.naiv4vibe,.json" multiple data-vibeadd="${show.id}" hidden></label></div>
+      <div class="pc-chips wrap pc-mt-s"><button class="pc-pill dashed tiny" data-act="viberename" data-id="${show.id}">改名</button><button class="pc-pill dashed tiny danger" data-act="vibegdel" data-id="${show.id}">删除这一组</button></div>
+@@@ END
+
+@@@ OLD
+            case 'vibedel': {
+@@@ NEW
+            case 'viberename': await renameVibeGroup(el.dataset.id); break;
+            case 'vibegdel': await deleteVibeGroup(el.dataset.id); break;
+            case 'vibedel': {
+@@@ END

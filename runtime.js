@@ -4447,10 +4447,11 @@ function viewVibe(d) {
         <button class="pc-use ${!cur ? 'on' : ''}" data-act="vibeuse" data-id="">${!cur ? SYM.check : SYM.swap}</button>
         <div class="pc-ticket-text"><b>不用氛围</b><small>只靠提示词和画师</small></div></article>
     </div>
-    ${groups.length ? '<div class="pc-tip">长按一组可以改名或删除</div>' : ''}
+    ${groups.length ? '<div class="pc-tip">点一组看里面的图，下面可以改名、删除整组；单张图点右边的 × 删除</div>' : ''}
     ${show ? `<section class="pc-card pc-pad pc-mt">
       <div class="pc-row-between"><b>${esc(show.name)} · ${show.vibes.length} 张</b>
         <label class="pc-pill dashed tiny">＋ 加图<input type="file" accept="image/*,.naiv4vibe,.json" multiple data-vibeadd="${show.id}" hidden></label></div>
+      <div class="pc-chips wrap pc-mt-s"><button class="pc-pill dashed tiny" data-act="viberename" data-id="${show.id}">改名</button><button class="pc-pill dashed tiny danger" data-act="vibegdel" data-id="${show.id}">删除这一组</button></div>
       ${show.vibes.map((v, i) => `<div class="pc-vrow">
         <div class="pc-vthumb">${v.path || v.thumb ? `<img src="${esc(v.path ? '/' + v.path : v.thumb)}" alt="">` : ''}</div>
         <div class="pc-grow"><div class="pc-row-between"><small class="pc-dim">${esc(v.name || '参考图 ' + (i + 1))}</small><button class="pc-x" data-act="vibedel" data-g="${show.id}" data-i="${i}" aria-label="删掉">×</button></div>
@@ -4494,13 +4495,23 @@ async function vibeMenu(id) {
     const g = d.vibeGroups[id];
     if (!g) return;
     const i = await chooseBox(`氛围组「${g.name}」`, ['改名', '删除这一组']);
-    if (i === 0) { const n = await promptText('新名字', g.name); if (n) { g.name = n.slice(0, 20); commit(); } }
-    if (i === 1 && await confirmBox(`删除「${g.name}」和里面的 ${g.vibes.length} 张图？`)) {
-        for (const v of g.vibes) if (v.path) deleteImageFile(v.path);
-        delete d.vibeGroups[id];
-        if (d.vibeActive === id) d.vibeActive = null;
-        commit();
-    }
+    if (i === 0) await renameVibeGroup(id);
+    if (i === 1) await deleteVibeGroup(id);
+}
+async function renameVibeGroup(id) {
+    const g = getData().vibeGroups[id];
+    if (!g) return;
+    const n = await promptText('新名字', g.name);
+    if (n) { g.name = n.slice(0, 20); commit(); render(); }
+}
+async function deleteVibeGroup(id) {
+    const d = getData(), g = d.vibeGroups[id];
+    if (!g || !(await confirmBox(`删除「${g.name}」和里面的 ${g.vibes.length} 张图？`))) return;
+    for (const v of g.vibes) if (v.path) deleteImageFile(v.path);
+    delete d.vibeGroups[id];
+    if (d.vibeActive === id) d.vibeActive = null;
+    if (ui.vibeShow === id) ui.vibeShow = null;
+    commit(); render();
 }
 
 /** 加参考图：图片会上传到酒馆并马上编码；.naiv4vibe 文件直接读 */
@@ -5245,6 +5256,8 @@ async function onClick(ev, outside = false) {
                 ui.vibeShow = id; commit();
                 break;
             }
+            case 'viberename': await renameVibeGroup(el.dataset.id); break;
+            case 'vibegdel': await deleteVibeGroup(el.dataset.id); break;
             case 'vibedel': {
                 const g = d.vibeGroups[el.dataset.g];
                 const v = g?.vibes[Number(el.dataset.i)];
