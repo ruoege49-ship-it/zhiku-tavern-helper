@@ -1549,14 +1549,10 @@ function repairJson(s) {
     cleanups.push(() => {__mod_marker.stop();__mod_nai.stopQueue();});
     // 夜间模式：几套深色配色。样式表里用到浅色的地方，统一换成 --pcn-* 变量，每套配色只定义变量
     const NIGHT_THEMES = {
-        ink:  { name: '墨夜', mist: '#16181b', dot: 'rgba(255,255,255,.045)', paper: '#1f2226', paper2: '#2a2e33', user: '#262a2f', sunk: '#33383e', ink: '#e9e6df', soft: '#a3a09a', gold: '#d8a75c', strong: '#d8a75c', onStrong: '#1a1714', line: 'rgba(233,230,223,.16)', danger: '#e08a7e', warn: '#f0a99f', paperRgb: '31, 34, 38', inkRgb: '233, 230, 223' },
-        teal: { name: '深青', mist: '#0e2523', dot: 'rgba(160,220,205,.06)', paper: '#14302d', paper2: '#1c3c38', user: '#183632', sunk: '#244844', ink: '#e4f0ea', soft: '#9dbab1', gold: '#e6b56c', strong: '#7cc4b2', onStrong: '#0d201e', line: 'rgba(228,240,234,.16)', danger: '#ee8f84', warn: '#f5aca3', paperRgb: '20, 48, 45', inkRgb: '228, 240, 234' },
-        plum: { name: '夜樱', mist: '#1a1520', dot: 'rgba(255,200,230,.05)', paper: '#241d2b', paper2: '#2f2637', user: '#2a2232', sunk: '#3a3044', ink: '#f1e8f2', soft: '#b5a3b8', gold: '#e9a8c4', strong: '#e9a8c4', onStrong: '#241621', line: 'rgba(241,232,242,.15)', danger: '#f08e8e', warn: '#f7b0b0', paperRgb: '36, 29, 43', inkRgb: '241, 232, 242' },
         // 小红书色卡「简｜黑与白」：#131112 #494849 #8A8A8A #C3C3C3 #E6E6E6
         mono: { name: '黑与白', mist: '#131112', dot: 'rgba(230,230,230,.045)', paper: '#1d1b1c', paper2: '#2a2829', user: '#242223', sunk: '#494849', ink: '#e6e6e6', soft: '#8a8a8a', gold: '#c3c3c3', strong: '#e6e6e6', onStrong: '#131112', line: 'rgba(230,230,230,.16)', danger: '#e08a80', warn: '#eaa49b', paperRgb: '29, 27, 28', inkRgb: '230, 230, 230' },
         // 色卡「黑蓝深海」：#101828 #001F3F #1E3A5F #34568B，亮蓝取色卡里那颗浅色圆
         sea: { name: '黑蓝深海', mist: '#101828', dot: 'rgba(143,176,220,.06)', paper: '#0b2140', paper2: '#1e3a5f', user: '#132c4c', sunk: '#34568b', ink: '#e4ecf7', soft: '#8ea5c4', gold: '#8fb0dc', strong: '#8fb0dc', onStrong: '#0a1424', line: 'rgba(143,176,220,.2)', danger: '#f0938c', warn: '#f6b2ab', paperRgb: '11, 33, 64', inkRgb: '228, 236, 247' },
-        navy: { name: '午夜蓝', mist: '#0d1524', dot: 'rgba(170,200,255,.05)', paper: '#152036', paper2: '#1d2a44', user: '#19253d', sunk: '#26344f', ink: '#e3e9f4', soft: '#9aa8c0', gold: '#f0b860', strong: '#8db4ff', onStrong: '#0c1426', line: 'rgba(227,233,244,.15)', danger: '#f0908a', warn: '#f6b0aa', paperRgb: '21, 32, 54', inkRgb: '227, 233, 244' },
     };
     const themeVars = t => `--pc-mist:${t.mist};--pc-ink:${t.ink};--pc-ink-soft:${t.soft};--pc-paper:${t.paper};--pc-paper-2:${t.paper2};--pc-paper-user:${t.user};--pc-gold:${t.gold};--pc-wax:${t.gold};--pc-danger:${t.danger};--pc-dash:${t.line};--pc-shadow:0 4px 14px rgba(0,0,0,.35);--pcn-dot:${t.dot};--pcn-sunk:${t.sunk};--pcn-strong:${t.strong};--pcn-on-strong:${t.onStrong};--pcn-line:${t.line};--pcn-warn:${t.warn};--pcn-paper-rgb:${t.paperRgb};--pcn-ink-rgb:${t.inkRgb};`;
     /** 浅色主题里的写法 → 夜间变量。浏览器读回来是 rgb() 写法，十六进制和 rgb() 都认 */
@@ -1627,7 +1623,7 @@ function repairJson(s) {
     };
     const applyNight = () => {
         const o = getData().options, mode = o.nightMode || 'day';
-        const theme = NIGHT_THEMES[o.nightTheme] ? o.nightTheme : 'ink';
+        const theme = NIGHT_THEMES[o.nightTheme] ? o.nightTheme : 'mono';
         const html = DOC.documentElement;
         html.classList.toggle('pc-night', mode === 'night' || (mode === 'auto' && tavernDark()));
         for (const k of Object.keys(NIGHT_THEMES)) html.classList.toggle('pc-nt-' + k, k === theme);
@@ -1646,7 +1642,7 @@ function repairJson(s) {
     const nightMode = d.options.nightMode || 'day';
     const look = setFold('look', '外观', { day: '日间', night: '夜间', auto: '跟随酒馆' }[nightMode] || '日间', `
       <div class="pc-seg three">${[['day', '日间'], ['night', '夜间'], ['auto', '跟随酒馆']].map(([v, t]) => `<button class="${nightMode === v ? 'on' : ''}" data-act="nightmode" data-mode="${v}">${t}</button>`).join('')}</div>
-      ${nightMode !== 'day' ? `<div class="pc-dim small pc-mt-s">夜间配色</div><div class="pc-chips wrap">${[['ink', '墨夜', '#1f2226', '#d8a75c'], ['teal', '深青', '#14302d', '#7cc4b2'], ['plum', '夜樱', '#241d2b', '#e9a8c4'], ['navy', '午夜蓝', '#152036', '#8db4ff'], ['mono', '黑与白', '#131112', '#e6e6e6'], ['sea', '黑蓝深海', '#101828', '#8fb0dc']].map(([v, t, bg, ac]) => `<button class="pc-pill ${(d.options.nightTheme || 'ink') === v ? 'on' : 'dashed'}" data-act="nighttheme" data-theme="${v}"><span style="display:inline-block;width:14px;height:14px;border-radius:50%;background:${bg};box-shadow:inset 0 0 0 4px ${ac};margin-right:6px;vertical-align:-2px"></span>${t}</button>`).join('')}</div>` : ''}
+      ${nightMode !== 'day' ? `<div class="pc-dim small pc-mt-s">夜间配色</div><div class="pc-chips wrap">${[['mono', '黑与白', '#131112', '#e6e6e6'], ['sea', '黑蓝深海', '#101828', '#8fb0dc']].map(([v, t, bg, ac]) => `<button class="pc-pill ${(['mono', 'sea'].includes(d.options.nightTheme) ? d.options.nightTheme : 'mono') === v ? 'on' : 'dashed'}" data-act="nighttheme" data-theme="${v}"><span style="display:inline-block;width:14px;height:14px;border-radius:50%;background:${bg};box-shadow:inset 0 0 0 4px ${ac};margin-right:6px;vertical-align:-2px"></span>${t}</button>`).join('')}</div>` : ''}
       <div class="pc-hint">「跟随酒馆」：酒馆用深色主题时自动换成夜间，每次打开智库时检查一次。</div>`);
 
     const entry = setFold('entry', '入口',
@@ -1664,4 +1660,11 @@ function repairJson(s) {
 ${chat}${nai}${ai}${tpl}${entry}
 @@@ NEW
 ${chat}${nai}${ai}${tpl}${look}${entry}
+@@@ END
+
+═══ 21. 手机上「更多参数」步数、噪声表被挤成一条：窄屏时网格变两列，span 4 的格子会多撑出两列空列。改成占满整行，窄屏时 span 2 的两个并排 ═══
+@@@ OLD
+.pc-field.span4 { grid-column: span 4; }
+@@@ NEW
+.pc-field.span4 { grid-column: 1 / -1; } @media (max-width: 420px) { .pc-grid4 > .pc-field.span2 { grid-column: span 1; } }
 @@@ END
