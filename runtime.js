@@ -2791,7 +2791,17 @@ function render() {
       <main class="pc-body"><div class="pc-page ${pageAnim(mainView)}">${VIEWS[ui.view]?.(d) || ''}</div></main>
     </div>`;
     const nb = root.querySelector('.pc-body');
-    if (nb) nb.scrollTop = scroll;
+    // 每个页面记住自己滚到哪：从画师详情返回画师库时回到原来的位置
+    const scrollKey = ui.view === 'book' ? `book:${ui.bookTab}:${ui.bookFilter}` : ui.view + ':' + (ui.detailId || '');
+    ui.scrollMem ||= {};
+    if (render.scrollKey && render.scrollKey !== scrollKey) ui.scrollMem[render.scrollKey] = scroll;
+    const wantScroll = render.scrollKey === scrollKey ? scroll : (ui.scrollMem[scrollKey] || 0);
+    if (nb) {
+        nb.scrollTop = wantScroll;
+        // 图片还没撑开高度时可能滚不到，等一下再补一次
+        if (nb.scrollTop < wantScroll) for (const ms of [60, 300]) setTimeout(() => { if (render.scrollKey === scrollKey && nb.isConnected && nb.scrollTop < wantScroll) nb.scrollTop = wantScroll; }, ms);
+    }
+    render.scrollKey = scrollKey;
     // 导航底色从上一个位置滑过来
     const ind = root.querySelector('.pc-nav-ind'), on = root.querySelector('.pc-nav .pc-pill.on');
     if (ind && on) {
@@ -3129,6 +3139,62 @@ function bookList(d) {
     return list.map(x => ({ type: groups ? 'group' : 'artist', id: x.id }));
 }
 
+/** 随机用的画师：当前标签（全部 / 收藏 / 自建标签）和搜索下的单个画师，跳过拉黑的 */
+function randomPool(d) {
+    const keep = ui.bookTab; ui.bookTab = 'artists';
+    try { return bookList(d).map(r => d.artists[r.id]).filter(a => a && !M.banInfo(d, a.tag)); } finally { ui.bookTab = keep; }
+}
+function randomString(d, n, weighted) {
+    const pool = randomPool(d);
+    for (let i = pool.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+    const W = [0.8, 0.9, 1, 1, 1.1, 1.2, 1.3];
+    return pool.slice(0, n).map(a => { const w = weighted ? W[Math.floor(Math.random() * W.length)] : 1; return Math.abs(w - 1) < 0.001 ? a.tag : `${M.fmtWeight(w)}::${a.tag}::`; }).join(', ');
+}
+/** 组成 / 随机画师串：可以改、复制、存成画师组、直接设为正文画师串 */
+function openStringMaker({ text = '', random = false } = {}) {
+    const d = getData();
+    const st = ui.maker ||= { n: 3, weighted: false };
+    if (random) text = randomString(d, st.n, st.weighted);
+    const poolSize = random ? randomPool(d).length : 0;
+    const from = ui.bookFilter === 'all' ? '全部' : ui.bookFilter === 'fav' ? '收藏的' : `「${d.collections[ui.bookFilter]?.name || '这个标签'}」里的`;
+    const box = modal(`<h3 class="pc-h3">${random ? '随机画师串' : '组成画师串'}</h3>
+      ${random ? `<div class="pc-dim small">从${esc(from)}单个画师里随机抽${ui.search.trim() ? '（只抽搜索出来的）' : ''}，共 ${poolSize} 位，跳过拉黑的。换上面的标签就能换抽取范围。</div>
+      <div class="pc-row-between pc-mt-s"><span class="pc-dim small">抽几位</span><div class="pc-chips" style="margin:0" data-mk-n>${[2, 3, 4, 5, 6].map(n => `<button class="pc-pill ${st.n === n ? 'on' : 'dashed'} tiny" type="button" data-n="${n}">${n}</button>`).join('')}</div></div>
+      <label class="pc-switch"><input type="checkbox" data-mk-w ${st.weighted ? 'checked' : ''}><span></span>随机权重<small>每位画师随机给 0.8～1.3 的权重</small></label>` : ''}
+      <label class="pc-label" for="pc-mk-text">画师串（可以直接改）</label>
+      <textarea id="pc-mk-text" class="pc-textarea small mono" rows="3">${esc(text)}</textarea>
+      <label class="pc-field pc-mt-s"><span>名字（不填就用前两位画师的名字）</span><input id="pc-mk-name" value=""></label>
+      <div class="pc-actions wrap pc-mt-s">
+        ${random ? '<button class="pc-btn" type="button" data-mk="again">再随机一次</button>' : ''}
+        <button class="pc-btn" type="button" data-mk="copy">复制</button>
+        <button class="pc-btn" type="button" data-mk="save">存成画师组</button>
+        <button class="pc-btn dark" type="button" data-mk="use">存并设为正文画师串</button>
+        <button class="pc-btn" type="button" data-mk="close">关闭</button>
+      </div>`);
+    const ta = box.querySelector('#pc-mk-text');
+    const again = () => { ta.value = randomString(getData(), st.n, st.weighted); };
+    box.addEventListener('change', ev => { if (ev.target.matches('[data-mk-w]')) { st.weighted = ev.target.checked; again(); } });
+    box.addEventListener('click', async ev => {
+        const nb = ev.target.closest('[data-n]');
+        if (nb) { st.n = Number(nb.dataset.n); box.querySelectorAll('[data-mk-n] [data-n]').forEach(b => { b.classList.toggle('on', b === nb); b.classList.toggle('dashed', b !== nb); }); again(); return; }
+        const act = ev.target.closest('[data-mk]')?.dataset.mk;
+        if (!act) return;
+        if (act === 'close') { box.closeModal(); return; }
+        if (act === 'again') { again(); return; }
+        const textNow = ta.value.trim();
+        if (!textNow) { toastr.warning(random ? '没有能抽的单个画师，换个标签试试' : '画师串是空的', '画师串'); return; }
+        if (act === 'copy') { try { await P.navigator.clipboard.writeText(textNow); toastr.success('已复制', '', { timeOut: 1200 }); } catch { ta.select(); } return; }
+        const dd = getData();
+        const ref = M.createFromString(dd, { name: box.querySelector('#pc-mk-name').value.trim(), text: textNow });
+        if (!ref) { toastr.warning('没认出画师', '画师串'); return; }
+        commit();
+        if (act === 'use') E.setActive(ref);
+        toastr.success(`${act === 'use' ? '已设为正文画师串' : '已存成画师组'}：${M.ticketName(dd, ref)}`, '画师串');
+        if (!random) { ui.selecting = false; ui.picked.clear(); }
+        box.closeModal(); render();
+    });
+}
+
 function viewBook(d) {
     const cols = Object.values(d.collections);
     const view = d.options.bookView || 'grid';
@@ -3148,10 +3214,12 @@ function viewBook(d) {
       ${[['all', '全部'], ['fav', '收藏'], ...cols.map(c => [c.id, c.name])].map(([k, t]) => `<button class="pc-pill ${ui.bookFilter === k ? 'on' : 'dashed'}" data-act="bookfilter" data-f="${esc(k)}" ${d.collections[k] ? `data-lp="col" data-col="${esc(k)}"` : ''}>${esc(t)}</button>`).join('')}
       <button class="pc-pill dashed" data-act="newcol">＋</button>
       <button class="pc-pill ${ui.selecting ? 'on' : 'dashed'}" data-act="selmode">${ui.selecting ? '退出多选' : '多选'}</button>
+      ${ui.selecting ? '' : '<button class="pc-pill dashed" data-act="randstring">随机画师串</button>'}
     </div>
     ${cols.length && !ui.selecting ? '<div class="pc-tip">长按标签可以改名或删除</div>' : ''}
     ${ui.selecting ? `<div class="pc-selbar"><span>已选 ${ui.picked.size} 个</span><button class="pc-pill dashed tiny" data-act="selall">全选</button>
       <button class="pc-pill dashed tiny" data-act="seltag" ${ui.picked.size ? '' : 'disabled'}>加标签</button>
+      ${ui.bookTab === 'artists' ? `<button class="pc-pill dashed tiny" data-act="selstring" ${ui.picked.size ? '' : 'disabled'}>组成画师串</button>` : ''}
       ${ui.bookTab === 'artists' ? `<button class="pc-pill dashed tiny danger" data-act="selban" ${ui.picked.size ? '' : 'disabled'}>拉黑</button>` : ''}
       <button class="pc-pill tiny danger-solid" data-act="seldel" ${ui.picked.size ? '' : 'disabled'}>删除</button></div>` : ''}
     ${view === 'grid' ? `<div class="pc-grid2 pc-mt-s">${refs.map(r => ticketCard(d, r)).join('') || emptyTxt}</div>`
@@ -5079,6 +5147,8 @@ async function onClick(ev, outside = false) {
             case 'selmode': ui.selecting = !ui.selecting; ui.picked.clear(); render(); break;
             case 'selpick': { const id = el.dataset.id; if (ui.picked.has(id)) ui.picked.delete(id); else ui.picked.add(id); render(); break; }
             case 'selall': { const refs = bookList(d); if (ui.picked.size === refs.length) ui.picked.clear(); else refs.forEach(r => ui.picked.add(r.id)); render(); break; }
+            case 'selstring': { const tags = [...ui.picked].map(id => d.artists[id]?.tag).filter(Boolean); if (tags.length) openStringMaker({ text: tags.join(', ') }); break; }
+            case 'randstring': openStringMaker({ random: true }); break;
             case 'seldel': {
                 const type = ui.bookTab === 'groups' ? 'group' : 'artist';
                 const ids = [...ui.picked].filter(id => itemOf(d, { type, id }));
