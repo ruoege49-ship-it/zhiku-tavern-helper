@@ -8,7 +8,7 @@ function setTimeout(fn, delay, ...args) {
     timers.add(id); return id;
 }
 function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
-// 智库 · 原生扩展版 v0.8.8（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.9（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -26,7 +26,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.8';
+globalThis.__PC_VERSION = '0.8.9';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -1668,7 +1668,7 @@ async function extractAppearance(name, description) {
     const sys = `你从角色设定里挑出画图用的外貌标签。只挑不会变的外貌：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身等。衣服另外放。
 ${PAIRS}
 只输出 JSON：{"appearance": [...], "outfit": [...]}。设定里没写的不要编。`;
-    const j = pickJson(await askLLM(sys, `角色名：${name}\n设定：\n${String(description || '').slice(0, 6000)}`, { maxTokens: 900 }));
+    const j = pickJson(await askLLM(sys, `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, 16000)}`, { maxTokens: 900 }));
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x.en || '').trim(), zh: String(x.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
     return { appearance: norm(j.appearance), outfit: norm(j.outfit) };
 }
@@ -1911,6 +1911,49 @@ function saveChar(c) {
 function descOf(c) {
     if (c.kind === 'side') return '';
     return [...stCards(), ...stPersonas()].find(x => x.key === c.key)?.desc || '';
+}
+/** 读人设用：描述、性格、场景、卡里的世界书、绑定的世界书都拿来；配角只拿提到它名字的世界书条目 */
+async function descOfFull(c) {
+    const cx = ctx();
+    const parts = [];
+    const add = (title, text) => { text = String(text || '').trim(); if (text) parts.push(`【${title}】\n${text}`); };
+    const fromBook = (title, entries, name) => {
+        const list = (Array.isArray(entries) ? entries : Object.values(entries || {}))
+            .filter(e => e && !e.disable && e.enabled !== false && String(e.content || '').trim());
+        const picked = name ? list.filter(e => [e.comment, e.content, ...(e.key || e.keys || [])].some(x => String(x || '').includes(name))) : list;
+        for (const e of picked) add(`${title}：${e.comment || (e.key || e.keys || []).join('、') || '条目'}`, e.content);
+    };
+    const loadBook = async name => { try { return name ? (await cx.loadWorldInfo?.(name))?.entries : null; } catch { return null; } };
+    const fullCard = async avatar => {
+        let card = (cx.characters || []).find(x => x?.avatar === avatar) || null;
+        if (card && !card.shallow && (card.description || card.data?.character_book || card.data?.extensions?.world)) return card;
+        // 酒馆开了懒加载时，列表里的卡只有名字和头像
+        try {
+            const r = await fetch('/api/characters/get', { method: 'POST', headers: cx.getRequestHeaders(), body: JSON.stringify({ avatar_url: avatar }) });
+            if (r.ok) card = await r.json();
+        } catch { /* 用列表里的 */ }
+        return card;
+    };
+    if (c.kind === 'user') {
+        const pd = (cx.powerUserSettings || {}).persona_descriptions?.[String(c.key).replace(/^user:/, '')] || {};
+        add('人设', pd.description);
+        fromBook('人设世界书', await loadBook(pd.lorebook), parts.length ? c.name : '');
+    } else {
+        const side = c.kind === 'side';
+        const card = await fullCard(side ? c.card : c.avatar);
+        const dd = card?.data || {};
+        if (!side) {
+            add('描述', card?.description || dd.description);
+            add('性格', card?.personality || dd.personality);
+            add('场景', card?.scenario || dd.scenario);
+        }
+        // 卡里已经写了设定：世界书只拿提到这个名字的条目；没写：整本都给 AI 挑
+        const only = side || parts.length ? c.name : '';
+        fromBook('卡里的世界书', dd.character_book?.entries, only);
+        fromBook('绑定的世界书', await loadBook(dd.extensions?.world), only);
+        if (!side && !parts.length) add('开场白', card?.first_mes || dd.first_mes);
+    }
+    return parts.join('\n\n').slice(0, 16000);
 }
 
 /** 卡里的配角 */
@@ -2219,7 +2262,7 @@ function deleteOutfit(ownerKey, id) {
     commit();
 }
 
-return { avatarUrl, stCards, stPersonas, currentPersonaKey, getChar, saveChar, descOf, sideKicks, addSideKick, deleteChar, chatId, currentCast, removeFromCast, setCastOn, tagText, currentOutfit, fixedTags, canSplit, buildChatPrompt, previewCast, generateForMessage, insertImage, parsePairs, freeChars, saveCharacterPost, outfitFromPost, characterPayload, importZhihuijiCharacters, copyLook, wardrobe, findOutfit, giveOutfit, deleteOutfit };
+return { avatarUrl, stCards, stPersonas, currentPersonaKey, getChar, saveChar, descOf, descOfFull, sideKicks, addSideKick, deleteChar, chatId, currentCast, removeFromCast, setCastOn, tagText, currentOutfit, fixedTags, canSplit, buildChatPrompt, previewCast, generateForMessage, insertImage, parsePairs, freeChars, saveCharacterPost, outfitFromPost, characterPayload, importZhihuijiCharacters, copyLook, wardrobe, findOutfit, giveOutfit, deleteOutfit };
 })();
 
 // ───── ui.js ─────
@@ -3615,7 +3658,7 @@ function viewCharEdit(d) {
     ${c.kind !== 'free' && (family.length > 1 || c.kind !== 'user') ? `<div class="pc-chips">${family.map(f => `<button class="pc-pill ${f.key === c.key ? 'on' : 'dashed'}" data-act="openchar" data-key="${esc(f.key)}">${esc(f.name)}${f.kind === 'side' ? '（配角）' : ''}</button>`).join('')}${card ? '<button class="pc-pill dashed" data-act="addside">＋ 配角</button>' : ''}</div>` : ''}
 
     <section class="pc-card pc-pad pc-mt">
-      <div class="pc-row-between"><b>固定外貌</b><span class="pc-chips" style="margin:0">${c.kind !== 'side' && c.kind !== 'free' ? `<button class="pc-pill dashed tiny" data-act="readcard" ${busy ? 'disabled' : ''}>${busy === 'read' ? '读取中…' : c.kind === 'user' ? '从人设读' : '从角色卡读'}</button>` : ''}<label class="pc-pill dashed tiny">${busy === 'look' ? '<span class="pc-busy">看图中</span>' : '从图片读'}<input type="file" accept="image/*" data-lookimg hidden></label></span></div>
+      <div class="pc-row-between"><b>固定外貌</b><span class="pc-chips" style="margin:0">${c.kind !== 'free' ? `<button class="pc-pill dashed tiny" data-act="readcard" ${busy ? 'disabled' : ''}>${busy === 'read' ? '读取中…' : c.kind === 'user' ? '从人设读' : c.kind === 'side' ? '从卡和世界书读' : '从角色卡读'}</button>` : ''}<label class="pc-pill dashed tiny">${busy === 'look' ? '<span class="pc-busy">看图中</span>' : '从图片读'}<input type="file" accept="image/*" data-lookimg hidden></label></span></div>
       <div class="pc-dim small">头发、眼睛、脸、身材这类不会变的。第一个写 1boy 或 1girl。点标签可以改，× 删掉。</div>
       <div class="pc-pairs">${pairChips(c.appearance, 'app') || '<span class="pc-dim small">还没有</span>'}</div>
       <div class="pc-addrow"><textarea rows="1" data-bind="addText.app" placeholder="自己加，中文也行，可以一次粘贴好几个" data-enter="addpair-app">${esc(ui.addText.app)}</textarea><button class="pc-btn dark" data-act="addpair" data-where="app" ${busy ? 'disabled' : ''}>${busy === 'app' ? '…' : '加'}</button></div>
@@ -3782,8 +3825,10 @@ async function charAction(act, el) {
     const save = () => { C.saveChar(c); render(); };
     switch (act) {
         case 'readcard': {
-            const desc = C.descOf(c);
-            if (!desc.trim()) { toastr.warning('这张卡 / 人设里没有描述', '角色'); return true; }
+            ui.charBusy = 'read'; render();
+            const desc = await C.descOfFull(c).catch(() => '');
+            ui.charBusy = ''; render();
+            if (!desc.trim()) { toastr.warning(c.kind === 'side' ? `卡和世界书里都没提到「${c.name}」，可以在下面手动填外貌` : '描述、性格、场景、世界书里都没找到设定，可以在下面手动填外貌', '角色', { timeOut: 6000 }); return true; }
             if (c.appearance.length && !(await confirmBox('用读到的外貌替换现在的？', { ok: '替换', cancel: '算了' }))) return true;
             ui.charBusy = 'read'; render();
             try {
@@ -4328,7 +4373,11 @@ function viewSettings(d) {
       <label class="pc-field"><span>开始标记（前缀）</span><input data-optstr="imageStartTag" value="${esc(marker.start)}" placeholder="image###"></label>
       <label class="pc-field"><span>结束标记</span><input data-optstr="imageEndTag" value="${esc(marker.end)}" placeholder="###"></label>
       <div class="pc-hint">已内置「智库 · 生图标记不发送」正则：过滤发送给聊天模型的生图标记，不影响生图读取。修改标记时自动同步。</div>
-      <label class="pc-field"><span>标记生图额外负面词</span><input data-optstr="chatNegative" value="${esc(d.options.chatNegative || '')}"></label>`);
+      <label class="pc-field"><span>标记生图额外负面词</span><input data-optstr="chatNegative" value="${esc(d.options.chatNegative || '')}"></label>
+      <div class="pc-row-between pc-mt-s"><b>正文自动插图</b><span class="pc-dim small">不用另挂生图世界书</span></div>
+      <div class="pc-seg three">${[['off', '关'], ['inline', '跟正文一起写'], ['after', '写完再请求']].map(([v, t]) => `<button class="${(d.options.illustMode || 'off') === v ? 'on' : ''}" data-act="illmode" data-mode="${v}">${t}</button>`).join('')}</div>
+      <div class="pc-hint">${d.options.illustMode === 'inline' ? '每次发消息时告诉聊天 AI：在有画面感的地方顺手写一行生图标记。不多花请求，但要模型听话；破限或预设管得很死的话可能不写。' : d.options.illustMode === 'after' ? '回复写完后，用「AI」设置里选的 API 另外请求一次，挑画面写标签，插回正文。多一次请求，但不改聊天 AI 的输出，跟智绘姬的「自动 LLM 请求生图」一样。' : '打开后不用自己写标记，回复里会自动出现生图标记，再按上面的开关自动出图。'}</div>
+      ${d.options.illustMode && d.options.illustMode !== 'off' ? `<label class="pc-field"><span>每条回复最多几张</span><select data-illmax>${[1, 2, 3].map(n => `<option value="${n}" ${(Number(d.options.illustMax) || 1) === n ? 'selected' : ''}>${n}</option>`).join('')}</select></label>` : ''}`);
 
     const entry = setFold('entry', '入口', ['魔棒', d.options.showStub ? '小票根' : '', d.options.showChip ? '输入框上方' : ''].filter(Boolean).join(' · '), `
       ${sw('showStub', '界面上显示小票根', '点一下切换画师串，长按打开画师库，可以上下拖动')}
@@ -4441,6 +4490,7 @@ async function onClick(ev, outside = false) {
                 break;
             }
             case 'naimode': { const n = N.settings(); n.naiMode = el.dataset.mode; N.save(); ui.naiTest = null; render(); break; }
+            case 'illmode': { getData().options.illustMode = el.dataset.mode; commit(); render(); break; }
             case 'togglekey': ui.showKey = !ui.showKey; render(); break;
             case 'naitest': {
                 el.disabled = true; el.textContent = '测试中…';
@@ -5006,6 +5056,7 @@ async function onChangeEv(ev) {
     if (el.dataset.bindCheck) { setPath(ui, el.dataset.bindCheck, el.checked); if (ui.view === 'batch') render(); return; }
     if (el.dataset.bind === 'batch.text') { render(); return; }
     if (el.dataset.opt) { d.options[el.dataset.opt] = el.checked; commit(); return; }
+    if (el.hasAttribute('data-illmax')) { d.options.illustMax = Number(el.value) || 1; commit(); return; }
     if (el.dataset.optstr) { d.options[el.dataset.optstr] = el.value.trim(); if (['imageStartTag','imageEndTag'].includes(el.dataset.optstr)) __mod_marker.syncRegex(); commit({ silent: true }); return; }
     if (el.dataset.api) {
         const p = T.apiProfiles().find(x => x.id === T.activeApiId());
@@ -5858,9 +5909,81 @@ async function start() {
     const onRendered = id => { setTimeout(addMesButtons, 50); };
     const onUserRendered = id => { onRendered(id); };
     const onEdited = id => { onRendered(id); };
+    // 正文自动插图
+    const ILLUST_KEY = 'zhiku_illust';
+    const illustMax = () => Math.min(3, Math.max(1, Number(getData().options.illustMax) || 1));
+    const syncIllust = type => {
+        const c = SillyTavern.getContext(), m = __mod_marker.settings();
+        if (typeof c.setExtensionPrompt !== 'function') return;
+        // 别的插件在后台悄悄生成（总结之类）时不加
+        const on = type !== 'quiet' && getData().options.illustMode === 'inline' && m.start && m.end;
+        const max = illustMax();
+        // 放在聊天里、最后一条消息后面（IN_CHAT, depth 0），以系统身份
+        c.setExtensionPrompt(ILLUST_KEY, on ? `[插图] 这次回复的正文里，挑${max === 1 ? '一处' : `最多 ${max} 处`}最有画面感的瞬间，在那段话后面另起一行，写：${m.start}英文 Danbooru 标签${m.end}
+标签只写这一刻的画面：人数（1girl / 1boy / 2girls…）、出场角色的外貌（发型发色、眼睛、身材）和此刻的衣服、动作、表情、姿势、视线、场景、光线、构图，用英文逗号隔开。不写画师、不写画质词、不写中文，不解释这一行。其余正文照常写。` : '', 1, 0, false, 0);
+    };
+    syncIllust();
+    cleanups.push(onChange(syncIllust));
+    // 改了标记写法（不通知）也跟上：每次开始生成前再同步一次
+    if (event_types.GENERATION_STARTED) { eventSource.on(event_types.GENERATION_STARTED, syncIllust); cleanups.push(() => eventSource.removeListener?.(event_types.GENERATION_STARTED, syncIllust)); }
+    cleanups.push(() => { try { SillyTavern.getContext().setExtensionPrompt?.(ILLUST_KEY, '', 1, 0, false, 0); } catch {} });
+    const illustSeen = new Set();
+    /** 插在 sentence 那一行的行尾；找不到就返回 -1 */
+    const illustAt = (text, sentence) => {
+        const s = String(sentence || '').trim();
+        if (!s) return -1;
+        const tries = [s, s.replace(/[。！？!?…，,、；;："“”「」『』\s]+$/g, ''), s.slice(-12), s.slice(0, 12)].filter(x => x && x.length >= 4);
+        for (const t of tries) {
+            const i = text.indexOf(t);
+            if (i < 0) continue;
+            const nl = text.indexOf('\n', i + t.length);
+            return nl < 0 ? text.length : nl;
+        }
+        return -1;
+    };
+    const illustAfter = async id => {
+        const d = getData(), m = __mod_marker.settings();
+        if (d.options.illustMode !== 'after' || !m.start || !m.end) return;
+        const c = SillyTavern.getContext(), msg = c.chat?.[id];
+        if (!msg || msg.is_user || msg.is_system || id !== c.chat.length - 1) return;
+        const source = String(msg.mes || '');
+        if (!source.trim() || parseImageMarkers(source, m.start, m.end).length) return;
+        const seen = `${c.getCurrentChatId?.()}|${id}|${msg.swipe_id}|${source.length}|${source.slice(0, 40)}`;
+        if (illustSeen.has(seen)) return;
+        illustSeen.add(seen);
+        const chatAt = c.getCurrentChatId?.(), max = illustMax();
+        const cast = C.currentCast().filter(x => x.on).map(x => `${x.char.name}：${C.fixedTags(x.char) || '（没登记外貌，按正文写）'}`).join('\n');
+        const plain = source.replace(/<[^>]+>/g, '').replace(/\n{3,}/g, '\n\n').slice(0, 8000);
+        const sys = `你是插画分镜师，给一段小说正文配插图。挑${max === 1 ? ' 1 ' : `最多 ${max} `}个最有画面感的瞬间，每个写成 NovelAI 用的英文 Danbooru 标签。
+标签写：人数（1girl / 1boy / 2girls…）、出场角色的外貌和此刻的衣服、动作、表情、姿势、视线、场景、光线、构图。登记了外貌的角色照抄外貌标签。不写画师、不写画质词、不写中文。
+"after" 必须从正文里原样复制一小句（10 到 30 个字），图会插在这句所在那一行的后面。
+只输出 JSON：{"images": [{"after": "正文原句", "tags": "英文标签"}]}`;
+        let j;
+        try { j = __mod_translate.pickJson(await __mod_translate.askLLM(sys, `${cast ? '出场角色（名字：外貌标签）：\n' + cast + '\n\n' : ''}正文：\n${plain}`, { maxTokens: 900 + 200 * max })); }
+        catch (e) { toastr.warning('自动插图没写出来：' + e.message, '智库', { timeOut: 6000 }); return; }
+        const now = SillyTavern.getContext();
+        if (now.getCurrentChatId?.() !== chatAt || now.chat?.[id] !== msg || String(msg.mes || '') !== source) return;
+        let next = source, n = 0;
+        for (const it of (Array.isArray(j.images) ? j.images : []).slice(0, max)) {
+            const tags = String(it?.tags || '').split(/[,，\n]+/).map(x => x.trim()).filter(x => x && !__mod_translate.hasChinese(x)).join(', ');
+            if (!tags) continue;
+            const mark = `\n${m.start}${tags}${m.end}\n`;
+            const at = illustAt(next, it?.after);
+            next = at < 0 ? next.replace(/\s+$/, '') + mark : next.slice(0, at) + mark + next.slice(at);
+            n++;
+        }
+        if (!n) return;
+        const swipes = Array.isArray(msg.swipes) && Number.isInteger(msg.swipe_id) ? msg.swipes : null, oldSwipe = swipes?.[msg.swipe_id];
+        msg.mes = next; if (swipes) swipes[msg.swipe_id] = next;
+        try { await now.saveChat(); }
+        catch (e) { msg.mes = source; if (swipes) swipes[msg.swipe_id] = oldSwipe; toastr.error('自动插图存不进聊天：' + (e.message || e), '智库'); return; }
+        now.updateMessageBlock(id, msg);
+        setTimeout(() => { addMesButtons(); void __mod_marker.process(id); }, 0);
+    };
     const onCharMsg = id => {
         setTimeout(addMesButtons, 50);
         setTimeout(() => { void __mod_marker.process(Number(id)); }, 0);
+        setTimeout(() => { void illustAfter(Number(id)).catch(e => console.warn('[智库] 自动插图', e)); }, 0);
     };
     for (const [ev, fn] of [[event_types.USER_MESSAGE_RENDERED, onUserRendered], [event_types.CHARACTER_MESSAGE_RENDERED, onCharMsg], [event_types.MORE_MESSAGES_LOADED, onRendered], [event_types.MESSAGE_UPDATED, onEdited]]) {
         if (!ev) continue;

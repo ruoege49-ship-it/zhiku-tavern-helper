@@ -40,8 +40,24 @@ function scheduleStart() {
     bootTimer = setTimeout(() => { bootTimer = null; void startExtension(); }, 0);
 }
 
+// 智库写进酒馆「全局正则」的两条（生图标记不发送 / 生图标记折叠）。停用、删除智库时删掉，聊天显示就回到原样
+const OWN_REGEX_IDS = ['72c57f73-46af-46ac-a28e-bf31b131332a', '6ba93a8e-cabb-494c-a7e8-6c9dfcf5fb80'];
+function removeOwnRegex() {
+    const c = globalThis.SillyTavern?.getContext?.();
+    const rules = c?.extensionSettings?.regex;
+    if (!Array.isArray(rules)) return;
+    const left = rules.filter(r => !OWN_REGEX_IDS.includes(r?.id));
+    if (left.length === rules.length) return;
+    rules.splice(0, rules.length, ...left);
+    c.saveSettingsDebounced?.();
+    for (const el of document.querySelectorAll('.mes[mesid]')) {
+        const id = Number(el.getAttribute('mesid')), msg = c.chat?.[id];
+        if (msg) try { c.updateMessageBlock(id, msg); } catch { /* 这一楼重画失败不要紧 */ }
+    }
+}
+
 export function onEnable() { enabled = true; scheduleStart(); }
-export async function onDisable() {
+async function shutdown() {
     enabled = false;
     clearTimeout(bootTimer);
     ctx?.eventSource?.removeListener(ctx.eventTypes.APP_READY, scheduleStart);
@@ -50,6 +66,7 @@ export async function onDisable() {
     runtime = null;
     if (active) await active.stop();
 }
+export async function onDisable() { await shutdown(); removeOwnRegex(); }
 export async function onDelete() { await onDisable(); }
 
 if (ctx?.eventSource && ctx?.eventTypes?.APP_READY) {
@@ -57,4 +74,5 @@ if (ctx?.eventSource && ctx?.eventTypes?.APP_READY) {
 } else {
     globalThis.toastr?.error('当前酒馆缺少扩展启动接口，请升级 SillyTavern。', '智库');
 }
-window.addEventListener('pagehide', () => { void onDisable(); }, { once: true });
+// 关页面 / 刷新只收走自己挂上去的东西，正则留着
+window.addEventListener('pagehide', () => { void shutdown(); }, { once: true });
