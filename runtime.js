@@ -1654,7 +1654,13 @@ async function askLLM(system, user, { maxTokens = 800 } = {}) {
     let json;
     try { json = JSON.parse(raw); } catch { throw new Error('AI 返回的不是正常格式：' + raw.slice(0, 120)); }
     if (json.error) throw new Error('AI 报错：' + (json.error.message || JSON.stringify(json.error)).slice(0, 160));
-    return String(json.choices?.[0]?.message?.content ?? '');
+    const ch = json.choices?.[0] || {};
+    const content = String(ch.message?.content ?? ch.text ?? '');
+    if (content.trim()) return content;
+    // 正文是空的：思考模型（deepseek-reasoner 之类）可能把长度都花在思考上了
+    if (ch.finish_reason === 'length') throw Object.assign(new Error('AI 的长度用完了还没写出回答'), { emptyLength: true });
+    const think = String(ch.message?.reasoning_content ?? ch.message?.reasoning ?? '');
+    return think.includes('{') ? think : content;
 }
 
 async function translateToTags(text, { expand = false } = {}) {
@@ -1703,12 +1709,27 @@ ${PAIRS}
 }
 
 /** 设定很长时：先发 6 万字；模型说太长（上下文不够、请求太大、超时）就缩到 3 万、1.5 万再试。设定是按描述在前、世界书在后排的，缩的时候先丢后面的 */
+/** 去掉思考部分后还有没有内容；思考没写完（只有 <think> 没有 </think>）也算空 */
+const answerOf = raw => String(raw || '').replace(/<think>[\s\S]*?<\/think>/g, '').replace(/^\s*<think>[\s\S]*$/, '').trim();
+/** 回复是空的就给大很多的长度再试一次（思考模型要先思考，2000 不够用） */
+async function askRoomy(sys, user, opts) {
+    try {
+        const raw = await askLLM(sys, user, opts);
+        if (answerOf(raw) || String(raw || '').includes('{')) return raw;
+    } catch (e) { if (!e.emptyLength) throw e; }
+    console.warn('[智库] AI 回复是空的，加大长度再试一次');
+    try {
+        const raw = await askLLM(sys, user, { ...opts, maxTokens: Math.max(16000, (opts?.maxTokens || 800) * 4) });
+        if (answerOf(raw) || String(raw || '').includes('{')) return raw;
+    } catch (e) { if (!e.emptyLength && !/max_tokens|max tokens|max_completion/i.test(String(e?.message))) throw e; }
+    throw new Error('AI 回复是空的：加大长度再试也没写出回答，多半是思考模型一直在思考。换 deepseek-chat 这类不思考的模型再试');
+}
 async function askShrinking(sys, userFor, opts) {
     const TOO_LONG = /context|length|too long|too large|token|maximum|exceed|413|504|524|timeout|超出|过长|太长|上限/i;
     let last;
     for (const limit of [60000, 30000, 15000]) {
         let raw;
-        try { raw = await askLLM(sys, userFor(limit), opts); }
+        try { raw = await askRoomy(sys, userFor(limit), opts); }
         catch (e) {
             last = e;
             if (!TOO_LONG.test(String(e?.message || e))) throw e;
