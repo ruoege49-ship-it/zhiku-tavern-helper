@@ -2120,7 +2120,7 @@ async function askShrinking(sys, userFor, opts) {
     let last;
     for (const limit of [60000, 30000, 15000]) {
         let raw;
-        try { raw = await askLLM(sys, userFor(limit), opts); }
+        try { raw = await askRoomy(sys, userFor(limit), opts); }
         catch (e) {
             last = e;
             if (!TOO_LONG.test(String(e?.message || e))) throw e;
@@ -2133,4 +2133,38 @@ async function askShrinking(sys, userFor, opts) {
     throw new Error('设定太长，缩到 1.5 万字模型还是放不下：换个上下文更大的模型，或者关掉没用的世界书条目。' + (last?.message ? '（' + String(last.message).slice(0, 120) + '）' : ''));
 }
 /** 一张卡（连世界书）里所有人：[{ name, aliases, appearance, outfit }] */
+@@@ END
+
+═══ 28. 读人设时 AI 回复是空的（思考模型先思考把长度花完）：自动给更大的长度再试一次；思考内容里有 JSON 也认；中转站返回 text 字段也认 ═══
+@@@ OLD
+    return String(json.choices?.[0]?.message?.content ?? '');
+@@@ NEW
+    const ch = json.choices?.[0] || {};
+    const content = String(ch.message?.content ?? ch.text ?? '');
+    if (content.trim()) return content;
+    // 正文是空的：思考模型（deepseek-reasoner 之类）可能把长度都花在思考上了
+    if (ch.finish_reason === 'length') throw Object.assign(new Error('AI 的长度用完了还没写出回答'), { emptyLength: true });
+    const think = String(ch.message?.reasoning_content ?? ch.message?.reasoning ?? '');
+    return think.includes('{') ? think : content;
+@@@ END
+
+@@@ OLD
+async function askShrinking(sys, userFor, opts) {
+@@@ NEW
+/** 去掉思考部分后还有没有内容；思考没写完（只有 <think> 没有 </think>）也算空 */
+const answerOf = raw => String(raw || '').replace(/<think>[\s\S]*?<\/think>/g, '').replace(/^\s*<think>[\s\S]*$/, '').trim();
+/** 回复是空的就给大很多的长度再试一次（思考模型要先思考，2000 不够用） */
+async function askRoomy(sys, user, opts) {
+    try {
+        const raw = await askLLM(sys, user, opts);
+        if (answerOf(raw) || String(raw || '').includes('{')) return raw;
+    } catch (e) { if (!e.emptyLength) throw e; }
+    console.warn('[智库] AI 回复是空的，加大长度再试一次');
+    try {
+        const raw = await askLLM(sys, user, { ...opts, maxTokens: Math.max(16000, (opts?.maxTokens || 800) * 4) });
+        if (answerOf(raw) || String(raw || '').includes('{')) return raw;
+    } catch (e) { if (!e.emptyLength && !/max_tokens|max tokens|max_completion/i.test(String(e?.message))) throw e; }
+    throw new Error('AI 回复是空的：加大长度再试也没写出回答，多半是思考模型一直在思考。换 deepseek-chat 这类不思考的模型再试');
+}
+async function askShrinking(sys, userFor, opts) {
 @@@ END
