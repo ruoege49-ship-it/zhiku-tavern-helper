@@ -2619,7 +2619,13 @@ const pcLocal = (() => {
 /** 生成的图存哪：默认存本地浏览器；设置里可以改成存酒馆服务器（自己的服务器、想换设备也能看时用） */
 async function pcStoreImage(dataUrl, name) {
     if ((__mod_store.getData().options.imageStore || 'local') === 'server') return __mod_store.uploadImage(dataUrl, name);
-    return { url: await pcLocal.put(dataUrl) };
+    try { return { url: await pcLocal.put(dataUrl) }; }
+    catch (e) {
+        // 浏览器存不了（无痕模式、空间满了、浏览器不让用）：这张先存酒馆服务器，图不能丢
+        console.warn('[智库] 本地存图失败，改存酒馆服务器', e);
+        if (!pcStoreImage.warned) { pcStoreImage.warned = true; toastr.warning('这个浏览器存不了图（' + (e?.message || e) + '），这次先存到酒馆服务器', '智库', { timeOut: 8000 }); }
+        return __mod_store.uploadImage(dataUrl, name);
+    }
 }
 /** 删一张图：本地的从浏览器删，服务器上的调酒馆删 */
 function pcDropImage(u) {
