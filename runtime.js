@@ -2340,7 +2340,7 @@ function parseImageMarkers(text, start, end) {
 function createMarkerController({context,getData,generate,upload,notify,document:doc=globalThis.document}) {
     let queue=Promise.resolve(), stopped=false;
     const pending=new WeakMap(), failed=new WeakMap();
-    const imageBindings=new WeakSet(), overlays=new Set(), holds=new Set();
+    const imageBindings=new WeakSet(), overlays=new Set(), holds=new Set(), inflight=new Set();
     function settings() {
         const opts=getData().options;
         const old=context().extensionSettings['st-chatu8'] || {};
@@ -2376,7 +2376,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
         slots.forEach((slot,index)=>{
             slot.classList.add('pc-marker-slot');
             const token=tokens[index];if(!token)return;
-            const record=msg.extra?.zhikuImages?.[recordKey(msg,token)];
+            const record=findRecord(msg,token);
             const ready=token.raw+'|'+(record?.url||'');
             if(slot.dataset.pcReady===ready) { const b=slot.querySelector('button');if(b){b.disabled=!!state(msg,token);b.textContent=label(msg,token,record);}return; }
             slot.dataset.pcReady=ready;
@@ -2402,6 +2402,19 @@ function createMarkerController({context,getData,generate,upload,notify,document
         });
     }
     function recordKey(msg,token){return String(msg.swipe_id??0)+':'+token.index+':'+token.raw;}
+    // 已经存的结果按「swipe + 标记原文」找：标记前面的文字被别的脚本改过、位置挪了，也认得出是同一张，不会再生成一次
+    function findRecordKey(msg,token){
+        const recs=msg.extra?.zhikuImages;if(!recs)return '';
+        const exact=recordKey(msg,token);if(recs[exact])return exact;
+        const pre=String(msg.swipe_id??0)+':',suf=':'+token.raw;
+        const keys=Object.keys(recs).filter(k=>k.startsWith(pre)&&k.endsWith(suf)&&/^\d+$/.test(k.slice(pre.length,k.length-suf.length)))
+            .sort((a,b)=>parseInt(a.slice(pre.length))-parseInt(b.slice(pre.length)));
+        if(!keys.length)return '';
+        // 同一段标记出现好几次时，按第几次出现对上
+        const same=parseImageMarkers(String(msg.mes||''),settings().start,settings().end).filter(t=>t.raw===token.raw);
+        return keys[Math.max(0,same.findIndex(t=>t.index===token.index))]||keys[0];
+    }
+    function findRecord(msg,token){const k=findRecordKey(msg,token);return k?msg.extra.zhikuImages[k]:undefined;}
     function bindHold(el,action){
         let timer=null,start=null;
         const cancel=()=>{if(timer!==null){clearTimeout(timer);holds.delete(timer);timer=null;}};
@@ -2414,7 +2427,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
     async function deleteResult(id,msg,token){
         if(pending.has(msg))throw new Error('请等本楼生成结束');
         if(context().chat?.[id]!==msg)throw new Error('聊天已变化，请重新操作');
-        const records=msg.extra?.zhikuImages,key=recordKey(msg,token),old=records?.[key];
+        const records=msg.extra?.zhikuImages,key=findRecordKey(msg,token)||recordKey(msg,token),old=records?.[key];
         if(!old)return;
         records[key]={deleted:true};
         try{await context().saveChat();}catch(e){records[key]=old;throw e;}
@@ -2437,7 +2450,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
             // Keep the original marker and attach the edited prompt to the generated result.
             dismiss();await process(id,{manual:true,tokenIndex:index,promptOverride:prompt});
         };
-        const record=msg.extra?.zhikuImages?.[recordKey(msg,token)];if(record?.prompt)input.value=record.prompt;
+        const record=findRecord(msg,token);if(record?.prompt)input.value=record.prompt;
         remove.disabled=!record;
         remove.onclick=async()=>{try{await deleteResult(id,msg,token);dismiss();}catch(e){notify(e.message,'error');}};
         box.append(input,send,remove);
@@ -2501,16 +2514,19 @@ function createMarkerController({context,getData,generate,upload,notify,document
         const jobs=selected.map(token=>{
             const key=recordKey(msg,token);let map=pending.get(msg);
             if(map?.has(key))return map.get(key).job;
-            if(!manual&&(msg.extra?.zhikuImages?.[key]||failed.get(msg)?.has(key)))return Promise.resolve(0);
+            if(!manual&&(findRecord(msg,token)||failed.get(msg)?.has(key)))return Promise.resolve(0);
+            // 酒馆把这一楼换成了新对象（重新加载、别的脚本改楼层）时，上面按对象记的排队查不到：再按楼层记一份，同一张不会同时生成两次
+            const flight=chat+'|'+id+'|'+swipe+'|'+token.index+'|'+token.raw;
+            if(inflight.has(flight))return Promise.resolve(0);
             if(!map){map=new Map();pending.set(msg,map);}
-            const entry={state:'排队中…',job:null};map.set(key,entry);
+            const entry={state:'排队中…',job:null};map.set(key,entry);inflight.add(flight);
             // 别的脚本改了这一楼其他地方（状态栏、正则）不算变：只要这个标记还在原位置，结果照样存
             const current=()=>!stopped&&chatKey(context())===chat&&context().chat?.[id]===msg&&msg.swipe_id===swipe&&String(msg.mes||'').slice(token.index,token.index+token.raw.length)===token.raw;
             const job=queue.then(async()=>{
                 if(!current())return 0;
                 entry.state='生成中…';decorate(id);
                 try {
-                    const prompt=promptOverride??msg.extra?.zhikuImages?.[key]?.prompt??token.prompt;
+                    const prompt=promptOverride??findRecord(msg,token)?.prompt??token.prompt;
                     const image=await generate(prompt,{whole:source});if(!current())return 0;
                     entry.state='保存中…';decorate(id);
                     const {url}=await upload(image,'marker_'+Date.now());if(!current())return 0;
@@ -2519,7 +2535,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
                     try{await c.saveChat();}catch(e){if(old)records[key]=old;else delete records[key];if(!hadRecords&&!Object.keys(records).length)delete msg.extra.zhikuImages;if(!hadExtra&&!Object.keys(msg.extra).length)delete msg.extra;throw e;}
                     failed.get(msg)?.delete(key);return 1;
                 }catch(e){let errors=failed.get(msg);if(!errors){errors=new Set();failed.set(msg,errors);}errors.add(key);notify(e.message||String(e),'error');return 0;}
-            }).finally(()=>{map.delete(key);if(!map.size)pending.delete(msg);if(!stopped&&chatKey(context())===chat)decorate(id);});
+            }).finally(()=>{inflight.delete(flight);map.delete(key);if(!map.size)pending.delete(msg);if(!stopped&&chatKey(context())===chat)decorate(id);});
             entry.job=job;queue=job.catch(()=>{});return job;
         });
         decorate(id);return (await Promise.all(jobs)).reduce((a,b)=>a+b,0);
@@ -4475,6 +4491,7 @@ function viewSettings(d) {
     const nightMode = d.options.nightMode || 'day';
     const look = setFold('look', '外观', { day: '日间', night: '夜间', auto: '跟随酒馆' }[nightMode] || '日间', `
       <div class="pc-seg three">${[['day', '日间'], ['night', '夜间'], ['auto', '跟随酒馆']].map(([v, t]) => `<button class="${nightMode === v ? 'on' : ''}" data-act="nightmode" data-mode="${v}">${t}</button>`).join('')}</div>
+      ${nightMode !== 'day' ? `<div class="pc-dim small pc-mt-s">夜间配色</div><div class="pc-chips wrap">${[['ink', '墨夜', '#1f2226', '#d8a75c'], ['teal', '深青', '#14302d', '#7cc4b2'], ['plum', '夜樱', '#241d2b', '#e9a8c4'], ['navy', '午夜蓝', '#152036', '#8db4ff']].map(([v, t, bg, ac]) => `<button class="pc-pill ${(d.options.nightTheme || 'ink') === v ? 'on' : 'dashed'}" data-act="nighttheme" data-theme="${v}"><span style="display:inline-block;width:14px;height:14px;border-radius:50%;background:${bg};box-shadow:inset 0 0 0 4px ${ac};margin-right:6px;vertical-align:-2px"></span>${t}</button>`).join('')}</div>` : ''}
       <div class="pc-hint">「跟随酒馆」：酒馆用深色主题时自动换成夜间，每次打开智库时检查一次。</div>`);
 
     const entry = setFold('entry', '入口', ['魔棒', d.options.showStub ? '小票根' : '', d.options.showChip ? '输入框上方' : ''].filter(Boolean).join(' · '), `
@@ -4590,6 +4607,7 @@ async function onClick(ev, outside = false) {
             case 'naimode': { const n = N.settings(); n.naiMode = el.dataset.mode; N.save(); ui.naiTest = null; render(); break; }
             case 'illmode': { getData().options.illustMode = el.dataset.mode; commit(); render(); break; }
             case 'nightmode': { getData().options.nightMode = el.dataset.mode; commit(); render(); break; }
+            case 'nighttheme': { getData().options.nightTheme = el.dataset.theme; commit(); render(); break; }
             case 'togglekey': ui.showKey = !ui.showKey; render(); break;
             case 'naitest': {
                 el.disabled = true; el.textContent = '测试中…';
@@ -5991,54 +6009,73 @@ async function start() {
     setTimeout(() => __mod_marker.refresh(), 0);
     setTimeout(() => __mod_marker.refresh(), 0);
     cleanups.push(() => {__mod_marker.stop();__mod_nai.stopQueue();});
-    // 夜间模式
-    const NIGHT_VARS = '--pc-mist:#2f4642;--pc-ink:#ece2d0;--pc-ink-soft:#b3a291;--pc-paper:#2a2521;--pc-paper-2:#352f29;--pc-paper-user:#322b24;--pc-gold:#d9a05a;--pc-danger:#e0857a;--pc-dash:rgba(236,226,208,.45);--pc-shadow:0 4px 0 rgba(0,0,0,.45);';
-    /** 写死的浅色 → 深色。背景和文字分开换：深色按钮上的浅字，到了夜里按钮变浅，字就要变深 */
+    // 夜间模式：几套深色配色。样式表里用到浅色的地方，统一换成 --pcn-* 变量，每套配色只定义变量
+    const NIGHT_THEMES = {
+        ink:  { name: '墨夜', mist: '#16181b', dot: 'rgba(255,255,255,.045)', paper: '#1f2226', paper2: '#2a2e33', user: '#262a2f', sunk: '#33383e', ink: '#e9e6df', soft: '#a3a09a', gold: '#d8a75c', strong: '#d8a75c', onStrong: '#1a1714', line: 'rgba(233,230,223,.16)', danger: '#e08a7e', warn: '#f0a99f', paperRgb: '31, 34, 38', inkRgb: '233, 230, 223' },
+        teal: { name: '深青', mist: '#0e2523', dot: 'rgba(160,220,205,.06)', paper: '#14302d', paper2: '#1c3c38', user: '#183632', sunk: '#244844', ink: '#e4f0ea', soft: '#9dbab1', gold: '#e6b56c', strong: '#7cc4b2', onStrong: '#0d201e', line: 'rgba(228,240,234,.16)', danger: '#ee8f84', warn: '#f5aca3', paperRgb: '20, 48, 45', inkRgb: '228, 240, 234' },
+        plum: { name: '夜樱', mist: '#1a1520', dot: 'rgba(255,200,230,.05)', paper: '#241d2b', paper2: '#2f2637', user: '#2a2232', sunk: '#3a3044', ink: '#f1e8f2', soft: '#b5a3b8', gold: '#e9a8c4', strong: '#e9a8c4', onStrong: '#241621', line: 'rgba(241,232,242,.15)', danger: '#f08e8e', warn: '#f7b0b0', paperRgb: '36, 29, 43', inkRgb: '241, 232, 242' },
+        navy: { name: '午夜蓝', mist: '#0d1524', dot: 'rgba(170,200,255,.05)', paper: '#152036', paper2: '#1d2a44', user: '#19253d', sunk: '#26344f', ink: '#e3e9f4', soft: '#9aa8c0', gold: '#f0b860', strong: '#8db4ff', onStrong: '#0c1426', line: 'rgba(227,233,244,.15)', danger: '#f0908a', warn: '#f6b0aa', paperRgb: '21, 32, 54', inkRgb: '227, 233, 244' },
+    };
+    const themeVars = t => `--pc-mist:${t.mist};--pc-ink:${t.ink};--pc-ink-soft:${t.soft};--pc-paper:${t.paper};--pc-paper-2:${t.paper2};--pc-paper-user:${t.user};--pc-gold:${t.gold};--pc-wax:${t.gold};--pc-danger:${t.danger};--pc-dash:${t.line};--pc-shadow:0 4px 14px rgba(0,0,0,.35);--pcn-dot:${t.dot};--pcn-sunk:${t.sunk};--pcn-strong:${t.strong};--pcn-on-strong:${t.onStrong};--pcn-line:${t.line};--pcn-warn:${t.warn};--pcn-paper-rgb:${t.paperRgb};--pcn-ink-rgb:${t.inkRgb};`;
+    /** 浅色主题里的写法 → 夜间变量。浏览器读回来是 rgb() 写法，十六进制和 rgb() 都认 */
     const nightColor = (value, prop) => {
-        const bg = /background|shadow|outline/.test(prop);
-        // 浏览器读回来的颜色是 rgb() 写法，十六进制和 rgb() 都认
-        return value
-            .replace(/#7ea29c|rgb\(126, 162, 156\)/gi, '#2f4642')
-            .replace(/#cdbfa8|rgb\(205, 191, 168\)/gi, '#4a4038')
-            .replace(/#fbf8f0|rgb\(251, 248, 240\)/gi, bg ? '#302a25' : '#1f1b17')
-            .replace(/#7a3a32|rgb\(122, 58, 50\)/gi, '#e0958a')
-            .replace(/rgba\(\s*24[34],\s*23[89],\s*22[68],/g, 'rgba(38, 34, 30,')
-            .replace(/rgba\(\s*58,\s*42,\s*34,/g, 'rgba(236, 226, 208,')
-            .replace(/rgba\(\s*255,\s*255,\s*255,\s*0?\.85\)/g, 'rgba(42, 37, 33, .85)');
+        const bg = /background|shadow|outline/.test(prop), border = /^border/.test(prop);
+        let v = value
+            .replace(/rgba\(28, 34, 38, 0?\.22\)/g, 'var(--pcn-dot)')
+            .replace(/#7ea29c|rgb\(126, 162, 156\)/gi, 'var(--pc-mist)')
+            .replace(/#cdbfa8|rgb\(205, 191, 168\)/gi, 'var(--pcn-sunk)')
+            .replace(/#fbf8f0|rgb\(251, 248, 240\)/gi, bg ? 'var(--pc-paper)' : 'var(--pcn-on-strong)')
+            .replace(/#7a3a32|rgb\(122, 58, 50\)/gi, 'var(--pcn-warn)')
+            .replace(/rgba\(\s*24[34],\s*23[89],\s*22[68],/g, 'rgba(var(--pcn-paper-rgb),')
+            .replace(/rgba\(\s*58,\s*42,\s*34,/g, 'rgba(var(--pcn-ink-rgb),')
+            .replace(/rgba\(\s*255,\s*255,\s*255,\s*0?\.85\)/g, 'rgba(var(--pcn-paper-rgb), .85)');
+        // 深色按钮（墨色底）夜里换成主题色，墨色描边换成柔和的线
+        if (/background/.test(prop)) v = v.replace(/var\(--pc-ink\)/g, 'var(--pcn-strong)');
+        if (border) v = v.replace(/var\(--pc-ink\)/g, 'var(--pcn-line)');
+        if (prop === 'color') v = v.replace(/^var\(--pc-paper\)$/, 'var(--pcn-on-strong)');
+        return v;
     };
     const nightStyle = DOC.createElement('style');
     nightStyle.id = 'pc-night-style';
     const buildNight = () => {
         // :where() 不加优先级：夜间覆盖只顶替原来那条规则，不会盖过更具体的规则
-        const out = [`html.pc-night{${NIGHT_VARS}}`, ':where(html.pc-night) .pc-overlay, :where(html.pc-night) .pc-sheet, :where(html.pc-night) .pc-modal{color-scheme:dark;}'];
+        const out = Object.entries(NIGHT_THEMES).map(([k, t]) => `html.pc-night.pc-nt-${k}{${themeVars(t)}}`);
+        out.push(':where(html.pc-night) .pc-overlay, :where(html.pc-night) .pc-sheet, :where(html.pc-night) .pc-modal{color-scheme:dark;}');
         const sheet = DOC.getElementById('pc-css')?.sheet;
         const walk = rules => {
             for (const r of rules || []) {
                 if (r.cssRules && !r.selectorText) { // @media 之类
-                    const inner = [];
                     const keep = out.length;
                     walk(r.cssRules);
-                    inner.push(...out.splice(keep));
+                    const inner = out.splice(keep);
                     if (inner.length && r.conditionText) out.push(`@media ${r.conditionText}{${inner.join('')}}`);
                     continue;
                 }
                 if (!r.selectorText || /^:root$/.test(r.selectorText.trim())) continue;
                 const decl = [];
-                for (let i = 0; i < r.style.length; i++) {
-                    const prop = r.style[i], val = r.style.getPropertyValue(prop), night = nightColor(val, prop);
+                // 简写里用了 var() 时，浏览器读不出拆开的各项，只能按简写读
+                const props = new Set(['background', 'border', 'border-top', 'border-right', 'border-bottom', 'border-left', 'border-color', 'outline']);
+                for (let i = 0; i < r.style.length; i++) props.add(r.style[i]);
+                for (const prop of props) {
+                    const val = r.style.getPropertyValue(prop);
+                    if (!val) continue;
+                    const night = nightColor(val, prop);
                     if (night !== val) decl.push(`${prop}:${night}${r.style.getPropertyPriority(prop) ? ' !important' : ''}`);
                 }
                 if (decl.length) out.push(`${r.selectorText.split(',').map(x => ':where(html.pc-night) ' + x.trim().replace(/^html(?=[.#:\[\s]|$)/, '')).join(', ')}{${decl.join(';')}}`);
             }
         };
         try { walk(sheet?.cssRules); } catch (e) { console.warn('[智库] 夜间样式', e); }
-        // 写在青绿底上的浅色字（页面标题）夜里底变深，字换成浅色
+        // 写在底色上的页面标题、卡片的阴影
         out.push(':where(html.pc-night) .pc-pagetitle{color:var(--pc-ink)}');
+        // 开关：打开时轨道是主题色，圆点换成深色，不然和轨道一个颜色看不见
+        out.push(':where(html.pc-night) .pc-switch input:checked + span::after{background:var(--pcn-on-strong)}');
+        out.push(':where(html.pc-night) .pc-overlay .pc-card, :where(html.pc-night) .pc-overlay .pc-fold, :where(html.pc-night) .pc-head-card{border-color:var(--pcn-line)}');
         nightStyle.textContent = out.join('\n');
     };
     buildNight();
     DOC.head.appendChild(nightStyle);
-    cleanups.push(() => { nightStyle.remove(); DOC.documentElement.classList.remove('pc-night'); });
+    cleanups.push(() => { nightStyle.remove(); DOC.documentElement.classList.remove('pc-night', ...Object.keys(NIGHT_THEMES).map(k => 'pc-nt-' + k)); });
     /** 酒馆现在是不是深色：看酒馆正文文字是不是浅色 */
     const tavernDark = () => {
         const m = String(P.getComputedStyle(DOC.body).getPropertyValue('--SmartThemeBodyColor') || P.getComputedStyle(DOC.body).color).match(/\d+(\.\d+)?/g);
@@ -6047,8 +6084,11 @@ async function start() {
         return 0.2126 * r + 0.7152 * g + 0.0722 * b > 140;
     };
     const applyNight = () => {
-        const mode = getData().options.nightMode || 'day';
-        DOC.documentElement.classList.toggle('pc-night', mode === 'night' || (mode === 'auto' && tavernDark()));
+        const o = getData().options, mode = o.nightMode || 'day';
+        const theme = NIGHT_THEMES[o.nightTheme] ? o.nightTheme : 'ink';
+        const html = DOC.documentElement;
+        html.classList.toggle('pc-night', mode === 'night' || (mode === 'auto' && tavernDark()));
+        for (const k of Object.keys(NIGHT_THEMES)) html.classList.toggle('pc-nt-' + k, k === theme);
     };
     applyNight();
     cleanups.push(onChange(applyNight));

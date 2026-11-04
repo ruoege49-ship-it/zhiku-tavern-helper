@@ -33,6 +33,13 @@ assert.equal(count,before+1);assert(Object.keys(msg.extra.zhikuImages).some(k=>k
 msg.mes='image###moved###';block=new Promise(r=>go=r);const recs=Object.keys(msg.extra.zhikuImages).length;
 const job2=controller.process(0);await Promise.resolve();msg.mes='new intro '+msg.mes;go();await job2;block=null;
 assert.equal(Object.keys(msg.extra.zhikuImages).length,recs,'moved marker must not be saved');}
+// 生成完以后，别的脚本在标记前面加了字（位置变了）：认得出已经生成过，不再请求
+{const before=count;msg.mes='image###once###';await controller.process(0);assert.equal(count,before+1);
+msg.mes='<status>开头加了状态栏</status>\n'+msg.mes;await controller.process(0);assert.equal(count,before+1,'shifted marker must not regenerate');
+// 酒馆在生成途中把这一楼换成了新对象：同一张不会同时请求两次
+msg.mes='image###twin###';let go;block=new Promise(r=>go=r);const first=controller.process(0);await Promise.resolve();
+const clone={...msg,extra:{...msg.extra}};c.chat[0]=clone;const second=controller.process(0);go();await Promise.all([first,second]);block=null;
+assert.equal(count,before+2,'replaced message object must not start a second request');c.chat[0]=msg;}
 data.options.imageStartTag='[draw:';data.options.imageEndTag=']';controller.syncRegex();rule=c.extensionSettings.regex.find(r=>r.id===MARKER_REGEX_ID);
 assert.equal('text [draw:sunset] tail'.replace(regex(),''),'text  tail');
 data.options.markerAuto=false;msg.mes='[draw:off]';const before=count;await controller.process(0);assert.equal(count,before);
@@ -42,4 +49,4 @@ const oldRecords=JSON.stringify(msg.extra.zhikuImages);await controller.process(
 assert.equal(JSON.stringify(msg.extra.zhikuImages),oldRecords);assert.equal(msg.mes,'[draw:save-failure]');c.saveChat=priorSave;
 const countBeforeStop=count;
 controller.stop();msg.mes='[draw:stopped]';await controller.process(0,{manual:true});assert.equal(count,countBeforeStop);
-console.log('PASS: exact/custom/multiline markers, prompt-only filter, deduplication, serial queue, separate image records, preserved message/swipe text, edits after the marker keep results, failure retry, chat switch protection, auto toggle and stop.');
+console.log('PASS: exact/custom/multiline markers, prompt-only filter, deduplication, serial queue, separate image records, preserved message/swipe text, edits after the marker keep results, no regeneration after shifts or object swaps, failure retry, chat switch protection, auto toggle and stop.');
