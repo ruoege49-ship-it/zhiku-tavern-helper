@@ -18,7 +18,7 @@ export function parseImageMarkers(text, start, end) {
 export function createMarkerController({context,getData,generate,upload,notify,document:doc=globalThis.document}) {
     let queue=Promise.resolve(), stopped=false;
     const pending=new WeakMap(), failed=new WeakMap();
-    const imageBindings=new WeakSet(), overlays=new Set(), holds=new Set();
+    const imageBindings=new WeakSet(), overlays=new Set(), holds=new Set(), inflight=new Set();
     function settings() {
         const opts=getData().options;
         const old=context().extensionSettings['st-chatu8'] || {};
@@ -54,7 +54,7 @@ export function createMarkerController({context,getData,generate,upload,notify,d
         slots.forEach((slot,index)=>{
             slot.classList.add('pc-marker-slot');
             const token=tokens[index];if(!token)return;
-            const record=msg.extra?.zhikuImages?.[recordKey(msg,token)];
+            const record=findRecord(msg,token);
             const ready=token.raw+'|'+(record?.url||'');
             if(slot.dataset.pcReady===ready) { const b=slot.querySelector('button');if(b){b.disabled=!!state(msg,token);b.textContent=label(msg,token,record);}return; }
             slot.dataset.pcReady=ready;
@@ -80,6 +80,19 @@ export function createMarkerController({context,getData,generate,upload,notify,d
         });
     }
     function recordKey(msg,token){return String(msg.swipe_id??0)+':'+token.index+':'+token.raw;}
+    // 已经存的结果按「swipe + 标记原文」找：标记前面的文字被别的脚本改过、位置挪了，也认得出是同一张，不会再生成一次
+    function findRecordKey(msg,token){
+        const recs=msg.extra?.zhikuImages;if(!recs)return '';
+        const exact=recordKey(msg,token);if(recs[exact])return exact;
+        const pre=String(msg.swipe_id??0)+':',suf=':'+token.raw;
+        const keys=Object.keys(recs).filter(k=>k.startsWith(pre)&&k.endsWith(suf)&&/^\d+$/.test(k.slice(pre.length,k.length-suf.length)))
+            .sort((a,b)=>parseInt(a.slice(pre.length))-parseInt(b.slice(pre.length)));
+        if(!keys.length)return '';
+        // 同一段标记出现好几次时，按第几次出现对上
+        const same=parseImageMarkers(String(msg.mes||''),settings().start,settings().end).filter(t=>t.raw===token.raw);
+        return keys[Math.max(0,same.findIndex(t=>t.index===token.index))]||keys[0];
+    }
+    function findRecord(msg,token){const k=findRecordKey(msg,token);return k?msg.extra.zhikuImages[k]:undefined;}
     function bindHold(el,action){
         let timer=null,start=null;
         const cancel=()=>{if(timer!==null){clearTimeout(timer);holds.delete(timer);timer=null;}};
@@ -92,7 +105,7 @@ export function createMarkerController({context,getData,generate,upload,notify,d
     async function deleteResult(id,msg,token){
         if(pending.has(msg))throw new Error('请等本楼生成结束');
         if(context().chat?.[id]!==msg)throw new Error('聊天已变化，请重新操作');
-        const records=msg.extra?.zhikuImages,key=recordKey(msg,token),old=records?.[key];
+        const records=msg.extra?.zhikuImages,key=findRecordKey(msg,token)||recordKey(msg,token),old=records?.[key];
         if(!old)return;
         records[key]={deleted:true};
         try{await context().saveChat();}catch(e){records[key]=old;throw e;}
@@ -115,7 +128,7 @@ export function createMarkerController({context,getData,generate,upload,notify,d
             // Keep the original marker and attach the edited prompt to the generated result.
             dismiss();await process(id,{manual:true,tokenIndex:index,promptOverride:prompt});
         };
-        const record=msg.extra?.zhikuImages?.[recordKey(msg,token)];if(record?.prompt)input.value=record.prompt;
+        const record=findRecord(msg,token);if(record?.prompt)input.value=record.prompt;
         remove.disabled=!record;
         remove.onclick=async()=>{try{await deleteResult(id,msg,token);dismiss();}catch(e){notify(e.message,'error');}};
         box.append(input,send,remove);
@@ -179,16 +192,19 @@ export function createMarkerController({context,getData,generate,upload,notify,d
         const jobs=selected.map(token=>{
             const key=recordKey(msg,token);let map=pending.get(msg);
             if(map?.has(key))return map.get(key).job;
-            if(!manual&&(msg.extra?.zhikuImages?.[key]||failed.get(msg)?.has(key)))return Promise.resolve(0);
+            if(!manual&&(findRecord(msg,token)||failed.get(msg)?.has(key)))return Promise.resolve(0);
+            // 酒馆把这一楼换成了新对象（重新加载、别的脚本改楼层）时，上面按对象记的排队查不到：再按楼层记一份，同一张不会同时生成两次
+            const flight=chat+'|'+id+'|'+swipe+'|'+token.index+'|'+token.raw;
+            if(inflight.has(flight))return Promise.resolve(0);
             if(!map){map=new Map();pending.set(msg,map);}
-            const entry={state:'排队中…',job:null};map.set(key,entry);
+            const entry={state:'排队中…',job:null};map.set(key,entry);inflight.add(flight);
             // 别的脚本改了这一楼其他地方（状态栏、正则）不算变：只要这个标记还在原位置，结果照样存
             const current=()=>!stopped&&chatKey(context())===chat&&context().chat?.[id]===msg&&msg.swipe_id===swipe&&String(msg.mes||'').slice(token.index,token.index+token.raw.length)===token.raw;
             const job=queue.then(async()=>{
                 if(!current())return 0;
                 entry.state='生成中…';decorate(id);
                 try {
-                    const prompt=promptOverride??msg.extra?.zhikuImages?.[key]?.prompt??token.prompt;
+                    const prompt=promptOverride??findRecord(msg,token)?.prompt??token.prompt;
                     const image=await generate(prompt,{whole:source});if(!current())return 0;
                     entry.state='保存中…';decorate(id);
                     const {url}=await upload(image,'marker_'+Date.now());if(!current())return 0;
@@ -197,7 +213,7 @@ export function createMarkerController({context,getData,generate,upload,notify,d
                     try{await c.saveChat();}catch(e){if(old)records[key]=old;else delete records[key];if(!hadRecords&&!Object.keys(records).length)delete msg.extra.zhikuImages;if(!hadExtra&&!Object.keys(msg.extra).length)delete msg.extra;throw e;}
                     failed.get(msg)?.delete(key);return 1;
                 }catch(e){let errors=failed.get(msg);if(!errors){errors=new Set();failed.set(msg,errors);}errors.add(key);notify(e.message||String(e),'error');return 0;}
-            }).finally(()=>{map.delete(key);if(!map.size)pending.delete(msg);if(!stopped&&chatKey(context())===chat)decorate(id);});
+            }).finally(()=>{inflight.delete(flight);map.delete(key);if(!map.size)pending.delete(msg);if(!stopped&&chatKey(context())===chat)decorate(id);});
             entry.job=job;queue=job.catch(()=>{});return job;
         });
         decorate(id);return (await Promise.all(jobs)).reduce((a,b)=>a+b,0);
