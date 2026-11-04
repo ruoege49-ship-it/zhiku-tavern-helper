@@ -2543,6 +2543,13 @@ function createMarkerController({context,getData,generate,upload,notify,document
     return {settings,syncRegex,process,decorate,decorateAll,refresh,stop(){stopped=true;for(const timer of holds)clearTimeout(timer);holds.clear();for(const el of overlays)el.remove();overlays.clear();if(doc)doc.querySelectorAll('.pc-image-actions').forEach(el=>el.remove());},idle(){return queue;}};
 }
 
+/** 记一张生成过的图（只记地址，图本身已经存在酒馆的 user/images 里） */
+function pcAddHistory(url, prompt, from) {
+    if (!url) return;
+    const d = __mod_store.getData();
+    d.history = [{ url: String(url), prompt: String(prompt || '').slice(0, 600), from, at: Date.now() }, ...(Array.isArray(d.history) ? d.history : []).filter(h => h.url !== url)].slice(0, 40);
+    __mod_store.commit();
+}
 const __mod_marker=createMarkerController({
         context:()=>SillyTavern.getContext(),getData:__mod_store.getData,document:DOC,
         generate:async (prompt,where)=>{const d=__mod_store.getData();
@@ -2551,7 +2558,7 @@ const __mod_marker=createMarkerController({
             const {positive,negative,chars}=hit||__mod_engine.composeStudio({pos:__mod_model.mergeTags(d.active?__mod_model.ticketString(d,d.active):'',prompt),neg:[d.active?__mod_model.ticketNeg(d,d.active):'',d.options.chatNegative||''].filter(Boolean).join(', ')});
             const bound=[...new Set((hit?.cast||[]).map(ch=>ch.charRef).filter(id=>id&&d.charRefGroups?.[id]))];
             const image=await __mod_engine.generateFull({positive,negative,...(chars?.length?{chars}:{}),director:bound.length?await __mod_engine.charRefs(bound):undefined});__mod_engine.afterChatImage();return image;},
-        upload:__mod_store.uploadImage,notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
+        upload:async(image,name)=>{const r=await __mod_store.uploadImage(image,name);try{pcAddHistory(r?.url,'','chat');}catch{}return r;},notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
     });
 const __mod_ui = (() => {
 /**
@@ -2867,6 +2874,15 @@ function viewStudio(d) {
         <div class="pc-label">正面</div><p class="pc-quote small mono">${esc(st.sent.prompt)}</p>
         <div class="pc-label">负面</div><p class="pc-quote small mono">${esc(st.sent.negative)}</p></details>` : ''}
     </section>` : ''}
+
+    ${(() => {
+        const hist = Array.isArray(d.history) ? d.history : [];
+        if (!hist.length) return '';
+        return fold('history', '历史生图', `最近 ${hist.length} 张`, `
+      <div class="pc-hist">${hist.map(h => `<button class="pc-hist-item" data-act="viewimg" data-src="${esc(h.url)}" title="${esc((h.from === 'chat' ? '聊天标记 · ' : '生图页 · ') + new Date(h.at).toLocaleString() + (h.prompt ? '\n' + h.prompt : ''))}"><img src="${esc(h.url)}" alt="" loading="lazy"><i>${h.from === 'chat' ? '聊天' : '生图'}</i></button>`).join('')}</div>
+      <div class="pc-row-between pc-mt-s"><span class="pc-dim small">点图放大；图存在酒馆的 user/images 里</span><button class="pc-pill dashed tiny" data-act="clearhistory">清空记录</button></div>
+      <style>.pc-hist{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.pc-hist-item{position:relative;padding:0;border:0;border-radius:10px;overflow:hidden;aspect-ratio:2/3;background:var(--pc-paper-2);cursor:pointer}.pc-hist-item img{width:100%;height:100%;object-fit:cover;display:block}.pc-hist-item i{position:absolute;left:4px;bottom:4px;font-style:normal;font-size:10px;padding:0 5px;border-radius:6px;background:rgba(0,0,0,.55);color:#fff}@media (max-width:420px){.pc-hist{grid-template-columns:repeat(3,minmax(0,1fr))}}</style>`);
+    })()}
 
     ${fold('scene', '固定提示词', st.sceneOn === false ? '不发送' : !String(st.scene || '').trim() ? '跟着发送 · 还没写' : !sceneReady() ? '跟着发送 · 生成时转成标签' : `跟着发送 · ${M.tokenize(sceneTags()).length} 个词`, `
       <label class="pc-switch"><input type="checkbox" data-scene-on ${st.sceneOn !== false ? 'checked' : ''}><span></span>每次生成都带上<small>接在正面提示词后面、质量词前面一起发。不改你的正面提示词，也不进画师串。</small></label>
@@ -4617,6 +4633,7 @@ async function onClick(ev, outside = false) {
                 break;
             }
             case 'clearresult': ui.studio.result = null; ui.studio.sent = null; render(); break;
+            case 'clearhistory': { if (!(await confirmBox('清空历史生图的记录？图片文件不会删。', { ok: '清空', cancel: '算了' }))) break; getData().history = []; commit(); render(); break; }
             case 'strtoggle': ui.strOpen[el.dataset.key] = !ui.strOpen[el.dataset.key]; render(); break;
             case 'addprefix': {
                 const names = el.dataset.name ? [el.dataset.name] : guessBareArtists(d, ui.studio.pos);
@@ -5229,6 +5246,9 @@ async function doGenerate() {
     try {
         st.result = await E.generate(studioParts());
         st.sent = E.runtime.lastSent;
+        // 存进酒馆，记到历史生图里；关掉智库、刷新页面后也能找回来
+        const sentPrompt = st.sent?.prompt || st.pos;
+        uploadImage(st.result, 'studio_' + Date.now()).then(r => pcAddHistory(r?.url, sentPrompt, 'studio')).catch(e => console.warn('[智库] 历史生图没存上', e));
     } catch (e) {
         toastr.error(e.message, '生成失败', { timeOut: 8000 });
     } finally {
