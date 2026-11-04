@@ -925,7 +925,14 @@ function createNaiGate({sleep=ms=>new Promise(r=>setTimeout(r,ms)),now=()=>Date.
 }
 
 const __naiGate=createNaiGate({notice:message=>toastr.info(message,'智库 · 生图排队')});
-function generate(opts){return __naiGate.run(()=>generateRequest(opts));}
+/** 浏览器层面的网络错误（Failed to fetch 之类）换成能看懂的说明 */
+function netError(e) {
+    if (!(e instanceof TypeError) || !/fetch|network|load failed/i.test(String(e.message))) return e;
+    const mode = settings().naiMode;
+    const where = mode === 'site' ? '第三方站点（站点可能挂了，或者地址填错了）' : mode === 'tavern' ? '酒馆后端（酒馆可能断开了，刷新页面试试）' : 'NovelAI（image.novelai.net）';
+    return Object.assign(new Error(`连不上${where}，请求没发出去（${e.message}）。检查网络和 VPN，换个节点或稍后再试`), { status: 0 });
+}
+function generate(opts){return __naiGate.run(()=>generateRequest(opts)).catch(e=>{throw netError(e);});}
 async function generateRequest(opts) {
     const s = settings();
     const model = s.novelaimode;
@@ -1166,7 +1173,7 @@ function inpaintModel(model = settings().novelaimode) {
 }
 
 /** image、mask 都是不带前缀的 PNG base64（mask：白色 = 重画） */
-function inpaint(opts){return __naiGate.run(()=>inpaintRequest(opts));}
+function inpaint(opts){return __naiGate.run(()=>inpaintRequest(opts)).catch(e=>{throw netError(e);});}
 async function inpaintRequest({ image, mask, prompt, negative, width, height, strength = 0.7 }) {
     const s = settings();
     if (s.naiMode === 'tavern') throw new Error('「用酒馆里的 key」不能局部重绘，到设置里改成「填我的 key」');
@@ -2588,7 +2595,13 @@ const pcLocal = (() => {
         isLocal,
         async put(dataUrl) {
             const id = 'idb:' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-            const blob = await (await fetch(dataUrl)).blob();
+            // data: 地址自己拆成二进制，不用 fetch（有的手机浏览器不让 fetch data: 地址）
+            const m = /^data:([^;,]+)(;base64)?,(.*)$/s.exec(String(dataUrl));
+            if (!m) throw new Error('图片格式不对');
+            const bin = m[2] ? atob(m[3]) : decodeURIComponent(m[3]);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            const blob = new Blob([bytes], { type: m[1] });
             await run('readwrite', st => st.put(blob, id));
             return id;
         },
