@@ -1668,3 +1668,60 @@ ${chat}${nai}${ai}${tpl}${look}${entry}
 @@@ NEW
 .pc-field.span4 { grid-column: 1 / -1; } @media (max-width: 420px) { .pc-grid4 > .pc-field.span2 { grid-column: span 1; } }
 @@@ END
+
+═══ 22. 历史生图：生图页和聊天标记生成的图都记下来（最近 40 张，图存在酒馆里），生图页最下面可以翻看、清空记录 ═══
+@@@ OLD
+const __mod_marker=createMarkerController({
+@@@ NEW
+/** 记一张生成过的图（只记地址，图本身已经存在酒馆的 user/images 里） */
+function pcAddHistory(url, prompt, from) {
+    if (!url) return;
+    const d = __mod_store.getData();
+    d.history = [{ url: String(url), prompt: String(prompt || '').slice(0, 600), from, at: Date.now() }, ...(Array.isArray(d.history) ? d.history : []).filter(h => h.url !== url)].slice(0, 40);
+    __mod_store.commit();
+}
+const __mod_marker=createMarkerController({
+@@@ END
+
+@@@ OLD
+        upload:__mod_store.uploadImage,notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
+@@@ NEW
+        upload:async(image,name)=>{const r=await __mod_store.uploadImage(image,name);try{pcAddHistory(r?.url,'','chat');}catch{}return r;},notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
+@@@ END
+
+@@@ OLD
+        st.result = await E.generate(studioParts());
+        st.sent = E.runtime.lastSent;
+@@@ NEW
+        st.result = await E.generate(studioParts());
+        st.sent = E.runtime.lastSent;
+        // 存进酒馆，记到历史生图里；关掉智库、刷新页面后也能找回来
+        const sentPrompt = st.sent?.prompt || st.pos;
+        uploadImage(st.result, 'studio_' + Date.now()).then(r => pcAddHistory(r?.url, sentPrompt, 'studio')).catch(e => console.warn('[智库] 历史生图没存上', e));
+@@@ END
+
+@@@ OLD
+    </section>` : ''}
+
+    ${fold('scene', '固定提示词',
+@@@ NEW
+    </section>` : ''}
+
+    ${(() => {
+        const hist = Array.isArray(d.history) ? d.history : [];
+        if (!hist.length) return '';
+        return fold('history', '历史生图', `最近 ${hist.length} 张`, `
+      <div class="pc-hist">${hist.map(h => `<button class="pc-hist-item" data-act="viewimg" data-src="${esc(h.url)}" title="${esc((h.from === 'chat' ? '聊天标记 · ' : '生图页 · ') + new Date(h.at).toLocaleString() + (h.prompt ? '\n' + h.prompt : ''))}"><img src="${esc(h.url)}" alt="" loading="lazy"><i>${h.from === 'chat' ? '聊天' : '生图'}</i></button>`).join('')}</div>
+      <div class="pc-row-between pc-mt-s"><span class="pc-dim small">点图放大；图存在酒馆的 user/images 里</span><button class="pc-pill dashed tiny" data-act="clearhistory">清空记录</button></div>
+      <style>.pc-hist{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.pc-hist-item{position:relative;padding:0;border:0;border-radius:10px;overflow:hidden;aspect-ratio:2/3;background:var(--pc-paper-2);cursor:pointer}.pc-hist-item img{width:100%;height:100%;object-fit:cover;display:block}.pc-hist-item i{position:absolute;left:4px;bottom:4px;font-style:normal;font-size:10px;padding:0 5px;border-radius:6px;background:rgba(0,0,0,.55);color:#fff}@media (max-width:420px){.pc-hist{grid-template-columns:repeat(3,minmax(0,1fr))}}</style>`);
+    })()}
+
+    ${fold('scene', '固定提示词',
+@@@ END
+
+@@@ OLD
+            case 'clearresult': ui.studio.result = null; ui.studio.sent = null; render(); break;
+@@@ NEW
+            case 'clearresult': ui.studio.result = null; ui.studio.sent = null; render(); break;
+            case 'clearhistory': { if (!(await confirmBox('清空历史生图的记录？图片文件不会删。', { ok: '清空', cancel: '算了' }))) break; getData().history = []; commit(); render(); break; }
+@@@ END
