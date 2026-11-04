@@ -2180,3 +2180,10 @@ async function askShrinking(sys, userFor, opts) {
         if (!out.trim()) throw Object.assign(new Error('AI 回复是空的'), { emptyLength: true, diag: `通过酒馆现在连接的 API 转发，这次限长 ${maxTokens}；酒馆没把详细原因传回来，想看原因可以在智库设置「AI」里改成「单独填」再读一次` });
         return out;
 @@@ END
+
+═══ 30. 点「正文画师串」时面板跳一下：弹出动画放完 0.4 秒后又换成另一个动画重放一遍（往下掉 30px、变淡），面板里每点一下也会重放。改成只在打开时动一次 ═══
+@@@ OLD
+gap: 6px; animation: pc-up .2s ease-out;
+@@@ NEW
+gap: 6px; animation: none;
+@@@ END
