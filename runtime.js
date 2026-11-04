@@ -1707,7 +1707,7 @@ async function extractAppearance(name, description) {
     const sys = `你从角色设定里挑出画图用的外貌标签。只挑不会变的外貌：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身等。衣服另外放。
 ${PAIRS}
 只输出 JSON：{"appearance": [...], "outfit": [...]}。设定里没写的不要编。`;
-    const j = await askShrinking(sys, limit => `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, limit)}`, { maxTokens: 2000 });
+    const j = await askShrinking(sys, limit => `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000 });
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x.en || '').trim(), zh: String(x.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
     return { appearance: norm(j.appearance), outfit: norm(j.outfit) };
 }
@@ -1724,7 +1724,7 @@ async function askRoomy(sys, user, opts) {
     console.warn('[智库] AI 回复是空的，加大长度再试一次');
     let diag = '';
     try {
-        const raw = await askLLM(sys, user, { ...opts, maxTokens: Math.max(16000, (opts?.maxTokens || 800) * 4) });
+        const raw = await askLLM(sys, user, { ...opts, maxTokens: Math.max(16000, (opts?.maxTokens || 800) * 2) });
         if (answerOf(raw) || String(raw || '').includes('{')) return raw;
     } catch (e) { if (!e.emptyLength && !/max_tokens|max tokens|max_completion/i.test(String(e?.message))) throw e; diag = e.diag || String(e?.message || ''); }
     throw new Error('AI 回复是空的，加大长度又试了一次还是空的。实际情况：' + (diag || '没有更多信息') + '。如果写着思考用了很多 token，换不带思考的模型或关掉思考；如果结束原因是 stop 但用了 0 token，多半是中转站或模型拒绝了这段设定');
