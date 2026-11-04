@@ -1657,8 +1657,29 @@ async function translateToTags(text, { expand = false } = {}) {
 function pickJson(raw) {
     const t = String(raw || '').replace(/<think>[\s\S]*?<\/think>/g, '').replace(/```(?:json)?/g, '');
     const a = t.indexOf('{'), b = t.lastIndexOf('}');
-    if (a < 0 || b < a) throw new Error('AI 没按格式回答：' + t.slice(0, 100));
-    try { return JSON.parse(t.slice(a, b + 1)); } catch { throw new Error('AI 回答的格式不对：' + t.slice(a, a + 100)); }
+    if (!t.trim()) throw new Error('AI 回复是空的。思考模型（比如 deepseek-reasoner）可能把长度都用在思考上了，换 deepseek-chat 这类不思考的模型再试');
+    if (a < 0) throw new Error('AI 没按格式回答，可能拒绝了或没看懂，换个模型再试：' + t.slice(0, 100));
+    try { if (b > a) return JSON.parse(t.slice(a, b + 1)); } catch { /* 下面试着修 */ }
+    const fixed = repairJson(t.slice(a));
+    if (fixed) return fixed;
+    throw new Error('AI 的回答不完整（可能太长被截断了），换 deepseek-chat 这类不思考的模型，或者删掉没用的世界书条目再试：' + t.slice(a, a + 80));
+}
+/** 回答被截断时：退回到最后一个写完整的值，把没关上的括号补上 */
+function repairJson(s) {
+    const stack = [], cuts = [];
+    let inStr = false, esc = false;
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+        if (ch === '"') inStr = true;
+        else if (ch === '{' || ch === '[') stack.push(ch === '{' ? '}' : ']');
+        else if (ch === '}' || ch === ']') { stack.pop(); cuts.push([i + 1, stack.slice()]); }
+    }
+    for (let k = cuts.length - 1; k >= 0; k--) {
+        const [at, open] = cuts[k];
+        try { return JSON.parse(s.slice(0, at) + open.reverse().join('')); } catch { /* 再往前退 */ }
+    }
+    return null;
 }
 
 const PAIRS = `每个标签写成 {"en": "英文 Danbooru 标签", "zh": "简短中文意思"}。只用常见的 Danbooru 标签。`;
@@ -1668,7 +1689,7 @@ async function extractAppearance(name, description) {
     const sys = `你从角色设定里挑出画图用的外貌标签。只挑不会变的外貌：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身等。衣服另外放。
 ${PAIRS}
 只输出 JSON：{"appearance": [...], "outfit": [...]}。设定里没写的不要编。`;
-    const j = pickJson(await askLLM(sys, `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, 16000)}`, { maxTokens: 900 }));
+    const j = pickJson(await askLLM(sys, `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, 16000)}`, { maxTokens: 2000 }));
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x.en || '').trim(), zh: String(x.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
     return { appearance: norm(j.appearance), outfit: norm(j.outfit) };
 }
@@ -1679,7 +1700,7 @@ async function extractCast(cardName, description) {
 外貌只挑不会变的：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身等。衣服另外放。设定里没写的不要编。
 ${PAIRS}
 只输出 JSON：{"people": [{"name": "设定里的名字", "aliases": ["昵称、简称、别的叫法"], "appearance": [...], "outfit": [...]}]}`;
-    const j = pickJson(await askLLM(sys, `卡名：${cardName}\n设定：\n${String(description || '').slice(0, 16000)}`, { maxTokens: 3000 }));
+    const j = pickJson(await askLLM(sys, `卡名：${cardName}\n设定：\n${String(description || '').slice(0, 16000)}`, { maxTokens: 8000 }));
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
     return (Array.isArray(j.people) ? j.people : []).map(p => ({
         name: String(p?.name || '').trim().slice(0, 30),
