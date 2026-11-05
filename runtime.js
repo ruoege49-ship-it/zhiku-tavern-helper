@@ -8,7 +8,7 @@ function setTimeout(fn, delay, ...args) {
     timers.add(id); return id;
 }
 function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
-// 智库 · 原生扩展版 v0.8.9（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.10（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -26,7 +26,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.9';
+globalThis.__PC_VERSION = '0.8.10';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -83,6 +83,7 @@ function emptyData() {
         bindings: {},     // characterKey -> { type, id }
         recent: [],       // [{ type, id }]
         options: {
+            imageExpanded: true,
             stripArtistFromFixed: true, // 用票时去掉固定提示词里原有的 artist: 词
             showStub: true,             // 界面上的小票根
             showChip: false,            // 输入框上方显示当前画师串
@@ -2402,6 +2403,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
             start: String(opts.imageStartTag ?? old.startTag ?? 'image###'),
             end: String(opts.imageEndTag ?? old.endTag ?? '###'),
             auto: opts.markerAuto !== false,
+            imageExpanded: opts.imageExpanded !== false,
         };
     }
     function syncRegex() {
@@ -2445,14 +2447,18 @@ function createMarkerController({context,getData,generate,upload,notify,document
             bindHold(button,edit);
             if(record?.url){
                 const wrapper=doc.createElement('details');wrapper.className='pc-result-collapse';
-                const header=doc.createElement('summary');header.textContent='图片 · 点击展开';
+                wrapper.open=cfg.imageExpanded;
+                const header=doc.createElement('summary');
+                let imageTitle='图片',imageMissing=false;
+                const syncTitle=()=>{if(!imageMissing)header.textContent=imageTitle+(wrapper.open?' · 点击折叠':' · 点击展开');};
+                wrapper.addEventListener('toggle',syncTitle);
                 const img=doc.createElement('img');img.className='pc-result-image';img.alt='生成图片';
-                showUrl(record.url,u=>{img.src=u;},()=>{header.textContent='这张图存在别的设备 / 浏览器里，这里看不到，可以点「重新生成」';img.remove();});
+                showUrl(record.url,u=>{img.src=u;},()=>{imageMissing=true;header.textContent='这张图存在别的设备 / 浏览器里，这里看不到，可以点「重新生成」';img.remove();});
                 wrapper.append(header,img);slot.append(wrapper);
                 const vs=Array.isArray(record.versions)?record.versions:[];
                 if(vs.length>1){
                     const cur=Math.max(0,vs.findIndex(v=>v.url===record.url));
-                    header.textContent=`图片 · 第 ${cur+1}/${vs.length} 版 · 点击展开`;
+                    imageTitle=`图片 · 第 ${cur+1}/${vs.length} 版`;
                     const nav=doc.createElement('div');nav.className='pc-version-nav';
                     const step=(text,to)=>{const b=doc.createElement('button');b.type='button';b.textContent=text;b.disabled=!vs[to];
                         b.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();void switchVersion(id,msg,token,to);});return b;};
@@ -2460,6 +2466,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
                     nav.append(step('‹ 上一版',cur-1),n,step('下一版 ›',cur+1));wrapper.append(nav);
                 }
                 if(keepOpen.delete(id+'|'+token.index))wrapper.open=true;
+                syncTitle();
                 img.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(!img._pcHeld)preview(id,msg,token,index,record);});
                 bindHold(img,edit);
                 button.textContent=label(msg,token,record);
@@ -2570,6 +2577,11 @@ function createMarkerController({context,getData,generate,upload,notify,document
         }
     }
     function decorateAll() { if(doc)for(const el of doc.querySelectorAll('.mes[mesid]'))decorate(Number(el.getAttribute('mesid'))); }
+    function applyImageDefault() {
+        if(!doc || stopped)return;
+        const open=settings().imageExpanded;
+        for(const el of doc.querySelectorAll('.mes_text .pc-marker-slot .pc-result-collapse'))el.open=open;
+    }
     function refresh() {
         if(!doc || stopped)return;
         const cfg=settings();
@@ -2620,7 +2632,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
         });
         decorate(id);return (await Promise.all(jobs)).reduce((a,b)=>a+b,0);
     }
-    return {settings,syncRegex,process,decorate,decorateAll,refresh,stop(){stopped=true;for(const timer of holds)clearTimeout(timer);holds.clear();for(const el of overlays)el.remove();overlays.clear();if(doc)doc.querySelectorAll('.pc-image-actions').forEach(el=>el.remove());},idle(){return queue;}};
+    return {settings,syncRegex,process,decorate,decorateAll,refresh,applyImageDefault,stop(){stopped=true;for(const timer of holds)clearTimeout(timer);holds.clear();for(const el of overlays)el.remove();overlays.clear();if(doc)doc.querySelectorAll('.pc-image-actions').forEach(el=>el.remove());},idle(){return queue;}};
 }
 
 /** 本地图片库：存在用户自己的浏览器（IndexedDB）里，不占酒馆服务器。地址写成 idb:xxx */
@@ -4840,7 +4852,7 @@ function viewSettings(d) {
         <div class="pc-actions wrap"><a class="pc-btn dark" href="https://github.com/ruoege49-ship-it/zhiku-tavern-helper" target="_blank" rel="noopener">仓库 / 更新</a><a class="pc-btn" href="https://github.com/damoshen123/st-chatu8" target="_blank" rel="noopener">智绘姬原仓库</a></div></div>
       <div class="pc-about-note">看图提取需要能识图的模型 · 原脚本 AFPL v9，署名保留</div>`);
 
-    return `<h2 class="pc-pagetitle">设置</h2><div class="pc-marker-primary" style="padding:16px;margin-bottom:16px;border-radius:14px;background:var(--SmartThemeBlurTintColor,rgba(128,128,128,.12))">${sw('markerAuto', '开启标记自动生图', '默认开启 · 回复出现完整生图标记时自动生成，提示词默认折叠')}</div>${chat}${nai}${ai}${tpl}${look}${entry}${share}${ban}${data}${about}<div style="height:24px"></div>`;
+    return `<h2 class="pc-pagetitle">设置</h2><div class="pc-marker-primary" style="padding:16px;margin-bottom:16px;border-radius:14px;background:var(--SmartThemeBlurTintColor,rgba(128,128,128,.12))">${sw('markerAuto', '开启标记自动生图', '默认开启 · 回复出现完整生图标记时自动生成，提示词默认折叠')}${sw('imageExpanded', '图片默认展开', '开启：默认展开；关闭：默认折叠。立即应用到当前图片，并记住选择。')}</div>${chat}${nai}${ai}${tpl}${look}${entry}${share}${ban}${data}${about}<div style="height:24px"></div>`;
 }
 
 const VIEWS = { cast: viewCast, charedit: viewCharEdit, outfit: viewOutfit, studio: viewStudio, book: viewBook, artist: viewArtist, group: viewGroup, batch: viewBatch, vibe: viewVibe, lobby: viewLobby, settings: viewSettings };
@@ -5512,7 +5524,7 @@ async function onChangeEv(ev) {
     }
     if (el.dataset.bindCheck) { setPath(ui, el.dataset.bindCheck, el.checked); if (ui.view === 'batch') render(); return; }
     if (el.dataset.bind === 'batch.text') { render(); return; }
-    if (el.dataset.opt) { d.options[el.dataset.opt] = el.checked; commit(); return; }
+    if (el.dataset.opt) { d.options[el.dataset.opt] = el.checked; if (el.dataset.opt === 'imageExpanded') __mod_marker.applyImageDefault(); commit(); return; }
     if (el.hasAttribute('data-illmax')) { d.options.illustMax = Number(el.value) || 1; commit(); return; }
     if (el.dataset.optstr) { d.options[el.dataset.optstr] = el.value.trim(); if (['imageStartTag','imageEndTag'].includes(el.dataset.optstr)) __mod_marker.syncRegex(); commit({ silent: true }); return; }
     if (el.dataset.api) {

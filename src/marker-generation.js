@@ -28,6 +28,7 @@ export function createMarkerController({context,getData,generate,upload,notify,d
             start: String(opts.imageStartTag ?? old.startTag ?? 'image###'),
             end: String(opts.imageEndTag ?? old.endTag ?? '###'),
             auto: opts.markerAuto !== false,
+            imageExpanded: opts.imageExpanded !== false,
         };
     }
     function syncRegex() {
@@ -71,14 +72,18 @@ export function createMarkerController({context,getData,generate,upload,notify,d
             bindHold(button,edit);
             if(record?.url){
                 const wrapper=doc.createElement('details');wrapper.className='pc-result-collapse';
-                const header=doc.createElement('summary');header.textContent='图片 · 点击展开';
+                wrapper.open=cfg.imageExpanded;
+                const header=doc.createElement('summary');
+                let imageTitle='图片',imageMissing=false;
+                const syncTitle=()=>{if(!imageMissing)header.textContent=imageTitle+(wrapper.open?' · 点击折叠':' · 点击展开');};
+                wrapper.addEventListener('toggle',syncTitle);
                 const img=doc.createElement('img');img.className='pc-result-image';img.alt='生成图片';
-                showUrl(record.url,u=>{img.src=u;},()=>{header.textContent='这张图存在别的设备 / 浏览器里，这里看不到，可以点「重新生成」';img.remove();});
+                showUrl(record.url,u=>{img.src=u;},()=>{imageMissing=true;header.textContent='这张图存在别的设备 / 浏览器里，这里看不到，可以点「重新生成」';img.remove();});
                 wrapper.append(header,img);slot.append(wrapper);
                 const vs=Array.isArray(record.versions)?record.versions:[];
                 if(vs.length>1){
                     const cur=Math.max(0,vs.findIndex(v=>v.url===record.url));
-                    header.textContent=`图片 · 第 ${cur+1}/${vs.length} 版 · 点击展开`;
+                    imageTitle=`图片 · 第 ${cur+1}/${vs.length} 版`;
                     const nav=doc.createElement('div');nav.className='pc-version-nav';
                     const step=(text,to)=>{const b=doc.createElement('button');b.type='button';b.textContent=text;b.disabled=!vs[to];
                         b.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();void switchVersion(id,msg,token,to);});return b;};
@@ -86,6 +91,7 @@ export function createMarkerController({context,getData,generate,upload,notify,d
                     nav.append(step('‹ 上一版',cur-1),n,step('下一版 ›',cur+1));wrapper.append(nav);
                 }
                 if(keepOpen.delete(id+'|'+token.index))wrapper.open=true;
+                syncTitle();
                 img.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(!img._pcHeld)preview(id,msg,token,index,record);});
                 bindHold(img,edit);
                 button.textContent=label(msg,token,record);
@@ -196,6 +202,11 @@ export function createMarkerController({context,getData,generate,upload,notify,d
         }
     }
     function decorateAll() { if(doc)for(const el of doc.querySelectorAll('.mes[mesid]'))decorate(Number(el.getAttribute('mesid'))); }
+    function applyImageDefault() {
+        if(!doc || stopped)return;
+        const open=settings().imageExpanded;
+        for(const el of doc.querySelectorAll('.mes_text .pc-marker-slot .pc-result-collapse'))el.open=open;
+    }
     function refresh() {
         if(!doc || stopped)return;
         const cfg=settings();
@@ -246,5 +257,5 @@ export function createMarkerController({context,getData,generate,upload,notify,d
         });
         decorate(id);return (await Promise.all(jobs)).reduce((a,b)=>a+b,0);
     }
-    return {settings,syncRegex,process,decorate,decorateAll,refresh,stop(){stopped=true;for(const timer of holds)clearTimeout(timer);holds.clear();for(const el of overlays)el.remove();overlays.clear();if(doc)doc.querySelectorAll('.pc-image-actions').forEach(el=>el.remove());},idle(){return queue;}};
+    return {settings,syncRegex,process,decorate,decorateAll,refresh,applyImageDefault,stop(){stopped=true;for(const timer of holds)clearTimeout(timer);holds.clear();for(const el of overlays)el.remove();overlays.clear();if(doc)doc.querySelectorAll('.pc-image-actions').forEach(el=>el.remove());},idle(){return queue;}};
 }
