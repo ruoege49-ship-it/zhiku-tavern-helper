@@ -10,6 +10,13 @@ const msg={mes:'before image###sunset### middle image###sea### after',swipe_id:0
 const c={chat:[msg],chatId:'one',extensionSettings:{'st-chatu8':{startTag:'image###',endTag:'###'},regex:[{id:'unrelated'}]},saveSettingsDebounced(){},async saveChat(){saves++;},updateMessageBlock(){}};
 const controller=createMarkerController({context:()=>c,getData:()=>data,generate:async prompt=>{count++;active++;peak=Math.max(peak,active);try{if(block)await block;if(fail)throw Error('test backend failure');return 'data:image/png;base64,test';}finally{active--;}},upload:async()=>({url:'/user/images/test'+(++uploads)+'.png'}),notify:(...a)=>notices.push(a)});
 controller.syncRegex();controller.syncRegex();
+assert.equal(controller.settings().imageExpanded,true,'older data defaults to expanded images');
+data.options.imageExpanded=false;
+assert.equal(controller.settings().imageExpanded,false,'explicit collapsed preference survives');
+data.options=JSON.parse(JSON.stringify(data.options));
+assert.equal(controller.settings().imageExpanded,false,'collapsed preference survives serialization');
+data.options.imageExpanded=true;
+assert.equal(controller.settings().imageExpanded,true);
 assert.equal(c.extensionSettings.regex.length,3);
 let rule=c.extensionSettings.regex.find(r=>r.id===MARKER_REGEX_ID);
 assert(rule.promptOnly&&!rule.markdownOnly&&!rule.runOnEdit);assert.deepEqual(rule.placement,[1,2]);
