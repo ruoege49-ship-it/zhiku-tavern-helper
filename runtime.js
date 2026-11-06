@@ -8,7 +8,124 @@ function setTimeout(fn, delay, ...args) {
     timers.add(id); return id;
 }
 function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
-// 智库 · 原生扩展版 v0.8.11（二改自从前佬的智绘姬）
+// Per-image protocol adapter. Never use the surrounding message as the image cast.
+function imageCharacterNames(character) {
+    return [character.name, ...String(character.name || '').split('|'), ...String(character.aliases || '').split(/[,，、;；|]+/)]
+        .map(s => String(s || '').trim()).filter(Boolean);
+}
+
+function parseCharacterToken(value) {
+    const text = String(value || '').trim();
+    if (text.startsWith('{')) {
+        let data;
+        try { data = JSON.parse(text); } catch { throw new Error('角色标记 JSON 格式不完整，请编辑这张图的提示词'); }
+        if (typeof data.name !== 'string' || !data.name.trim() || typeof data.angle !== 'string') {
+            throw new Error('角色标记需要 name 和 angle；服装标记请先换成英文服装标签');
+        }
+        return { name: data.name.trim(), angle: data.angle.trim() };
+    }
+    const match = text.match(/^(.+?)-(?:sfw|nsfw)-(?:upperbody|lowerbody)(?:-(?:sfw|nsfw)-(?:lowerbody|fullbody))?$/i);
+    if (!match) throw new Error('角色标记请使用 $名字-sfw-upperbody$ 或带 name、angle 的 JSON');
+    const angle = match[1].match(/(?:[,，\s-]+)(from (?:front|behind|side))$/i);
+    return { name: (angle ? match[1].slice(0, angle.index) : match[1]).trim(), angle: angle?.[1] || '' };
+}
+
+function resolveImageCharacters(prompt, roster) {
+    const normalize = s => String(s).normalize('NFKC').replace(/\s+/g, '').toLowerCase();
+    const clean = s => s.trim().replace(/^[,;\s]+|[,;\s]+$/g, '');
+    const matchCharacter = name => {
+        const found = roster.filter(row => imageCharacterNames(row.char).some(n => normalize(n) === normalize(name)));
+        const enabled = found.filter(row => row.on);
+        if (enabled.length > 1) throw new Error(`角色「${name}」匹配到多人，请在角色页设置不同的名字或别名`);
+        if (!enabled.length) throw new Error(found.length ? `角色「${name}」未启用，请在「这次聊天」中开启` : `找不到角色「${name}」，请在角色页登记名字或别名`);
+        return enabled[0].char;
+    };
+    const picks = [], cast = [];
+    function parsePart(text, uc = '', center = null) {
+        const tokens = [...text.matchAll(/\$([^$]+)\$/g)];
+        // Reject broken placeholders before paying for a request.
+        if (text.replace(/\$[^$]+\$/g, '').includes('$')) throw new Error('角色标记缺少配对的 $，请编辑这张图的提示词');
+        if (!tokens.length) return clean(text);
+        for (let i = 0; i < tokens.length; i++) {
+            const token = parseCharacterToken(tokens[i][1]);
+            const char = matchCharacter(token.name);
+            const tags = [token.angle, clean(text.slice(tokens[i].index + tokens[i][0].length, tokens[i + 1]?.index ?? text.length))].filter(Boolean).join(', ');
+            const existing = picks.find(p => p.char === char);
+            if (existing) {
+                existing.tags = [existing.tags, tags].filter(Boolean).join(', ');
+                existing.uc = [existing.uc, uc].filter(Boolean).join(', ');
+            } else {
+                picks.push({ char, tags, uc, ...(center || {}) });
+                cast.push(char);
+            }
+        }
+        return clean(text.slice(0, tokens[0].index));
+    }
+    const text = String(prompt || '');
+    const headers = [...text.matchAll(/(?:^|[;\n])\s*(Scene Composition|Character\s+(\d+)\s+(Prompt|UC))\s*:/gi)];
+    let scene;
+    if (headers.length) {
+        const blocks = headers.map((h, i) => ({ kind: h[1].toLowerCase(), id: h[2], type: h[3]?.toLowerCase(), value: clean(text.slice(h.index + h[0].length, headers[i + 1]?.index ?? text.length)) }));
+        scene = clean(text.slice(0, headers[0].index));
+        const sceneParts = blocks.filter(b => !b.id).map(b => parsePart(b.value));
+        scene = [scene, ...sceneParts].filter(Boolean).join(', ');
+        for (const block of blocks.filter(b => b.type === 'prompt')) {
+            const centerMatch = block.value.match(/\|centers:\s*([\d.]+)\s*,\s*([\d.]+)\s*$/i);
+            const center = centerMatch ? { x: Number(centerMatch[1]), y: Number(centerMatch[2]) } : null;
+            const value = centerMatch ? block.value.slice(0, centerMatch.index) : block.value;
+            const uc = blocks.filter(b => b.id === block.id && b.type === 'uc').map(b => b.value).join(', ');
+            const start = picks.length;
+            const prefix = parsePart(value, uc, center);
+            if (prefix && picks.length > start) picks[start].tags = [prefix, picks[start].tags].filter(Boolean).join(', ');
+            else if (prefix) picks.push({ char: { appearance: [], outfits: [], negative: '' }, tags: prefix, uc, ...(center || {}) });
+        }
+    } else scene = parsePart(text);
+    picks.forEach((p, i) => { p.x ??= (i + 1) / (picks.length + 1); p.y ??= 0.5; });
+    return { scene, picks, cast };
+}
+
+// A closed content block is the story boundary; status panels after it stay outside.
+function imageStoryText(source) {
+    let text = String(source || '').replace(/<(think|thinking|analysis|imgthink)\b[^>]*>[\s\S]*?<\/\1>/gi, '').replace(/<!--[\s\S]*?-->/g, '');
+    const blocks = [...text.matchAll(/<content\b[^>]*>([\s\S]*?)<\/content\s*>/gi)];
+    if (blocks.length) text = blocks.map(m => m[1]).join('\n\n');
+    else if (/<content\b/i.test(text)) return ''; // Wait for a complete story.
+    return text.replace(/<(image|details|script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, '').replace(/<[^>]+>/g, '').trim();
+}
+
+function imageCastInstruction(names) {
+    if (!names.length) return '未登记的角色直接写完整英文外貌标签。';
+    return `可调用的候选角色：${names.join('、')}。每张图只选择这一瞬间实际入画的人，在该图标签内逐人写 $角色名字-sfw-upperbody$（名字必须来自候选名单）。插件会补充标记角色的外貌、固定衣服和参考图，其后的英文标签描述该角色动作。候选名单不是全员入画要求；未入画的人不要写标记。空镜不写角色标记。`;
+}
+
+function cleanImageTags(value) {
+    const tokens = [];
+    const text = String(value || '').replace(/\$([^$]+)\$/g, (raw, body) => {
+        parseCharacterToken(body);
+        tokens.push(raw);
+        return `ZKROLEPLACEHOLDER${tokens.length - 1}END`;
+    });
+    return text.split(/[,，\n]+/).map(t => t.trim()).filter(t => t && !/[㐀-鿿豈-﫿]/.test(t)).join(', ')
+        .replace(/ZKROLEPLACEHOLDER(\d+)END/g, (_, i) => tokens[Number(i)]);
+}
+
+function imageInsertionPoint(text, sentence) {
+    const blocks = [...text.matchAll(/<content\b[^>]*>([\s\S]*?)<\/content\s*>/gi)];
+    const ranges = blocks.length ? blocks.map(m => ({ start: m.index + m[0].indexOf('>') + 1, text: m[1] })) : [{ start: 0, text }];
+    const s = String(sentence || '').trim();
+    const tries = [s, s.replace(/[。！？!?…，,、；;："“”「」『』\s]+$/g, ''), s.slice(-12), s.slice(0, 12)].filter(t => t.length >= 4);
+    for (const range of ranges) for (const term of tries) {
+        const i = range.text.indexOf(term);
+        if (i < 0) continue;
+        const newline = range.text.indexOf('\n', i + term.length);
+        return range.start + (newline < 0 ? range.text.length : newline);
+    }
+    // Even the fallback belongs inside the story, before a trailing status panel.
+    const last = ranges.at(-1);
+    return last.start + last.text.trimEnd().length;
+}
+
+// 智库 · 原生扩展版 v0.8.12（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -26,7 +143,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.11';
+globalThis.__PC_VERSION = '0.8.12';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -1961,7 +2078,7 @@ return { extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, 
 const __mod_chars = (() => {
 /**
  * 角色：自动读取酒馆的角色卡（char）和人设（user），只存画图用的固定外貌和衣服。
- * 还有聊天里生图：读剧情 → AI 写画面 → 带上开着的角色 → 生成 → 插进这一楼。
+ * 还有聊天里生图：读剧情 → AI 选择入画角色 → 补充所选角色 → 生成 → 插进这一楼。
  */
 const { getData, commit, uploadImage } = __mod_store;
 const M = __mod_model;
@@ -2166,17 +2283,17 @@ function buildChatPrompt(scene, picks) {
     const d = getData();
     const artist = d.active ? M.ticketString(d, d.active) : '';
     const chars = picks.map(p => p.char);
-    const base = M.mergeTags(artist, countTags(chars), scene);
+    const base = M.mergeTags(artist, /\b(?:\d+(?:boys?|girls?|others?)|no humans)\b/i.test(scene) ? '' : countTags(chars), scene);
     const chatNeg = [d.active ? M.ticketNeg(d, d.active) : '', d.options.chatNegative || ''].filter(Boolean).join(', ');
     if (!canSplit() || picks.length === 0) {
         const flat = M.mergeTags(base, ...picks.map(p => [fixedTags(p.char), p.tags].filter(Boolean).join(', ')));
-        const { positive, negative } = E.composeStudio({ pos: flat, neg: [chatNeg, ...picks.map(p => p.char.negative)].filter(Boolean).join(', ') });
+        const { positive, negative } = E.composeStudio({ pos: flat, neg: [chatNeg, ...picks.flatMap(p => [p.char.negative, p.uc])].filter(Boolean).join(', ') });
         return { positive, negative, chars: [] };
     }
     const { positive, negative } = E.composeStudio({ pos: base, neg: chatNeg });
     return {
         positive, negative,
-        chars: picks.map(p => ({ prompt: soloize([fixedTags(p.char), p.tags].filter(Boolean).join(', ')), uc: p.char.negative || '', center: { x: snap(p.x), y: snap(p.y) } })),
+        chars: picks.map(p => ({ prompt: soloize([fixedTags(p.char), p.tags].filter(Boolean).join(', ')), uc: [p.char.negative, p.uc].filter(Boolean).join(', '), center: { x: snap(p.x), y: snap(p.y) } })),
     };
 }
 
@@ -2190,12 +2307,10 @@ function castIn(text) {
     if (!t) return [];
     return currentCast().filter(x => x.on && fixedTags(x.char) && namesOf(x.char).some(n => t.includes(n))).map(x => x.char);
 }
-/** 标记生图：按楼层看，这一楼提到谁就带谁；谁都没提到就返回 null，只用标记里的词 */
-function markerPrompt(prompt, { whole = '' } = {}) {
-    const chars = castIn(whole + '\n' + prompt);
-    if (!chars.length) return null;
-    const picks = chars.slice(0, 4).map((ch, i, a) => ({ char: ch, tags: '', x: (i + 1) / (a.length + 1), y: 0.5 }));
-    return { ...buildChatPrompt(prompt, picks), cast: chars };
+/** 每张图独立解析角色；周围正文只用于选镜头，不参与入画名单。 */
+function markerPrompt(prompt) {
+    const parsed = resolveImageCharacters(prompt, currentCast());
+    return { ...buildChatPrompt(parsed.scene, parsed.picks), cast: parsed.cast };
 }
 
 /** 「会发送的内容」预览（不调 AI，只看角色那部分） */
@@ -2224,9 +2339,6 @@ async function generateForMessage(mesId, { onStep } = {}) {
         const ch = cast.find(x => x.name === p.name) || cast.find(x => p.name.includes(x.name) || x.name.includes(p.name));
         if (ch && !picks.some(q => q.char === ch)) picks.push({ char: ch, tags: p.tags, x: p.x, y: p.y });
     }
-    // 开着但 AI 没写到的角色也带上（开关的意思就是「生图时带上」），位置平均排开
-    const rest = cast.filter(ch => !picks.some(q => q.char === ch));
-    rest.forEach((ch, i) => picks.push({ char: ch, tags: '', x: (i + 1) / (rest.length + 1), y: 0.5 }));
     const prompt = buildChatPrompt(sc.scene, picks);
     onStep?.('NovelAI 正在画…');
     // 只用出场角色在角色页里绑的角色参考
@@ -2633,7 +2745,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
                 entry.state='生成中…';decorate(id);
                 try {
                     const prompt=promptOverride??findRecord(msg,token)?.prompt??token.prompt;
-                    const image=await generate(prompt,{whole:source});if(!current())return 0;
+                    const image=await generate(prompt);if(!current())return 0;
                     entry.state='保存中…';decorate(id);
                     const {url}=await upload(image,'marker_'+Date.now());if(!current())return 0;
                     if(!url)throw new Error('图片上传未返回地址');
@@ -2738,12 +2850,12 @@ async function pcRecordImage({ dataUrl, url, raw = '', sent = null, from }) {
 let pcMarkerRaw = '';
 const __mod_marker=createMarkerController({
         context:()=>SillyTavern.getContext(),getData:__mod_store.getData,document:DOC,
-        generate:async (prompt,where)=>{const d=__mod_store.getData();pcMarkerRaw=prompt;
-            // 正文里提到谁才带谁的外貌和角色参考；谁都没提到，就只用标记里的词
-            const hit=__mod_chars.markerPrompt(prompt,where||{});
+        generate:async prompt=>{const d=__mod_store.getData();pcMarkerRaw=prompt;
+            // 外貌、负面词和参考图都来自这一张图的角色标记
+            const hit=__mod_chars.markerPrompt(prompt);
             const {positive,negative,chars}=hit||__mod_engine.composeStudio({pos:__mod_model.mergeTags(d.active?__mod_model.ticketString(d,d.active):'',prompt),neg:[d.active?__mod_model.ticketNeg(d,d.active):'',d.options.chatNegative||''].filter(Boolean).join(', ')});
             const bound=[...new Set((hit?.cast||[]).map(ch=>ch.charRef).filter(id=>id&&d.charRefGroups?.[id]))];
-            const image=await __mod_engine.generateFull({positive,negative,...(chars?.length?{chars}:{}),director:bound.length?await __mod_engine.charRefs(bound):undefined});__mod_engine.afterChatImage();return image;},
+            const image=await __mod_engine.generateFull({positive,negative,...(chars?.length?{chars}:{}),director:bound.length?await __mod_engine.charRefs(bound):null});__mod_engine.afterChatImage();return image;},
         resolveUrl:u=>pcLocal.url(u),upload:async(image,name)=>{const r=await pcStoreImage(image,name);void pcRecordImage({dataUrl:image,url:r?.url,raw:pcMarkerRaw,sent:__mod_engine.runtime.lastSent,from:'chat'}).catch(e=>console.warn('[智库] 历史生图没存上',e));return r;},notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
     });
 const __mod_ui = (() => {
@@ -4035,11 +4147,11 @@ function viewCast(d) {
       ${chars.map(row).join('') || '<div class="pc-dim small">现在没有打开角色卡</div>'}
       <div class="pc-actions wrap">
         ${chars.length ? `<button class="pc-pill dashed tiny" data-act="addside">＋ 加配角</button>` : ''}
-        <button class="pc-pill dashed tiny" data-act="castpreview">看会发送的内容</button>
+        <button class="pc-pill dashed tiny" data-act="castpreview">查看候选角色外貌</button>
       </div>
       ${chars.length ? '<button class="pc-btn dark pc-mt-s" data-act="outdesign" style="width:100%">✦ 按剧情设计服装</button>' : ''}
       ${ui.castPreview ? `<div class="pc-mt-s">${C.previewCast().map(p => `<div class="pc-label">${esc(p.name)}${p.story ? '（衣服由 AI 按剧情写）' : ''}</div><p class="pc-quote small mono">${esc(p.tags) || '（没有外貌）'}</p>`).join('') || '<div class="pc-dim small">没有开着的角色</div>'}
-        <div class="pc-hint">再加上：当前画师串、AI 按剧情写的场景和动作、质量词。</div></div>` : ''}
+        <div class="pc-hint">这里是可调用的角色库。每张图只带该图角色标记指定的人，再结合画师串、场景动作和质量词。</div></div>` : ''}
     </section>
     <div class="pc-seg three pc-mt">
       <button class="${ui.castTab === 'char' ? 'on' : ''}" data-act="casttab" data-tab="char">角色卡（char）· ${C.stCards().length}</button>
@@ -4110,7 +4222,7 @@ function viewCharEdit(d) {
       <div class="pc-row-between"><b>固定外貌</b><span class="pc-chips" style="margin:0">${c.kind !== 'free' ? `<button class="pc-pill dashed tiny" data-act="readcard" ${busy ? 'disabled' : ''}>${busy === 'read' ? '读取中…' : c.kind === 'user' ? '从人设读' : c.kind === 'side' ? '从卡和世界书读' : '从角色卡读'}</button>` : ''}<label class="pc-pill dashed tiny">${busy === 'look' ? '<span class="pc-busy">看图中</span>' : '从图片读'}<input type="file" accept="image/*" data-lookimg hidden></label></span></div>
       <div class="pc-dim small">头发、眼睛、脸、身材这类不会变的。第一个写 1boy 或 1girl。点标签可以改，× 删掉。</div>
       ${c.kind === 'char' || c.kind === 'side' ? `<button class="pc-pill dashed tiny pc-mt-s" data-act="readcast" ${busy ? 'disabled' : ''}>${busy === 'cast' ? '<span class="pc-busy">读取中</span>' : '读出这张卡里所有人（含世界书）'}</button>` : ''}
-      <label class="pc-field pc-mt-s"><span>别名（逗号隔开）· 正文里出现名字或别名，生图才带上这个人</span><input data-charalias value="${esc(c.aliases || '')}" placeholder="比如 小秋，秋秋"></label>
+      <label class="pc-field pc-mt-s"><span>别名（逗号隔开）· 图片角色标记可使用名字或别名</span><input data-charalias value="${esc(c.aliases || '')}" placeholder="比如 小秋，秋秋"></label>
       <div class="pc-pairs">${pairChips(c.appearance, 'app') || '<span class="pc-dim small">还没有</span>'}</div>
       <div class="pc-addrow"><textarea rows="1" data-bind="addText.app" placeholder="自己加，中文也行，可以一次粘贴好几个" data-enter="addpair-app">${esc(ui.addText.app)}</textarea><button class="pc-btn dark" data-act="addpair" data-where="app" ${busy ? 'disabled' : ''}>${busy === 'app' ? '…' : '加'}</button></div>
     </section>
@@ -4151,11 +4263,11 @@ function viewCharEdit(d) {
       })()}
     </section>
 
-    ${castRow ? `<section class="pc-card pc-pad pc-mt"><div class="pc-row-between"><b>这次聊天</b>${sw2(castRow.on, `data-cast="${esc(c.key)}"`)}</div><div class="pc-dim small">开着 = 这一楼提到${esc(c.name)}（或别名）时，生图带上${esc(c.name)}的外貌</div></section>` : ''}
+    ${castRow ? `<section class="pc-card pc-pad pc-mt"><div class="pc-row-between"><b>这次聊天</b>${sw2(castRow.on, `data-cast="${esc(c.key)}"`)}</div><div class="pc-dim small">开着 = 允许图片角色标记调用${esc(c.name)}的外貌和参考图</div></section>` : ''}
 
     <details class="pc-fold"><summary><b>不想出现的</b><i>${esc(c.negative) || '这个角色专用的负面词'}</i></summary><div class="pc-fold-in">
       <textarea class="pc-textarea small mono" data-charneg placeholder="比如 beard, glasses">${esc(c.negative)}</textarea></div></details>
-    <details class="pc-fold"><summary><b>会发送的内容</b><i>${esc(C.fixedTags(c)) || '（空）'}</i></summary><div class="pc-fold-in">
+    <details class="pc-fold"><summary><b>被图片角色标记选中时补充</b><i>${esc(C.fixedTags(c)) || '（空）'}</i></summary><div class="pc-fold-in">
       <p class="pc-quote small mono">${esc(C.fixedTags(c)) || '（空）'}</p><div class="pc-hint">聊天生图时，再加上 AI 写的动作表情${c.outfitMode === 'story' ? '和衣服' : ''}。</div></div></details>
     <div class="pc-center pc-mt"><button class="pc-btn dark" data-act="chartest" ${busy ? 'disabled' : ''}>${busy === 'test' ? '<span class="pc-busy">生成中</span>' : `用${esc(c.name)}生成一张试试`}</button></div>
     ${ui.charTestImg ? `<section class="pc-card pc-mt pc-result"><img src="${esc(ui.charTestImg)}" alt="" data-act="viewimg" data-src="${esc(ui.charTestImg)}"></section>` : ''}
@@ -4865,7 +4977,7 @@ function viewSettings(d) {
       <div class="pc-hint" style="margin-top:0">用开始与结束标记包住提示词，例如 <code>${esc(marker.start)}1boy, solo, sunset${esc(marker.end)}</code>。只生成标记里的画面，图片放在原位置；没有标记的回复不生图。</div>
       <label class="pc-field"><span>开始标记（前缀）</span><input data-optstr="imageStartTag" value="${esc(marker.start)}" placeholder="image###"></label>
       <label class="pc-field"><span>结束标记</span><input data-optstr="imageEndTag" value="${esc(marker.end)}" placeholder="###"></label>
-      <div class="pc-hint">已内置「智库 · 生图标记不发送」正则：过滤发送给聊天模型的生图标记，不影响生图读取。修改标记时自动同步。</div>
+      <div class="pc-hint">逐图调用角色：在图片提示词内写 $名字-sfw-upperbody$，也支持智绘姬 JSON 角色标记。只补这张图指定角色的外貌和参考图；纯英文标签照常使用。使用外部生图预设时，请在该预设中加入逐图角色标记规则。<br>已内置「智库 · 生图标记不发送」正则：过滤发送给聊天模型的生图标记，不影响生图读取。修改标记时自动同步。</div>
       <label class="pc-field"><span>标记生图额外负面词</span><input data-optstr="chatNegative" value="${esc(d.options.chatNegative || '')}"></label>
       <div class="pc-row-between pc-mt-s"><b>正文自动插图</b><span class="pc-dim small">不用另挂生图世界书</span></div>
       <div class="pc-seg three">${[['off', '关'], ['inline', '跟正文一起写'], ['after', '写完再请求']].map(([v, t]) => `<button class="${(d.options.illustMode || 'off') === v ? 'on' : ''}" data-act="illmode" data-mode="${v}">${t}</button>`).join('')}</div>
@@ -6555,31 +6667,19 @@ async function start() {
         // 别的插件在后台悄悄生成（总结之类）时不加
         const on = type !== 'quiet' && getData().options.illustMode === 'inline' && m.start && m.end;
         const max = illustMax();
-        // 登记了外貌的角色由智库按名字补上，不用 AI 写
+        // 候选名单交给模型；每张图用明确的角色标记选择外貌
         const known = on ? C.currentCast().filter(x => x.on && C.fixedTags(x.char)).map(x => x.char.name) : [];
         // 放在聊天里、最后一条消息后面（IN_CHAT, depth 0），以系统身份
-        c.setExtensionPrompt(ILLUST_KEY, on ? `[插图] 这次回复的正文里，挑${max === 1 ? '一处' : `最多 ${max} 处`}最有画面感的瞬间，在那段话后面另起一行，写：${m.start}英文 Danbooru 标签${m.end}
-标签只写这一刻的画面：人数（1girl / 1boy / 2girls…）、${known.length ? `${known.join('、')}以外的人的外貌` : '出场角色的外貌（发型发色、眼睛、身材）'}、此刻的衣服、动作、表情、姿势、视线、场景、光线、构图，用英文逗号隔开。${known.length ? `${known.join('、')}的长相会自动补上，不用写。` : ''}不写画师、不写画质词、不写中文，不解释这一行。其余正文照常写。` : '', 1, 0, false, 0);
+        c.setExtensionPrompt(ILLUST_KEY, on ? `[插图] 这次回复的正文里，挑${max === 1 ? '一处' : `最多 ${max} 处`}关键情绪或行动的决定性瞬间，在对应段落后另起一行：${m.start}画面标签${m.end}
+每张图固定一个瞬间，不描述连续动作。人数、衣服、动作、表情、场景、光线和构图用英文 Danbooru 标签，英文逗号分隔。不写画师或画质词。${imageCastInstruction(known)}角色标记中的名字可以用中文，其余标签用英文。只从 <content>...</content> 正文选镜头（没有该标签时使用普通正文），忽略思考、状态栏和名单。其余正文照常写。` : '', 1, 0, false, 0);
     };
     syncIllust();
     cleanups.push(onChange(syncIllust));
     // 改了标记写法（不通知）也跟上：每次开始生成前再同步一次
     if (event_types.GENERATION_STARTED) { eventSource.on(event_types.GENERATION_STARTED, syncIllust); cleanups.push(() => eventSource.removeListener?.(event_types.GENERATION_STARTED, syncIllust)); }
     cleanups.push(() => { try { SillyTavern.getContext().setExtensionPrompt?.(ILLUST_KEY, '', 1, 0, false, 0); } catch {} });
-    const illustSeen = new Set();
-    /** 插在 sentence 那一行的行尾；找不到就返回 -1 */
-    const illustAt = (text, sentence) => {
-        const s = String(sentence || '').trim();
-        if (!s) return -1;
-        const tries = [s, s.replace(/[。！？!?…，,、；;："“”「」『』\s]+$/g, ''), s.slice(-12), s.slice(0, 12)].filter(x => x && x.length >= 4);
-        for (const t of tries) {
-            const i = text.indexOf(t);
-            if (i < 0) continue;
-            const nl = text.indexOf('\n', i + t.length);
-            return nl < 0 ? text.length : nl;
-        }
-        return -1;
-    };
+    const illustSeen = new WeakMap();
+    const illustAt = imageInsertionPoint;
     const illustAfter = async id => {
         const d = getData(), m = __mod_marker.settings();
         if (d.options.illustMode !== 'after' || !m.start || !m.end) return;
@@ -6587,16 +6687,16 @@ async function start() {
         if (!msg || msg.is_user || msg.is_system || id !== c.chat.length - 1) return;
         const source = String(msg.mes || '');
         if (!source.trim() || parseImageMarkers(source, m.start, m.end).length) return;
-        const seen = `${c.getCurrentChatId?.()}|${id}|${msg.swipe_id}|${source.length}|${source.slice(0, 40)}`;
-        if (illustSeen.has(seen)) return;
-        illustSeen.add(seen);
+        const seen = `${msg.swipe_id}|${source}`;
+        if (illustSeen.get(msg) === seen) return;
+        illustSeen.set(msg, seen);
         const chatAt = c.getCurrentChatId?.(), max = illustMax();
-        const plain = source.replace(/<[^>]+>/g, '').replace(/\n{3,}/g, '\n\n').slice(0, 8000);
-        // 只告诉 AI 这条回复里出现的人：外貌由智库补，AI 不用写，省 token
-        const named = C.castIn(plain).map(ch => ch.name);
-        const cast = named.length ? `这些角色的外貌会自动补上，标签里不用写他们的发型发色眼睛：${named.join('、')}` : '';
+        const plain = imageStoryText(source).replace(/\n{3,}/g, '\n\n').slice(0, 8000);
+        if (!plain) return;
+        const named = C.currentCast().filter(x => x.on && C.fixedTags(x.char)).map(x => x.char.name);
+        const cast = imageCastInstruction(named);
         const sys = `你是插画分镜师，给一段小说正文配插图。挑${max === 1 ? ' 1 ' : `最多 ${max} `}个最有画面感的瞬间，每个写成 NovelAI 用的英文 Danbooru 标签。
-标签写：人数（1girl / 1boy / 2girls…）、没说会自动补的角色的外貌、此刻的衣服、动作、表情、姿势、视线、场景、光线、构图。不写画师、不写画质词、不写中文。
+每张图选一个情绪或行动的决定性瞬间，不写连续动作。标签写人数、此刻的衣服、动作、表情、场景、光线、构图。不写画师或画质词。按用户提供的候选角色规则逐图写角色标记，只有标记中的名字可以用中文，其余用英文。
 "after" 必须从正文里原样复制一小句（10 到 30 个字），图会插在这句所在那一行的后面。
 只输出 JSON：{"images": [{"after": "正文原句", "tags": "英文标签"}]}`;
         let j;
@@ -6606,7 +6706,9 @@ async function start() {
         if (now.getCurrentChatId?.() !== chatAt || now.chat?.[id] !== msg || String(msg.mes || '') !== source) return;
         let next = source, n = 0;
         for (const it of (Array.isArray(j.images) ? j.images : []).slice(0, max)) {
-            const tags = String(it?.tags || '').split(/[,，\n]+/).map(x => x.trim()).filter(x => x && !__mod_translate.hasChinese(x)).join(', ');
+            let tags;
+            try { tags = cleanImageTags(it?.tags); resolveImageCharacters(tags, C.currentCast()); }
+            catch (e) { toastr.warning(e.message, '自动插图'); continue; }
             if (!tags) continue;
             const mark = `\n${m.start}${tags}${m.end}\n`;
             const at = illustAt(next, it?.after);
