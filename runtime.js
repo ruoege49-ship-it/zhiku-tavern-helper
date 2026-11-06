@@ -8,6 +8,262 @@ function setTimeout(fn, delay, ...args) {
     timers.add(id); return id;
 }
 function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
+
+// The entire editable instruction lives here; request assembly adds data, not hidden rules.
+const DEFAULT_ILLUSTRATION_PROMPT = `你负责根据小说正文选择插图瞬间，并整理画面信息。
+
+【图片数量】
+遵循输入 imageLimit（玩家设置的最多张数），不自行固定张数。
+每张图描绘一个独立瞬间，不把连续发生的动作塞进同一张图。
+
+【正文范围】
+存在 <content>...</content> 时，只从其中选择剧情画面。
+忽略思考、状态栏、角色名单和正文之外的附加信息。
+没有 content 标签时，使用提供的普通正文。
+
+【画面选择】
+优先选择体现角色情绪、人物互动或关键行动的瞬间。
+明确这一刻：谁入画、在哪里、正在做什么、有什么表情。
+角色被提及、被回忆、出现在名单中，不代表实际入画。
+不要为了凑人数，把候选角色全部加入画面。
+
+【人物与外貌】
+候选角色资料用于识别名字、别名和固定外貌。
+已登记的入画角色使用对应身份；未登记的人物按正文描述。
+固定外貌沿用角色资料，动作、情绪和剧情服装以当前瞬间为准。
+正文没有交代的信息不要当作已知事实。
+
+【内容分级】
+对应原文含成人性内容或私密部位裸露时，标记 nsfw，不得漏标，也不得标成 sfw。
+分级与画面描述分开处理；画面标签完整描述非露骨的可见信息。
+不能仅因角色性别、亲密关系或普通拥抱，就判定为 nsfw。
+
+【画面标签：SFW 和 NSFW 均适用】
+依据选定瞬间，完整描述剧情明确出现、且在当前镜头中可见的内容。
+不要遗漏关键动作、情绪、物品及人物互动。
+不要把先后发生的动作合并，也不要添加镜头外的人物和细节。
+每个入画人物分别填写：身体姿势、朝向和重心；肢体动作、双手位置和物品；表情、视线和头部朝向；衣着状态；画面位置和前后层次。
+多人画面还需填写：相对位置（面对面、并肩、一前一后等）、距离、朝向、遮挡、谁对谁做什么、主次关系。
+整体构图填写：景别（特写到远景）、机位（平视、俯视、仰视、正侧背面）、主体位置、视觉重点、留白、前后层次、地点、关键物品、时间、光线和氛围。
+剧情未指定的镜头与构图，可以选择适合表现该瞬间的方案；人物、事件和关键动作必须有正文依据。
+标签使用英文，逗号分隔；场景与各角色标签分别输出。不添加画师串和质量词。
+
+【输出格式】
+mode=after：只输出 JSON：{"images":[画面对象]}，不输出分析过程。
+mode=inline：其余正文照常写；逐图完成同样的选镜头、分级和人物分析，再在对应段落后，用输入 markers.start 和 markers.end 包住英文标签，不输出 JSON。格式为 Scene Composition: 分级、人数、场景、构图、互动标签; Character 1 Prompt: $角色名字-sfw-upperbody$, 该人物的姿势、动作、表情、视线、衣着、站位标签|centers:0.3,0.5; Character 2 Prompt: ...。登记角色用候选名字，未登记角色直接写英文外貌标签，不用角色标记；空镜仅有 Scene Composition。不得把人物标签合并到场景段。nsfw 画面必须以 Scene Composition: nsfw, 开头。sfw 也同样写完整姿势和构图。
+每个画面对象必须包含：
+source：从本次正文原样摘录的定位句（不少于 4 个字符）。
+title：简短图片标题。
+moment：一句话概括这个瞬间，不写分析过程。
+rating：sfw 或 nsfw。
+scene：英文环境、地点和关键物品标签。
+composition：对象，包含 shot（景别）、camera（机位）、layout（布局和焦点）、lighting（光线），各字段为英文标签。
+interaction：英文人物相对位置、距离、遮挡和互动关系标签；空镜可为空。
+characters：实际入画人物数组，空镜用 []。每人包含：
+name（名字）、registered（是否调用候选角色，布尔值）、gender（girl/boy/other）、appearance（未登记角色的英文外貌标签，登记角色可为空）、pose（姿势）、action（动作）、expression（表情）、gaze（视线）、outfit（此刻衣服）、position（对象：x、y 为 0 到 1 的画面坐标，depth 为 foreground/midground/background）、tags（其他英文细节，可为空）。
+只有 name、source、title、moment 可以用中文，其余画面标签用英文。
+characters 只列实际可见的人；人数标签由插件根据名单生成，scene 和各人物标签不另写人数。`;
+
+function illustrationPrompt(options = {}) {
+    return typeof options.illustPrompt === 'string' && options.illustPrompt.trim() ? options.illustPrompt : DEFAULT_ILLUSTRATION_PROMPT;
+}
+
+function saveIllustrationPrompt(options, value) {
+    if (typeof value !== 'string' || !value.trim()) throw new Error('提示词不能为空；需要默认内容时点「恢复默认」');
+    options.illustPrompt = value; // Preserve the player's literal text, including whitespace.
+}
+
+function illustrationRequest({ options, mode, roster, markers, story = '', prompt }) {
+    const candidates = roster.filter(row => row.on).map(({ char }) => ({
+        name: char.name, aliases: char.aliases || '',
+        appearance: (char.appearance || []).map(t => t.en).filter(Boolean).join(', '),
+        outfitMode: char.outfitMode,
+        outfit: char.outfitMode === 'fixed' ? ((char.outfits || []).find(o => o.id === char.outfitId) || char.outfits?.[0])?.tags?.map(t => t.en).filter(Boolean).join(', ') || '' : '',
+    }));
+    const data = { mode, imageLimit: Math.min(3, Math.max(1, Math.floor(Number(options.illustMax) || 1))), markers, candidates, ...(mode === 'after' ? { story } : {}) };
+    const system = prompt ?? illustrationPrompt(options);
+    const user = JSON.stringify(data, null, 2);
+    return { mode, system, user, injection: system + '\n\n【本次输入】\n' + user };
+}
+
+function readIllustrationPlan(prompt) {
+    const text = String(prompt || '').trim();
+    if (!text.startsWith('{') || !/"(?:characters|composition|rating|moment)"\s*:/.test(text)) return null;
+    try { return JSON.parse(text); } catch { throw new Error('画面方案 JSON 不完整，请编辑本图提示词后重试'); }
+}
+
+function compileIllustrationPlan(plan, roster, story) {
+    const required = key => {
+        if (typeof plan?.[key] !== 'string' || !plan[key].trim()) throw new Error(`画面方案缺少 ${key}`);
+        return plan[key].trim();
+    };
+    const source = required('source'), title = required('title'), moment = required('moment');
+    if (source.length < 4 || (typeof story === 'string' && !story.includes(source))) throw new Error('画面定位句不在正文中，请重新选择瞬间');
+    const rating = required('rating').toLowerCase();
+    if (!['sfw', 'nsfw'].includes(rating)) throw new Error('画面分级必须是 sfw 或 nsfw');
+    if (!Array.isArray(plan.characters)) throw new Error('画面方案缺少入画人物数组 characters');
+    const clean = value => {
+        if (value == null) return '';
+        if (typeof value !== 'string' || /[㐀-鿿豈-﫿$<>\n]/.test(value)) throw new Error('画面标签需要英文，人物名字请放在 name 字段');
+        // Count and rating are compiled once, from structured fields.
+        return value.split(/[,;]+/).map(s => s.trim()).filter(s => s && !/^(?:\d+(?:boys?|girls?|others?)|solo|no humans|sfw|nsfw)$/i.test(s)).join(', ');
+    };
+    const composition = plan.composition;
+    if (!composition || typeof composition !== 'object') throw new Error('画面方案缺少镜头构图 composition');
+    for (const field of ['shot', 'camera', 'layout', 'lighting']) if (!clean(composition[field])) throw new Error(`镜头构图缺少 ${field}`);
+    const picks = [], cast = [], seen = new Set(), counts = {girl:0,boy:0,other:0};
+    for (const person of plan.characters) {
+        if (!person || typeof person.name !== 'string' || !person.name.trim() || /[$\n]/.test(person.name)) throw new Error('入画人物需要有效名字');
+        if (typeof person.registered !== 'boolean') throw new Error('入画人物需要 registered 字段');
+        let char;
+        if (person.registered) {
+            char = resolveImageCharacters('$' + person.name + '-sfw-upperbody$', roster).cast[0];
+            cast.push(char);
+        } else {
+            if (!clean(person.appearance)) throw new Error(`未登记人物「${person.name}」缺少外貌标签`);
+            char = { name: person.name, appearance: [], outfits: [], outfitMode: 'story', negative: '' };
+        }
+        const identity = char.key || person.name.normalize('NFKC').replace(/\s+/g, '').toLowerCase();
+        if (seen.has(identity)) throw new Error('同一人物在画面名单中出现两次，请合并动作');
+        seen.add(identity);
+        const registeredGender = (char.appearance || []).map(t => t.en?.trim().toLowerCase()).find(t => /^1(?:girl|boy|other)$/.test(t));
+        const gender = registeredGender?.slice(1) || person.gender;
+        if (!Object.hasOwn(counts, gender)) throw new Error('人物 gender 必须是 girl、boy 或 other');
+        counts[gender]++;
+        const pos = person.position;
+        if (!pos || ![pos.x,pos.y].every(n=>typeof n === 'number' && Number.isFinite(n) && n>=0 && n<=1) || !['foreground','midground','background'].includes(pos.depth)) throw new Error('人物站位需要 0～1 的 x、y 坐标和前中后景 depth');
+        for (const field of ['pose','action','expression','gaze']) if (!clean(person[field])) throw new Error(`人物「${person.name}」缺少 ${field}`);
+        const tags = [person.registered ? '' : person.appearance, person.pose, person.action, person.expression, person.gaze,
+            char.outfitMode === 'fixed' ? '' : person.outfit, pos.x<0.4?'on left':pos.x>0.6?'on right':'centered', pos.depth, person.tags].map(clean).filter(Boolean).join(', ');
+        picks.push({ char, tags, x:pos.x, y:pos.y });
+    }
+    const count = picks.length ? Object.entries(counts).filter(([,n])=>n).map(([g,n])=>`${n}${g}${n>1?'s':''}`).join(', ') : 'no humans';
+    const scene = [rating, count, clean(required('scene')), ...['shot','camera','layout','lighting'].map(k=>clean(composition[k])), clean(plan.interaction)].filter(Boolean).join(', ');
+    return { scene, picks, cast, summary:{source,title,moment,rating} };
+}
+
+function illustrationMarkerText(compiled) {
+    const parts = ['Scene Composition: ' + compiled.scene];
+    compiled.picks.forEach((p, i) => {
+        const role = compiled.cast.includes(p.char) ? '$' + p.char.name + '-sfw-upperbody$' : '';
+        parts.push(`Character ${i + 1} Prompt: ${[role,p.tags].filter(Boolean).join(', ')}|centers:${p.x},${p.y}`);
+    });
+    return parts.join('; ');
+}
+
+function applyIllustrationRating(positive, rating) {
+    if (!['sfw','nsfw'].includes(rating)) return positive;
+    const rest=String(positive || '').split(',').map(t=>t.trim()).filter(t=>t&&!/^(?:sfw|nsfw)$/i.test(t));
+    return [rating,...rest].join(', ');
+}
+
+
+function createIllustrationPlanner({ getContext, getData, settings, roster, askLLM, pickJson, warn, onRequest = () => {}, afterSave = () => {} }) {
+    let stopped = false;
+    const seen = new WeakMap();
+    function request(mode, story = '') {
+        const cfg = settings();
+        return illustrationRequest({options:getData().options, mode, roster:roster(), markers:{start:cfg.start,end:cfg.end}, story});
+    }
+    function sync(type) {
+        const c = getContext(), cfg = settings();
+        if (typeof c.setExtensionPrompt !== 'function') return;
+        const enabled = !stopped && type !== 'quiet' && getData().options.illustMode === 'inline' && cfg.start && cfg.end;
+        const req = enabled ? request('inline') : null;
+        c.setExtensionPrompt('zhiku_illust', req?.injection || '', 1, 0, false, 0);
+        if (req) onRequest(req);
+    }
+    async function after(id) {
+        const c = getContext(), cfg = settings(), msg = c.chat?.[id];
+        if (stopped || getData().options.illustMode !== 'after' || !cfg.start || !cfg.end || !msg || msg.is_user || msg.is_system || id !== c.chat.length - 1) return;
+        const source = String(msg.mes || '');
+        if (!source.trim() || parseImageMarkers(source,cfg.start,cfg.end).length) return;
+        const story = imageStoryText(source);
+        if (!story) return;
+        const req = request('after', story), signature = String(msg.swipe_id) + source + req.system + req.user;
+        if (seen.get(msg) === signature) return;
+        seen.set(msg,signature);
+        const forget=()=>{if(seen.get(msg)===signature)seen.delete(msg);};
+        const chatId = c.getCurrentChatId?.() ?? c.chatId, swipe = msg.swipe_id;
+        const current = () => { const now=getContext();return !stopped && (now.getCurrentChatId?.() ?? now.chatId) === chatId && now.chat?.[id] === msg && msg.swipe_id === swipe && String(msg.mes || '') === source; };
+        const max = JSON.parse(req.user).imageLimit;
+        onRequest(req);
+        let response;
+        try { response = pickJson(await askLLM(req.system, req.user, {maxTokens:1200+1600*max})); }
+        catch(e) { if (current()) warn('自动插图没写出来：'+e.message);forget();return; }
+        if (!current()) return;
+        const items = Array.isArray(response?.images) ? response.images : [];
+        const selected = [];
+        for (const item of items) {
+            if (selected.length >= max) break;
+            try {
+                let tags, anchor, plan;
+                if (Array.isArray(item?.characters)) {
+                    const compiled = compileIllustrationPlan(item,roster(),story);
+                    tags=illustrationMarkerText(compiled);anchor=compiled.summary.source;plan=item;
+                } else {
+                    // Keep older user-written prompts usable, with an actual story anchor.
+                    anchor=String(item?.source || item?.after || '').trim();
+                    if(anchor.length<4 || !story.includes(anchor))throw new Error('画面定位句不在正文中');
+                    tags=cleanImageTags(item?.tags);resolveImageCharacters(tags,roster());
+                }
+                if(!tags)throw new Error('图片标签为空');
+                if(tags.includes(cfg.start)||tags.includes(cfg.end))throw new Error('标签包含当前生图分隔符，请调整标签或分隔符');
+                const raw=cfg.start+tags+cfg.end;
+                if(selected.some(s=>s.raw===raw)){warn('跳过重复的画面方案');continue;}
+                selected.push({raw,anchor,plan});
+            } catch(e) { warn('跳过一张无效画面：'+e.message); }
+        }
+        if (!selected.length) { warn('没有可用的画面方案；请检查提示词输出格式或重新生成正文');forget();return; }
+        // Locate against the original story once. Preserve order for images sharing an anchor.
+        const insertions = new Map();
+        for(const shot of selected){const at=imageInsertionPoint(source,shot.anchor);insertions.set(at,(insertions.get(at)||'')+'\n'+shot.raw+'\n');}
+        let next=source;
+        for(const [at,text] of [...insertions].sort((a,b)=>b[0]-a[0]))next=next.slice(0,at)+text+next.slice(at);
+        if(!current())return;
+        const swipes=Array.isArray(msg.swipes)&&Number.isInteger(swipe)?msg.swipes:null,oldSwipe=swipes?.[swipe];
+        const hadExtra=!!msg.extra;msg.extra||={};const oldPlans=msg.extra.zhikuIllustrations;
+        msg.extra.zhikuIllustrations=selected.filter(s=>s.plan).map(s=>({raw:s.raw,plan:s.plan}));
+        msg.mes=next;if(swipes)swipes[swipe]=next;
+        try{await getContext().saveChat();}
+        catch(e){msg.mes=source;if(swipes)swipes[swipe]=oldSwipe;if(oldPlans===undefined)delete msg.extra.zhikuIllustrations;else msg.extra.zhikuIllustrations=oldPlans;if(!hadExtra&&!Object.keys(msg.extra).length)delete msg.extra;forget();warn('自动插图存不进聊天：'+e.message);return;}
+        const now=getContext();
+        if(stopped || (now.getCurrentChatId?.()??now.chatId)!==chatId || now.chat?.[id]!==msg || msg.swipe_id!==swipe)return;
+        now.updateMessageBlock?.(id,msg);afterSave(id);
+    }
+    return {sync,after,stop(){stopped=true;getContext().setExtensionPrompt?.('zhiku_illust','',1,0,false,0);}};
+}
+
+
+function renderIllustrationEditor(options, draft, hasRequest, esc) {
+    return `<section class="pc-illust-editor pc-mt">
+      <style>.pc-illust-editor textarea,.pc-illust-request{scrollbar-width:none;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}.pc-illust-editor textarea::-webkit-scrollbar,.pc-illust-request::-webkit-scrollbar{display:none}.pc-illust-editor textarea{min-height:240px;width:100%;box-sizing:border-box}.pc-illust-request{max-height:65vh;font-size:14px;line-height:1.6}</style>
+      <label class="pc-field"><span>正文转生图提示词 · SFW / NSFW 共用</span><textarea class="pc-textarea" data-bind="illustPromptDraft" rows="10">${esc(draft ?? illustrationPrompt(options))}</textarea></label>
+      <div class="pc-actions wrap"><button class="pc-btn dark" data-act="illprompt-save">保存提示词</button><button class="pc-btn" data-act="illprompt-default">恢复默认</button><button class="pc-btn" data-act="illprompt-preview">预览当前请求</button><button class="pc-btn" data-act="illprompt-last" ${hasRequest?'':'disabled'}>最近组装的请求</button></div>
+      <div class="pc-hint">保存后用于下一次自动插图；恢复默认先填回编辑框，保存才生效。两种分级都填写姿势、视线、站位、互动与构图。张数沿用上面的选择。修改输出格式时请保留画面字段。预览不发请求、不生图。</div>
+    </section>`;
+}
+
+function createIllustrationEditor({ getOptions, getDraft, setDraft, commit, render, roster, settings, context, lastRequest, showRequest, notify }) {
+    return async function action(name) {
+        if (name === 'illprompt-default') { setDraft(DEFAULT_ILLUSTRATION_PROMPT);render();return; }
+        if (name === 'illprompt-save') {
+            const options=getOptions(), before=options.illustPrompt;
+            saveIllustrationPrompt(options,getDraft() ?? illustrationPrompt(options));
+            try { await commit({immediate:true}); }
+            catch(e) { if(before===undefined)delete options.illustPrompt;else options.illustPrompt=before;throw e; }
+            setDraft(undefined);render();notify('生图提示词已保存，下一次自动插图使用');return;
+        }
+        if (name === 'illprompt-last') { const request=lastRequest();if(request)showRequest(request,'最近组装的插图请求');return; }
+        if (name === 'illprompt-preview') {
+            const options=getOptions(),mode=options.illustMode==='inline'?'inline':'after',cfg=settings();
+            const latest=[...(context().chat||[])].reverse().find(m=>!m.is_user&&!m.is_system);
+            showRequest(illustrationRequest({options,mode,roster:roster(),markers:{start:cfg.start,end:cfg.end},story:imageStoryText(latest?.mes),prompt:getDraft()??illustrationPrompt(options)}),'当前编辑内容的请求预览');
+        }
+    };
+}
+
+let illustrationLastRequest = null;
 // Per-image protocol adapter. Never use the surrounding message as the image cast.
 function imageCharacterNames(character) {
     return [character.name, ...String(character.name || '').split('|'), ...String(character.aliases || '').split(/[,，、;；|]+/)]
@@ -22,12 +278,12 @@ function parseCharacterToken(value) {
         if (typeof data.name !== 'string' || !data.name.trim() || typeof data.angle !== 'string') {
             throw new Error('角色标记需要 name 和 angle；服装标记请先换成英文服装标签');
         }
-        return { name: data.name.trim(), angle: data.angle.trim() };
+        return { name: data.name.trim(), angle: data.angle.trim(), nsfw: [data.upperBody, data.lowerBody].some(v => String(v).toLowerCase() === 'nsfw') };
     }
     const match = text.match(/^(.+?)-(?:sfw|nsfw)-(?:upperbody|lowerbody)(?:-(?:sfw|nsfw)-(?:lowerbody|fullbody))?$/i);
     if (!match) throw new Error('角色标记请使用 $名字-sfw-upperbody$ 或带 name、angle 的 JSON');
     const angle = match[1].match(/(?:[,，\s-]+)(from (?:front|behind|side))$/i);
-    return { name: (angle ? match[1].slice(0, angle.index) : match[1]).trim(), angle: angle?.[1] || '' };
+    return { name: (angle ? match[1].slice(0, angle.index) : match[1]).trim(), angle: angle?.[1] || '', nsfw: /-nsfw-/i.test(text.slice(match[1].length)) };
 }
 
 function resolveImageCharacters(prompt, roster) {
@@ -41,13 +297,16 @@ function resolveImageCharacters(prompt, roster) {
         return enabled[0].char;
     };
     const picks = [], cast = [];
+    let nsfw = false;
     function parsePart(text, uc = '', center = null) {
         const tokens = [...text.matchAll(/\$([^$]+)\$/g)];
+        if (/(?:^|[,;\s])nsfw(?:$|[,;\s])/i.test(text.replace(/\$[^$]+\$/g, ''))) nsfw = true;
         // Reject broken placeholders before paying for a request.
         if (text.replace(/\$[^$]+\$/g, '').includes('$')) throw new Error('角色标记缺少配对的 $，请编辑这张图的提示词');
         if (!tokens.length) return clean(text);
         for (let i = 0; i < tokens.length; i++) {
             const token = parseCharacterToken(tokens[i][1]);
+            nsfw ||= token.nsfw;
             const char = matchCharacter(token.name);
             const tags = [token.angle, clean(text.slice(tokens[i].index + tokens[i][0].length, tokens[i + 1]?.index ?? text.length))].filter(Boolean).join(', ');
             const existing = picks.find(p => p.char === char);
@@ -81,6 +340,11 @@ function resolveImageCharacters(prompt, roster) {
         }
     } else scene = parsePart(text);
     picks.forEach((p, i) => { p.x ??= (i + 1) / (picks.length + 1); p.y ??= 0.5; });
+    if (nsfw) {
+        const withoutRating = value => value.split(',').map(t => t.trim()).filter(t => t && !/^(?:sfw|nsfw)$/i.test(t)).join(', ');
+        scene = ['nsfw', withoutRating(scene)].filter(Boolean).join(', ');
+        picks.forEach(p => { p.tags = withoutRating(p.tags); });
+    }
     return { scene, picks, cast };
 }
 
@@ -125,7 +389,7 @@ function imageInsertionPoint(text, sentence) {
     return last.start + last.text.trimEnd().length;
 }
 
-// 智库 · 原生扩展版 v0.8.12（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.13（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -143,7 +407,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.12';
+globalThis.__PC_VERSION = '0.8.13';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -2308,9 +2572,12 @@ function castIn(text) {
     return currentCast().filter(x => x.on && fixedTags(x.char) && namesOf(x.char).some(n => t.includes(n))).map(x => x.char);
 }
 /** 每张图独立解析角色；周围正文只用于选镜头，不参与入画名单。 */
-function markerPrompt(prompt) {
-    const parsed = resolveImageCharacters(prompt, currentCast());
-    return { ...buildChatPrompt(parsed.scene, parsed.picks), cast: parsed.cast };
+function markerPrompt(prompt, { story } = {}) {
+    const plan = readIllustrationPlan(prompt);
+    const parsed = plan ? compileIllustrationPlan(plan, currentCast(), story === undefined ? undefined : imageStoryText(story)) : resolveImageCharacters(prompt, currentCast());
+    const built = buildChatPrompt(parsed.scene, parsed.picks);
+    const rating = plan?.rating?.toLowerCase() || (/^nsfw(?:,|$)/i.test(parsed.scene) ? 'nsfw' : undefined);
+    return { ...built, positive: applyIllustrationRating(built.positive, rating), cast: parsed.cast };
 }
 
 /** 「会发送的内容」预览（不调 AI，只看角色那部分） */
@@ -2568,7 +2835,10 @@ function createMarkerController({context,getData,generate,upload,notify,document
             slot.dataset.pcReady=ready;
             slot.replaceChildren();
             const details=doc.createElement('details'),summary=doc.createElement('summary'),pre=doc.createElement('pre'),button=doc.createElement('button');
-            summary.textContent='图片提示词';pre.textContent=token.prompt;
+            const effectivePrompt=record?.prompt??token.prompt;
+            const plan=effectivePrompt===token.prompt?msg.extra?.zhikuIllustrations?.find(item=>item.raw===token.raw)?.plan:undefined;
+            summary.textContent=plan?.title?'画面方案 · '+plan.title:'图片提示词';
+            pre.textContent=(plan?`瞬间：${plan.moment}\n原句：${plan.source}\n分级：${plan.rating}\n\n`:'')+effectivePrompt;
             details.append(summary,pre);button.type='button';button.className='pc-marker-generate';button.title='点击生成，长按编辑提示词';
             button.disabled=!!state(msg,token);button.textContent=label(msg,token,record);
             button.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(button._pcHeld)return;void process(Number(id),{manual:true,tokenIndex:index});});
@@ -2745,7 +3015,10 @@ function createMarkerController({context,getData,generate,upload,notify,document
                 entry.state='生成中…';decorate(id);
                 try {
                     const prompt=promptOverride??findRecord(msg,token)?.prompt??token.prompt;
-                    const image=await generate(prompt);if(!current())return 0;
+                    // Story is only evidence for a structured shot's source quote, never a cast lookup.
+                    let story=source;
+                    for(const marker of [...all].reverse())story=story.slice(0,marker.index)+story.slice(marker.index+marker.raw.length);
+                    const image=await generate(prompt,{story});if(!current())return 0;
                     entry.state='保存中…';decorate(id);
                     const {url}=await upload(image,'marker_'+Date.now());if(!current())return 0;
                     if(!url)throw new Error('图片上传未返回地址');
@@ -2850,9 +3123,9 @@ async function pcRecordImage({ dataUrl, url, raw = '', sent = null, from }) {
 let pcMarkerRaw = '';
 const __mod_marker=createMarkerController({
         context:()=>SillyTavern.getContext(),getData:__mod_store.getData,document:DOC,
-        generate:async prompt=>{const d=__mod_store.getData();pcMarkerRaw=prompt;
+        generate:async (prompt,where)=>{const d=__mod_store.getData();pcMarkerRaw=prompt;
             // 外貌、负面词和参考图都来自这一张图的角色标记
-            const hit=__mod_chars.markerPrompt(prompt);
+            const hit=__mod_chars.markerPrompt(prompt,where);
             const {positive,negative,chars}=hit||__mod_engine.composeStudio({pos:__mod_model.mergeTags(d.active?__mod_model.ticketString(d,d.active):'',prompt),neg:[d.active?__mod_model.ticketNeg(d,d.active):'',d.options.chatNegative||''].filter(Boolean).join(', ')});
             const bound=[...new Set((hit?.cast||[]).map(ch=>ch.charRef).filter(id=>id&&d.charRefGroups?.[id]))];
             const image=await __mod_engine.generateFull({positive,negative,...(chars?.length?{chars}:{}),director:bound.length?await __mod_engine.charRefs(bound):null});__mod_engine.afterChatImage();return image;},
@@ -4932,6 +5205,17 @@ function setFold(key, title, status, body, open = false) {
     return `<details class="pc-fold" data-sfold="${key}" ${isOpen ? 'open' : ''}><summary><b>${esc(title)}</b><i>${status}</i></summary><div class="pc-fold-in">${body}</div></details>`;
 }
 
+const illustrationEditor = createIllustrationEditor({
+    getOptions: () => getData().options, getDraft: () => ui.illustPromptDraft, setDraft: value => { ui.illustPromptDraft = value; },
+    commit, render, roster: () => C.currentCast(), settings: () => __mod_marker.settings(), context: () => SillyTavern.getContext(),
+    lastRequest: () => illustrationLastRequest, notify: message => toastr.success(message, '智库'),
+    showRequest: (request, title) => {
+        const text = request.mode === 'inline' ? request.injection : 'SYSTEM\n' + request.system + '\n\nUSER\n' + request.user;
+        const box = modal(`<h3 class="pc-h3">${esc(title)}</h3><p class="pc-hint">${request.mode === 'inline' ? '这里是智库注入的完整内容；酒馆另行组合聊天预设与对话。' : '这是正文转画面方案的完整 system / user 内容。'}不包含 API 密钥。</p><pre class="pc-illust-request">${esc(text)}</pre><button class="pc-btn dark" data-illclose>关闭</button>`);
+        box.querySelector('[data-illclose]').onclick = () => box.closeModal();
+    },
+});
+
 function viewSettings(d) {
     const sw = (key, text, small = '') => `<label class="pc-switch"><input type="checkbox" data-opt="${key}" ${d.options[key] ? 'checked' : ''}><span></span>${esc(text)}${small ? `<small>${esc(small)}</small>` : ''}</label>`;
     const n = settingsST();
@@ -4981,9 +5265,10 @@ function viewSettings(d) {
       <label class="pc-field"><span>标记生图额外负面词</span><input data-optstr="chatNegative" value="${esc(d.options.chatNegative || '')}"></label>
       <div class="pc-row-between pc-mt-s"><b>正文自动插图</b><span class="pc-dim small">不用另挂生图世界书</span></div>
       <div class="pc-seg three">${[['off', '关'], ['inline', '跟正文一起写'], ['after', '写完再请求']].map(([v, t]) => `<button class="${(d.options.illustMode || 'off') === v ? 'on' : ''}" data-act="illmode" data-mode="${v}">${t}</button>`).join('')}</div>
-      <div class="pc-hint">${d.options.illustMode === 'inline' ? '每次发消息时告诉聊天 AI：在有画面感的地方顺手写一行生图标记。不多花请求，但要模型听话；破限或预设管得很死的话可能不写。' : d.options.illustMode === 'after' ? '回复写完后，用「AI」设置里选的 API 另外请求一次，挑画面写标签，插回正文。多一次请求，但不改聊天 AI 的输出，跟智绘姬的「自动 LLM 请求生图」一样。' : '打开后不用自己写标记，回复里会自动出现生图标记，再按上面的开关自动出图。'}</div>
+      <div class="pc-hint">${d.options.illustMode === 'inline' ? '每次发消息时告诉聊天 AI：在有画面感的地方顺手写一行生图标记。不多花请求，但要模型听话；破限或预设管得很死的话可能不写。' : d.options.illustMode === 'after' ? '回复写完后，用「AI」设置里选的 API 另外请求一次，先整理瞬间、人物姿势和镜头构图，再转成标签插回正文。多一次请求，但不改聊天 AI 的输出，跟智绘姬的「自动 LLM 请求生图」一样。' : '打开后不用自己写标记，回复里会自动出现生图标记，再按上面的开关自动出图。'}</div>
       ${d.options.illustMode && d.options.illustMode !== 'off' ? `<label class="pc-field"><span>每条回复最多几张</span><select data-illmax>${[1, 2, 3].map(n => `<option value="${n}" ${(Number(d.options.illustMax) || 1) === n ? 'selected' : ''}>${n}</option>`).join('')}</select></label>` : ''}`);
 
+    const illustEditor = renderIllustrationEditor(d.options, ui.illustPromptDraft, !!illustrationLastRequest, esc);
     const nightMode = d.options.nightMode || 'day';
     const look = setFold('look', '外观', { day: '日间', night: '夜间', auto: '跟随酒馆' }[nightMode] || '日间', `
       <div class="pc-seg three">${[['day', '日间'], ['night', '夜间'], ['auto', '跟随酒馆']].map(([v, t]) => `<button class="${nightMode === v ? 'on' : ''}" data-act="nightmode" data-mode="${v}">${t}</button>`).join('')}</div>
@@ -5027,7 +5312,7 @@ function viewSettings(d) {
         <div class="pc-actions wrap"><a class="pc-btn dark" href="https://github.com/ruoege49-ship-it/zhiku-tavern-helper" target="_blank" rel="noopener">仓库 / 更新</a><a class="pc-btn" href="https://github.com/damoshen123/st-chatu8" target="_blank" rel="noopener">智绘姬原仓库</a></div></div>
       <div class="pc-about-note">看图提取需要能识图的模型 · 原脚本 AFPL v9，署名保留</div>`);
 
-    return `<h2 class="pc-pagetitle">设置</h2><div class="pc-marker-primary" style="padding:16px;margin-bottom:16px;border-radius:14px;background:var(--SmartThemeBlurTintColor,rgba(128,128,128,.12))">${sw('markerAuto', '开启标记自动生图', '默认开启 · 回复出现完整生图标记时自动生成，提示词默认折叠')}${sw('imageExpanded', '图片默认展开', '开启：默认展开；关闭：默认折叠。立即应用到当前图片，并记住选择。')}</div>${chat}${nai}${ai}${tpl}${look}${entry}${share}${ban}${data}${about}<div style="height:24px"></div>`;
+    return `<h2 class="pc-pagetitle">设置</h2><div class="pc-marker-primary" style="padding:16px;margin-bottom:16px;border-radius:14px;background:var(--SmartThemeBlurTintColor,rgba(128,128,128,.12))">${sw('markerAuto', '开启标记自动生图', '默认开启 · 回复出现完整生图标记时自动生成，提示词默认折叠')}${sw('imageExpanded', '图片默认展开', '开启：默认展开；关闭：默认折叠。立即应用到当前图片，并记住选择。')}</div>${chat}${illustEditor}${nai}${ai}${tpl}${look}${entry}${share}${ban}${data}${about}<div style="height:24px"></div>`;
 }
 
 const VIEWS = { cast: viewCast, charedit: viewCharEdit, outfit: viewOutfit, studio: viewStudio, book: viewBook, artist: viewArtist, group: viewGroup, batch: viewBatch, vibe: viewVibe, lobby: viewLobby, settings: viewSettings };
@@ -5104,6 +5389,8 @@ async function onClick(ev, outside = false) {
                 break;
             }
             case 'naimode': { const n = N.settings(); n.naiMode = el.dataset.mode; N.save(); ui.naiTest = null; render(); break; }
+            case 'illprompt-save': case 'illprompt-default': case 'illprompt-preview': case 'illprompt-last':
+                await illustrationEditor(act); break;
             case 'illmode': { getData().options.illustMode = el.dataset.mode; commit(); render(); break; }
             case 'nightmode': { getData().options.nightMode = el.dataset.mode; commit(); render(); break; }
             case 'imgstore': { getData().options.imageStore = el.dataset.mode; commit(); render(); break; }
@@ -6659,70 +6946,19 @@ async function start() {
     const onUserRendered = id => { onRendered(id); };
     const onEdited = id => { onRendered(id); };
     // 正文自动插图
-    const ILLUST_KEY = 'zhiku_illust';
-    const illustMax = () => Math.min(3, Math.max(1, Number(getData().options.illustMax) || 1));
-    const syncIllust = type => {
-        const c = SillyTavern.getContext(), m = __mod_marker.settings();
-        if (typeof c.setExtensionPrompt !== 'function') return;
-        // 别的插件在后台悄悄生成（总结之类）时不加
-        const on = type !== 'quiet' && getData().options.illustMode === 'inline' && m.start && m.end;
-        const max = illustMax();
-        // 候选名单交给模型；每张图用明确的角色标记选择外貌
-        const known = on ? C.currentCast().filter(x => x.on && C.fixedTags(x.char)).map(x => x.char.name) : [];
-        // 放在聊天里、最后一条消息后面（IN_CHAT, depth 0），以系统身份
-        c.setExtensionPrompt(ILLUST_KEY, on ? `[插图] 这次回复的正文里，挑${max === 1 ? '一处' : `最多 ${max} 处`}关键情绪或行动的决定性瞬间，在对应段落后另起一行：${m.start}画面标签${m.end}
-每张图固定一个瞬间，不描述连续动作。人数、衣服、动作、表情、场景、光线和构图用英文 Danbooru 标签，英文逗号分隔。不写画师或画质词。${imageCastInstruction(known)}角色标记中的名字可以用中文，其余标签用英文。只从 <content>...</content> 正文选镜头（没有该标签时使用普通正文），忽略思考、状态栏和名单。其余正文照常写。` : '', 1, 0, false, 0);
-    };
+    const illustrationPlanner = createIllustrationPlanner({
+        getContext: () => SillyTavern.getContext(), getData, settings: () => __mod_marker.settings(), roster: () => C.currentCast(),
+        askLLM: (...args) => __mod_translate.askLLM(...args), pickJson: text => __mod_translate.pickJson(text),
+        warn: message => toastr.warning(message, '智库 · 自动插图', {timeOut:6000}),
+        onRequest: request => { illustrationLastRequest = request; },
+        afterSave: id => setTimeout(() => { addMesButtons(); void __mod_marker.process(id); }, 0),
+    });
+    const syncIllust = type => illustrationPlanner.sync(type);
+    const illustAfter = id => illustrationPlanner.after(id);
     syncIllust();
     cleanups.push(onChange(syncIllust));
-    // 改了标记写法（不通知）也跟上：每次开始生成前再同步一次
     if (event_types.GENERATION_STARTED) { eventSource.on(event_types.GENERATION_STARTED, syncIllust); cleanups.push(() => eventSource.removeListener?.(event_types.GENERATION_STARTED, syncIllust)); }
-    cleanups.push(() => { try { SillyTavern.getContext().setExtensionPrompt?.(ILLUST_KEY, '', 1, 0, false, 0); } catch {} });
-    const illustSeen = new WeakMap();
-    const illustAt = imageInsertionPoint;
-    const illustAfter = async id => {
-        const d = getData(), m = __mod_marker.settings();
-        if (d.options.illustMode !== 'after' || !m.start || !m.end) return;
-        const c = SillyTavern.getContext(), msg = c.chat?.[id];
-        if (!msg || msg.is_user || msg.is_system || id !== c.chat.length - 1) return;
-        const source = String(msg.mes || '');
-        if (!source.trim() || parseImageMarkers(source, m.start, m.end).length) return;
-        const seen = `${msg.swipe_id}|${source}`;
-        if (illustSeen.get(msg) === seen) return;
-        illustSeen.set(msg, seen);
-        const chatAt = c.getCurrentChatId?.(), max = illustMax();
-        const plain = imageStoryText(source).replace(/\n{3,}/g, '\n\n').slice(0, 8000);
-        if (!plain) return;
-        const named = C.currentCast().filter(x => x.on && C.fixedTags(x.char)).map(x => x.char.name);
-        const cast = imageCastInstruction(named);
-        const sys = `你是插画分镜师，给一段小说正文配插图。挑${max === 1 ? ' 1 ' : `最多 ${max} `}个最有画面感的瞬间，每个写成 NovelAI 用的英文 Danbooru 标签。
-每张图选一个情绪或行动的决定性瞬间，不写连续动作。标签写人数、此刻的衣服、动作、表情、场景、光线、构图。不写画师或画质词。按用户提供的候选角色规则逐图写角色标记，只有标记中的名字可以用中文，其余用英文。
-"after" 必须从正文里原样复制一小句（10 到 30 个字），图会插在这句所在那一行的后面。
-只输出 JSON：{"images": [{"after": "正文原句", "tags": "英文标签"}]}`;
-        let j;
-        try { j = __mod_translate.pickJson(await __mod_translate.askLLM(sys, `${cast ? cast + '\n\n' : ''}正文：\n${plain}`, { maxTokens: 900 + 200 * max })); }
-        catch (e) { toastr.warning('自动插图没写出来：' + e.message, '智库', { timeOut: 6000 }); return; }
-        const now = SillyTavern.getContext();
-        if (now.getCurrentChatId?.() !== chatAt || now.chat?.[id] !== msg || String(msg.mes || '') !== source) return;
-        let next = source, n = 0;
-        for (const it of (Array.isArray(j.images) ? j.images : []).slice(0, max)) {
-            let tags;
-            try { tags = cleanImageTags(it?.tags); resolveImageCharacters(tags, C.currentCast()); }
-            catch (e) { toastr.warning(e.message, '自动插图'); continue; }
-            if (!tags) continue;
-            const mark = `\n${m.start}${tags}${m.end}\n`;
-            const at = illustAt(next, it?.after);
-            next = at < 0 ? next.replace(/\s+$/, '') + mark : next.slice(0, at) + mark + next.slice(at);
-            n++;
-        }
-        if (!n) return;
-        const swipes = Array.isArray(msg.swipes) && Number.isInteger(msg.swipe_id) ? msg.swipes : null, oldSwipe = swipes?.[msg.swipe_id];
-        msg.mes = next; if (swipes) swipes[msg.swipe_id] = next;
-        try { await now.saveChat(); }
-        catch (e) { msg.mes = source; if (swipes) swipes[msg.swipe_id] = oldSwipe; toastr.error('自动插图存不进聊天：' + (e.message || e), '智库'); return; }
-        now.updateMessageBlock(id, msg);
-        setTimeout(() => { addMesButtons(); void __mod_marker.process(id); }, 0);
-    };
+    cleanups.push(() => { illustrationPlanner.stop(); illustrationLastRequest = null; });
     const onCharMsg = id => {
         setTimeout(addMesButtons, 50);
         setTimeout(() => { void __mod_marker.process(Number(id)); }, 0);

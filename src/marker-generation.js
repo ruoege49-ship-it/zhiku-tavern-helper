@@ -63,7 +63,10 @@ export function createMarkerController({context,getData,generate,upload,notify,d
             slot.dataset.pcReady=ready;
             slot.replaceChildren();
             const details=doc.createElement('details'),summary=doc.createElement('summary'),pre=doc.createElement('pre'),button=doc.createElement('button');
-            summary.textContent='图片提示词';pre.textContent=token.prompt;
+            const effectivePrompt=record?.prompt??token.prompt;
+            const plan=effectivePrompt===token.prompt?msg.extra?.zhikuIllustrations?.find(item=>item.raw===token.raw)?.plan:undefined;
+            summary.textContent=plan?.title?'画面方案 · '+plan.title:'图片提示词';
+            pre.textContent=(plan?`瞬间：${plan.moment}\n原句：${plan.source}\n分级：${plan.rating}\n\n`:'')+effectivePrompt;
             details.append(summary,pre);button.type='button';button.className='pc-marker-generate';button.title='点击生成，长按编辑提示词';
             button.disabled=!!state(msg,token);button.textContent=label(msg,token,record);
             button.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(button._pcHeld)return;void process(Number(id),{manual:true,tokenIndex:index});});
@@ -240,7 +243,10 @@ export function createMarkerController({context,getData,generate,upload,notify,d
                 entry.state='生成中…';decorate(id);
                 try {
                     const prompt=promptOverride??findRecord(msg,token)?.prompt??token.prompt;
-                    const image=await generate(prompt);if(!current())return 0;
+                    // Story is only evidence for a structured shot's source quote, never a cast lookup.
+                    let story=source;
+                    for(const marker of [...all].reverse())story=story.slice(0,marker.index)+story.slice(marker.index+marker.raw.length);
+                    const image=await generate(prompt,{story});if(!current())return 0;
                     entry.state='保存中…';decorate(id);
                     const {url}=await upload(image,'marker_'+Date.now());if(!current())return 0;
                     if(!url)throw new Error('图片上传未返回地址');
