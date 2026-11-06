@@ -12,12 +12,12 @@ export function parseCharacterToken(value) {
         if (typeof data.name !== 'string' || !data.name.trim() || typeof data.angle !== 'string') {
             throw new Error('角色标记需要 name 和 angle；服装标记请先换成英文服装标签');
         }
-        return { name: data.name.trim(), angle: data.angle.trim() };
+        return { name: data.name.trim(), angle: data.angle.trim(), nsfw: [data.upperBody, data.lowerBody].some(v => String(v).toLowerCase() === 'nsfw') };
     }
     const match = text.match(/^(.+?)-(?:sfw|nsfw)-(?:upperbody|lowerbody)(?:-(?:sfw|nsfw)-(?:lowerbody|fullbody))?$/i);
     if (!match) throw new Error('角色标记请使用 $名字-sfw-upperbody$ 或带 name、angle 的 JSON');
     const angle = match[1].match(/(?:[,，\s-]+)(from (?:front|behind|side))$/i);
-    return { name: (angle ? match[1].slice(0, angle.index) : match[1]).trim(), angle: angle?.[1] || '' };
+    return { name: (angle ? match[1].slice(0, angle.index) : match[1]).trim(), angle: angle?.[1] || '', nsfw: /-nsfw-/i.test(text.slice(match[1].length)) };
 }
 
 export function resolveImageCharacters(prompt, roster) {
@@ -31,13 +31,16 @@ export function resolveImageCharacters(prompt, roster) {
         return enabled[0].char;
     };
     const picks = [], cast = [];
+    let nsfw = false;
     function parsePart(text, uc = '', center = null) {
         const tokens = [...text.matchAll(/\$([^$]+)\$/g)];
+        if (/(?:^|[,;\s])nsfw(?:$|[,;\s])/i.test(text.replace(/\$[^$]+\$/g, ''))) nsfw = true;
         // Reject broken placeholders before paying for a request.
         if (text.replace(/\$[^$]+\$/g, '').includes('$')) throw new Error('角色标记缺少配对的 $，请编辑这张图的提示词');
         if (!tokens.length) return clean(text);
         for (let i = 0; i < tokens.length; i++) {
             const token = parseCharacterToken(tokens[i][1]);
+            nsfw ||= token.nsfw;
             const char = matchCharacter(token.name);
             const tags = [token.angle, clean(text.slice(tokens[i].index + tokens[i][0].length, tokens[i + 1]?.index ?? text.length))].filter(Boolean).join(', ');
             const existing = picks.find(p => p.char === char);
@@ -71,6 +74,11 @@ export function resolveImageCharacters(prompt, roster) {
         }
     } else scene = parsePart(text);
     picks.forEach((p, i) => { p.x ??= (i + 1) / (picks.length + 1); p.y ??= 0.5; });
+    if (nsfw) {
+        const withoutRating = value => value.split(',').map(t => t.trim()).filter(t => t && !/^(?:sfw|nsfw)$/i.test(t)).join(', ');
+        scene = ['nsfw', withoutRating(scene)].filter(Boolean).join(', ');
+        picks.forEach(p => { p.tags = withoutRating(p.tags); });
+    }
     return { scene, picks, cast };
 }
 

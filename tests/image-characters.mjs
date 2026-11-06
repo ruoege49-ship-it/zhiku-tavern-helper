@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { resolveImageCharacters, imageStoryText, imageCastInstruction, cleanImageTags, imageInsertionPoint } from '../src/image-characters.js';
 import { createMarkerController } from '../src/marker-generation.js';
+import { readIllustrationPlan, compileIllustrationPlan, applyIllustrationRating } from '../src/illustration-plans.js';
 
 const names = ['小红', '小蓝', '小绿', '小白', '小黑'];
 const people = names.map((name, i) => ({ key: 'side:' + i, kind: 'side', card: 'card.png', name, aliases: i === 0 ? '红红|Red Rose' : '', appearance: [{en:'1girl'}, {en:`hair_${i}`}], negative:`bad_${i}`, outfits:[], outfitMode:'story', charRef:`ref_${i}` }));
@@ -46,7 +47,7 @@ const context={characters:[{name:'卡片',avatar:'card.png'}],characterId:0,chat
 const nai={naiMode:'direct',novelaimode:'nai-diffusion-4-5-full'};
 const buildParameters=vm.runInNewContext(source.match(/function buildParameters\([\s\S]*?\n}\n/)[0]+'\nbuildParameters',{settings:()=>nai,randomSeed:()=>42,skipSigma:()=>null,ucpValue:()=>''});
 const engine={composeStudio:({pos,neg})=>({positive:pos,negative:neg}),charRefs:async ids=>ids.map(id=>({key:id,data:id,type:'character',strength:0.6})),afterChatImage(){},async generateFull(opts){requests.push({chars:[],...opts,payload:buildParameters(opts)});return 'data:image/png;base64,test';}};
-const sandbox={structuredClone,console,SillyTavern:{getContext:()=>context},__mod_store:{getData:()=>d,commit(){},uploadImage:async()=>({url:'/test.png'}),imgUrl:u=>u},__mod_model:M,__mod_nai:{settings:()=>nai},__mod_engine:engine,__mod_translate:{},createMarkerController:o=>o,DOC:undefined,toastr:{info(){},error(){}},parseImageMarkers(){}};
+const sandbox={structuredClone,console,readIllustrationPlan,compileIllustrationPlan,applyIllustrationRating,SillyTavern:{getContext:()=>context},__mod_store:{getData:()=>d,commit(){},uploadImage:async()=>({url:'/test.png'}),imgUrl:u=>u},__mod_model:M,__mod_nai:{settings:()=>nai},__mod_engine:engine,__mod_translate:{},createMarkerController:o=>o,DOC:undefined,toastr:{info(){},error(){}},parseImageMarkers(){}};
 const chars=vm.runInNewContext(helperSource+'\n'+between('const __mod_chars =','// Marker-triggered generation')+'\n__mod_chars',sandbox);
 sandbox.__mod_chars=chars;
 const adapter=vm.runInNewContext(between("let pcMarkerRaw = ''",'const __mod_ui =')+'\n__mod_marker',sandbox);
@@ -81,25 +82,19 @@ for (const mode of [{naiMode:'tavern',novelaimode:'nai-diffusion-4-5-full'},{nai
     assert.equal(requests.at(-1).chars.length,0);assert.match(requests.at(-1).positive,/hair_0/);assert(!requests.at(-1).positive.includes('hair_1'));
 }
 controller.stop();
-// Exercise both prompt producers with the saved player selection (1 / 3).
-context.setExtensionPrompt=(key,text)=>{context.injected=text;};
-context.updateMessageBlock=()=>{};
-let llmInput='';
-const promptSandbox={...sandbox,ILLUST_KEY:'zhiku_illust',getData:()=>d,C:chars,imageStoryText,imageCastInstruction,cleanImageTags,resolveImageCharacters,imageInsertionPoint,
-    __mod_marker:{settings:()=>({start:'image###',end:'###'}),process(){}},
-    __mod_translate:{pickJson:JSON.parse,async askLLM(sys,user){llmInput=sys+'\n'+user;return JSON.stringify({images:names.map(name=>({after:'小蓝挥手。',tags:`$${name}-sfw-upperbody$, smiling`}))});}},
-    illustSeen:new WeakMap(),illustAt:imageInsertionPoint,parseImageMarkers:()=>[],addMesButtons(){},setTimeout(){},toastr:{warning(message){throw Error(message);},error(message){throw Error(message);}}};
-const prompts=vm.runInNewContext(between('    const illustMax =','    syncIllust();')+'\n'+between('    const illustAfter = async id =>','    const onCharMsg = id =>')+'\n({syncIllust,illustAfter})',promptSandbox);
-for (const max of [1,3]) {
-    d.options.illustMax=max;d.options.illustMode='inline';prompts.syncIllust();
-    assert(context.injected.includes(max===1?'一处':'最多 3 处'));assert.match(context.injected,/\$角色名字-sfw-upperbody\$/);
-    d.options.illustMode='after';context.chat=[{mes:story+`<!--run${max}-->`,swipe_id:0}];
-    await prompts.illustAfter(0);
-    const text=context.chat[0].mes;
-    assert.equal((text.match(/image###/g)||[]).length,max,'player choice controls generated marker count');
-    assert(text.includes('$小红-sfw-upperbody$'),'Chinese role names survive tag cleanup');
-    assert(text.lastIndexOf('image###')<text.indexOf('</content>'),'all inserts stay within the story');
-    assert(!llmInput.split('正文：\n')[1].includes('小黑'),'status roster is not story input');
-    assert.equal(M.normalizeData(JSON.parse(JSON.stringify(d))).options.illustMax,max,'player preference survives reload');
-}
+// A structured editor override reaches the actual character payload and reference selection.
+Object.assign(nai,{naiMode:'direct',novelaimode:'nai-diffusion-4-5-full'});
+const plan={source:'小红和小蓝交谈。',title:'交谈',moment:'两人交谈的一瞬间',rating:'sfw',scene:'garden',composition:{shot:'medium shot',camera:'eye level',layout:'balanced composition',lighting:'daylight'},interaction:'face to face',characters:[
+    {name:'小红',registered:true,gender:'girl',pose:'standing',action:'holding book',expression:'smiling',gaze:'looking at another',outfit:'coat',position:{x:0.3,y:0.5,depth:'foreground'}},
+    {name:'小蓝',registered:true,gender:'girl',pose:'sitting',action:'waving',expression:'surprised',gaze:'looking at another',outfit:'jacket',position:{x:0.7,y:0.5,depth:'midground'}}]};
+await adapter.generate(JSON.stringify(plan),{story:'<content>小红和小蓝交谈。</content>'});
+const shot=requests.at(-1);assert.equal(shot.payload.characterPrompts.length,2);assert.equal(shot.payload.characterPrompts[0].center.x,0.3);
+assert.match(shot.payload.characterPrompts[0].prompt,/standing.*holding book.*smiling.*looking at another/);
+assert.match(shot.positive,/sfw, 2girls, garden, medium shot, eye level/);assert.equal(shot.director.length,2);
+plan.rating='nsfw';await adapter.generate(JSON.stringify(plan),{story:plan.source});assert(requests.at(-1).positive.startsWith('nsfw,'));
+assert.equal(requests.at(-1).payload.characterPrompts[1].center.x,0.7,'same composition handling for both ratings');
+await assert.rejects(adapter.generate(JSON.stringify(plan),{story:'正文没有定位句'}),/定位句/);
+await adapter.generate('$小红-nsfw-upperbody$, standing');assert(requests.at(-1).positive.startsWith('nsfw,'),'legacy rating metadata survives character expansion');
+await adapter.generate('${"name":"小红","angle":"from front","upperBody":"nsfw","lowerBody":"hidden"}$, standing');assert(requests.at(-1).positive.startsWith('nsfw,'),'JSON body rating metadata survives');
+await adapter.generate('Scene Composition: sfw, library; Character 1 Prompt: $小红-sfw-upperbody$, standing; Character 1 UC: nsfw;');assert(!requests.at(-1).positive.startsWith('nsfw,'),'negative tags do not change positive content rating');
 console.log('Per-image cast, payload, references, story boundary, editing and reload checks passed.');
