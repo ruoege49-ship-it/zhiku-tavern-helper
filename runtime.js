@@ -8,7 +8,7 @@ function setTimeout(fn, delay, ...args) {
     timers.add(id); return id;
 }
 function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
-// 智库 · 原生扩展版 v0.8.10（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.11（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -26,7 +26,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.10';
+globalThis.__PC_VERSION = '0.8.11';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -307,11 +307,11 @@ function ensureArtist(data, tag) {
 }
 
 /** 由一段画师串建立：只有一位画师 → 单个画师；两位以上 → 画师组 */
-function createFromString(data, { name, text, note = '', collections = [], neg = '' }) {
+function createFromString(data, { name, text, note = '', collections = [], neg = '', forceGroup = false }) {
     const { members, extra } = parseArtistString(text);
     if (!members.length && !extra) return null;
     neg = String(neg || '').trim();
-    if (members.length === 1 && !extra && !neg && Math.abs(members[0].weight - 1) < 0.001) {
+    if (!forceGroup && members.length === 1 && !extra && !neg && Math.abs(members[0].weight - 1) < 0.001) {
         const a = ensureArtist(data, members[0].tag);
         if (note && !a.note) a.note = note;
         return { type: 'artist', id: a.id };
@@ -326,6 +326,17 @@ function createFromString(data, { name, text, note = '', collections = [], neg =
     return { type: 'group', id: g.id };
 }
 
+/** Overwrite only content; keep identity, examples, tags, notes and character bindings. */
+function overwriteGroup(data, ref, text, neg) {
+    const g = ref?.type === 'group' && data.groups[ref.id];
+    if (!g) throw new Error('原画师串已被删除，请另存为新串');
+    const raw = String(text || '').trim();
+    if (!raw) throw new Error('画师串是空的，请先填写再保存');
+    const p = parseArtistString(raw);
+    g.members = p.members.map(m => ({ artistId: ensureArtist(data, m.tag).id, weight: m.weight }));
+    g.extra = p.extra; g.raw = raw; g.neg = String(neg || '').trim();
+    return { type: 'group', id: g.id };
+}
 function groupsContaining(data, artistId) {
     return Object.values(data.groups).filter(g => g.members.some(m => m.artistId === artistId));
 }
@@ -513,7 +524,7 @@ function groupBanned(data, g) {
     return (g.members || []).map(m => data.artists[m.artistId]).filter(a => a && banInfo(data, a.tag));
 }
 
-return { DATA_VERSION, SHOTS, DEFAULT_TEMPLATES, shotOf, emptyData, normalizeData, uid, artistKey, normalizeArtistTag, fmtWeight, tokenize, parseArtistString, stripArtists, parseArtistList, parseBatchLines, findArtistByTag, ensureArtist, createFromString, groupsContaining, deleteArtist, deleteGroup, resolveTicket, ticketName, ticketString, ticketNeg, ticketCover, touchRecent, sameRef, rotationPool, nextInRotation, replaceArtists, findTicketForString, mergeTags, banInfo, setBan, unBan, bannedIn, groupBanned };
+return { DATA_VERSION, SHOTS, DEFAULT_TEMPLATES, shotOf, emptyData, normalizeData, uid, artistKey, normalizeArtistTag, fmtWeight, tokenize, parseArtistString, stripArtists, parseArtistList, parseBatchLines, findArtistByTag, ensureArtist, createFromString, overwriteGroup, groupsContaining, deleteArtist, deleteGroup, resolveTicket, ticketName, ticketString, ticketNeg, ticketCover, touchRecent, sameRef, rotationPool, nextInRotation, replaceArtists, findTicketForString, mergeTags, banInfo, setBan, unBan, bannedIn, groupBanned };
 })();
 
 // ───── store.js ─────
@@ -751,10 +762,10 @@ const MODELS = [
     ['nai-diffusion-5-curated', 'NAI Diffusion 5 Curated'],
 ];
 const SAMPLERS = [
-    ['k_euler_ancestral', 'Euler Ancestral（默认）'],
+    ['k_euler_ancestral', 'Euler Ancestral'],
     ['k_euler', 'Euler'],
     ['k_dpmpp_2s_ancestral', 'DPM++ 2S Ancestral'],
-    ['k_dpmpp_2m_sde', 'DPM++ 2M SDE'],
+    ['k_dpmpp_2m_sde', 'DPM++ 2M SDE（默认）'],
     ['k_dpmpp_2m', 'DPM++ 2M'],
     ['k_dpmpp_sde', 'DPM++ SDE'],
 ];
@@ -764,7 +775,7 @@ const DEFAULTS = {
     naiMode: 'key', naiKey: '', naiSite: '', naiSiteKey: '',
     novelaimode: 'nai-diffusion-4-5-full',
     novelai_width: '832', novelai_height: '1216', novelai_steps: '28', nai3Scale: '5', novelai_seed: '0',
-    novelai_sampler: 'k_euler_ancestral', Schedule: 'karras', cfg_rescale: '0', nai3Variety: 'false',
+    novelai_sampler: 'k_dpmpp_2m_sde', Schedule: 'karras', cfg_rescale: '0.18', nai3Variety: 'false',
     AQT_novelai: 'on', UCP_novelai: 'Heavy', addFurryDataset: 'false',
 };
 
@@ -773,6 +784,13 @@ function settings() {
     const all = extension_settings;
     if (!all[KEY]) all[KEY] = {};
     const s = all[KEY];
+    if (!s.samplingDefaultsV2) {
+        const oldDefault = (s.novelai_sampler == null || s.novelai_sampler === 'k_euler_ancestral')
+            && (s.Schedule == null || s.Schedule === 'karras') && (s.cfg_rescale == null || Number(s.cfg_rescale) === 0);
+        if (oldDefault) Object.assign(s, { novelai_sampler: 'k_dpmpp_2m_sde', Schedule: 'karras', cfg_rescale: '0.18' });
+        s.samplingDefaultsV2 = true;
+        saveSettingsDebounced();
+    }
     for (const [k, v] of Object.entries(DEFAULTS)) if (s[k] === undefined || s[k] === null) s[k] = v;
     return s;
 }
@@ -820,7 +838,7 @@ function buildParameters({ positive, negative, width, height, seed, chars = [], 
         params_version: isV5 ? 4 : 3,
         width: w, height: h,
         scale: Number(s.nai3Scale) || 5,
-        sampler: s.novelai_sampler || 'k_euler_ancestral',
+        sampler: s.novelai_sampler || 'k_dpmpp_2m_sde',
         steps: Number(s.novelai_steps) || 28,
         n_samples: 1,
         ucPreset: 3,
@@ -1183,9 +1201,9 @@ async function inpaintRequest({ image, mask, prompt, negative, width, height, st
     const seed = Number(s.novelai_seed) > 0 ? Number(s.novelai_seed) : randomSeed();
     const isV5 = model.includes('nai-diffusion-5');
     const parameters = {
-        width, height, scale: Number(s.nai3Scale) || 5, sampler: s.novelai_sampler || 'k_euler_ancestral', steps: Number(s.novelai_steps) || 28,
+        width, height, scale: Number(s.nai3Scale) || 5, sampler: s.novelai_sampler || 'k_dpmpp_2m_sde', steps: Number(s.novelai_steps) || 28,
         seed, n_samples: 1, image, mask, params_version: isV5 ? 4 : 3, prefer_brownian: true, autoSmea: false,
-        strength: 0.7, noise: 0, extra_noise_seed: seed, add_original_image: false, cfg_rescale: 0, controlnet_strength: 1,
+        strength: 0.7, noise: 0, extra_noise_seed: seed, add_original_image: false, cfg_rescale: Number(s.cfg_rescale) || 0, controlnet_strength: 1,
         deliberate_euler_ancestral_bug: false, dynamic_thresholding: false, legacy: false, legacy_uc: false, legacy_v3_extend: false,
         normalize_reference_strength_multiple: false, noise_schedule: s.Schedule || 'karras', qualityToggle: true, skip_cfg_above_sigma: 19,
         ucPreset: 0, use_coords: false, image_format: 'png', img2img: { strength, color_correct: true }, inpaintImg2ImgStrength: strength,
@@ -2896,9 +2914,12 @@ function loadStudio() {
     const d = getData();
     const saved = d.studio || {};
     st.pos = saved.pos ?? (d.active ? M.ticketString(d, d.active) : '');
-    st.neg = saved.neg ?? '';
-    st.lastExtra = saved.lastExtra || '';
-    st.lastNeg = saved.lastNeg || '';
+    const exact = Object.values(d.groups).find(g => M.ticketString(d, {type:'group',id:g.id}).trim() === st.pos.trim() && String(g.neg || '').trim() === String(saved.neg || '').trim());
+    st.sourceRef = M.resolveTicket(d, saved.sourceRef) ? { ...saved.sourceRef }
+        : saved.sourceRef === undefined ? (saved.pos == null && d.active ? { ...d.active } : exact ? {type:'group',id:exact.id} : null) : null;
+    st.neg = saved.neg ?? M.ticketNeg(d, st.sourceRef);
+    st.lastExtra = saved.lastExtra ?? (st.sourceRef?.type === 'group' ? d.groups[st.sourceRef.id]?.extra || '' : '');
+    st.lastNeg = saved.lastNeg ?? M.ticketNeg(d, st.sourceRef);
     st.scene = saved.scene || '';
     st.sceneOn = saved.sceneOn !== false;
     st.sceneEn = saved.sceneEn || '';
@@ -2909,14 +2930,48 @@ function loadStudio() {
 function saveStudio() {
     const d = getData();
     const st = ui.studio;
-    d.studio = { pos: st.pos, neg: st.neg, lastExtra: st.lastExtra, lastNeg: st.lastNeg || '', scene: st.scene || '', sceneOn: st.sceneOn !== false, sceneEn: st.sceneEn || '', sceneSrc: st.sceneSrc || '', sceneExpand: !!st.sceneExpand };
+    d.studio = { sourceRef: st.sourceRef || null, pos: st.pos, neg: st.neg, lastExtra: st.lastExtra, lastNeg: st.lastNeg || '', scene: st.scene || '', sceneOn: st.sceneOn !== false, sceneEn: st.sceneEn || '', sceneSrc: st.sceneSrc || '', sceneExpand: !!st.sceneExpand };
     commit({ silent: true });
+}
+function studioSource() {
+    const ref = ui.studio.sourceRef;
+    return ref?.type === 'group' && M.resolveTicket(getData(), ref) ? ref : null;
+}
+async function saveStudioTicket() {
+    const d = getData(), st = ui.studio;
+    if (!st.pos.trim()) { toastr.warning('画师串是空的，请先填写再保存', '智库'); return; }
+    const original = studioSource();
+    const groups = Object.values(d.groups);
+    const options = [original ? '覆盖原串：' + M.ticketName(d, original) : '覆盖已有画师串', '另存为新画师串'];
+    let mode = groups.length ? await chooseBox('保存画师串（正面、负面一起保存）', options) : 1;
+    if (mode == null) return;
+    let ref;
+    if (mode === 0) {
+        let target = original;
+        if (!target) {
+            const index = await chooseBox('选择要覆盖的画师串', groups.map(g => g.name));
+            if (index == null) return;
+            target = {type:'group',id:groups[index].id};
+        }
+        ref = M.overwriteGroup(d, target, st.pos, st.neg);
+    } else {
+        const name = await promptText('新画师串的名字', original ? M.ticketName(d, original) + ' · 副本' : '');
+        if (name == null) return;
+        ref = M.createFromString(d, { name, text: st.pos, neg: st.neg, forceGroup: true });
+    }
+    if (!ref) return;
+    st.sourceRef = ref; st.lastExtra = d.groups[ref.id]?.extra || ''; st.lastNeg = st.neg; st.clearUndo = null;
+    saveStudio(); E.setActive(ref);
+    await __mod_store.commit({ immediate: true, silent: true });
+    render(); toastr.success(mode === 0 ? '已覆盖原画师串' : '已另存为新画师串', '智库');
 }
 function applyArtistToStudio(ref) {
     const d = getData();
     const st = ui.studio;
     const t = M.resolveTicket(d, ref);
     if (!t) return;
+    st.sourceRef = { type: ref.type, id: ref.id };
+    st.clearUndo = null;
     st.pos = M.replaceArtists(st.pos, M.ticketString(d, ref), st.lastExtra);
     st.lastExtra = t.type === 'group' ? (t.item.extra || '') : '';
     const neg = M.ticketNeg(d, ref);
@@ -2967,7 +3022,9 @@ function fold(key, title, summary, body) {
 
 function paramFields(s, { withSize = false } = {}) {
     const w = Number(s.novelai_width) || 832, h = Number(s.novelai_height) || 1216;
-    return `<div class="pc-grid4">
+    return `<div class="pc-actions wrap"><button type="button" class="pc-pill dashed" data-act="samplingpreset">使用推荐采样</button><small class="pc-dim">DPM++ 2M SDE · karras · CFG 修正 0.18</small></div>
+      ${s.naiMode === 'tavern' ? '<div class="pc-hint">酒馆内置 Key 通道不支持 CFG 修正；使用独立 Key 或第三方站点时按设置发送。</div>' : ''}
+      <div class="pc-grid4">
         ${withSize ? `<label class="pc-field span4"><span>尺寸</span>
           <select data-st="size">${SIZE_PRESETS.map(([pw, ph, t]) => `<option value="${pw}x${ph}" ${pw === w && ph === h ? 'selected' : ''}>${t}</option>`).join('')}
           ${SIZE_PRESETS.some(([pw, ph]) => pw === w && ph === h) ? '' : `<option selected value="${w}x${h}">自定义 ${w}×${h}</option>`}</select></label>` : ''}
@@ -2975,7 +3032,7 @@ function paramFields(s, { withSize = false } = {}) {
         <label class="pc-field span2"><span>种子（0 = 随机）</span><input type="number" data-st="novelai_seed" value="${esc(s.novelai_seed)}"></label>
         <label class="pc-field span4"><span>采样器</span><select data-st="novelai_sampler">${N.SAMPLERS.map(([v, t]) => `<option value="${v}" ${v === s.novelai_sampler ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
         <label class="pc-field span2"><span>噪声表</span><select data-st="Schedule">${N.SCHEDULES.map(([v, t]) => `<option value="${v}" ${v === s.Schedule ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
-        <label class="pc-field span2"><span>CFG 修正（一般 0）</span><input type="number" step="0.01" data-st="cfg_rescale" value="${esc(s.cfg_rescale)}"></label>
+        <label class="pc-field span2"><span>CFG 修正</span><input type="number" step="0.01" data-st="cfg_rescale" value="${esc(s.cfg_rescale)}"></label>
       </div>
       <label class="pc-switch"><input type="checkbox" data-st-check="nai3Variety" ${String(s.nai3Variety) === 'true' ? 'checked' : ''}><span></span>多样性加强（Variety+）<small>画面更多变化，偶尔会乱</small></label>`;
 }
@@ -3076,7 +3133,7 @@ function viewStudio(d) {
     const w = Number(s.novelai_width) || 832, h = Number(s.novelai_height) || 1216;
     const pv = previewHtml(s);
     const ucpVal = String(s.UCP_novelai ?? '');
-    const owner = M.findTicketForString(d, st.pos);
+    const owner = M.resolveTicket(d, st.sourceRef) ? st.sourceRef : null;
     const nArtists = M.parseArtistString(st.pos).members.length;
     const nOther = M.tokenize(st.pos).filter(t => !t.isArtist).length;
     const sizeBtn = (pw, ph, t) => `<button class="pc-pill ${pw === w && ph === h ? 'on' : ''}" data-act="studiosize" data-size="${pw}x${ph}">${t}</button>`;
@@ -3089,10 +3146,15 @@ function viewStudio(d) {
       <div class="pc-artline">
         ${(() => { const cv = owner && M.ticketCover(d, owner); return cv ? `<img class="pc-artcover" src="${esc(imgUrl(cv))}" alt="看例图" data-act="viewticket" data-type="${owner.type}" data-id="${esc(owner.id)}">` : seal(); })()}
         <div class="pc-grow"><b>${owner ? esc(M.ticketName(d, owner)) : (st.pos.trim() ? '这串还没存进画师库' : '还没写')}</b><small>${[nArtists ? nArtists + ' 位画师' : '没有 artist: 画师', nOther ? nOther + ' 个别的词' : ''].filter(Boolean).join(' · ')}${owner && M.ticketCover(d, owner) ? ' · 点图看大图' : ''}</small></div>
-        ${!owner && st.pos.trim() ? '<button class="pc-pill dashed" data-act="saveartist">存</button>' : ''}
         <button class="pc-pill dashed" data-act="pickartist">换画师</button>
       </div>
       ${(() => { const bare = guessBareArtists(d, st.pos); return bare.length ? `<div class="pc-bare" style="margin-top:8px"><div class="pc-row-between"><span class="pc-dim small">没写 artist: 的画师名 · 点名字单个补</span><button class="pc-pill tiny on" data-act="addprefix">全部补上</button></div><div class="pc-chips wrap">${bare.map(n => `<button class="pc-pill dashed tiny" data-act="addprefix" data-name="${esc(n)}">${esc(n)}</button>`).join('')}</div></div>` : ''; })()}
+      <div class="pc-actions wrap pc-mt-s">
+        <button class="pc-pill" data-act="saveartist">保存画师串</button>
+        <button class="pc-pill dashed" data-act="clearstudio">清空当前串</button>
+        ${st.clearUndo ? '<button class="pc-pill dashed" data-act="undoclearstudio">撤销清空</button>' : ''}
+        ${owner?.type === 'group' ? `<button class="pc-pill dashed danger" data-act="delete" ${refAttr(owner)}>删除原串</button>` : ''}
+      </div>
       <textarea id="pc-pos" class="pc-textarea mono big" data-bind="studio.pos" placeholder="artist:xxx, 1boy, solo, black hair, sitting, rain …">${esc(st.pos)}</textarea>
       <div id="pc-pos-ban">${banWarn(d, st.pos)}</div>
       <label class="pc-label" for="pc-neg">负面提示词</label>
@@ -3493,6 +3555,7 @@ function viewGroup(d) {
     ${galleryHtml(d, ref)}
     <section class="pc-card pc-pad pc-mt">
       ${label('画师串（发送的就是这一串）')}
+      <div class="pc-actions wrap"><button class="pc-pill dashed" data-act="editstring" data-id="${g.id}">改写原串</button><button class="pc-pill dashed danger" data-act="delete" ${refAttr(ref)}>删除整串</button></div>
       <div class="pc-strrow"><p class="pc-quote small mono">${markStr(d, str)}</p><button class="pc-round dashed" data-act="copytext" data-text="${esc(str)}" aria-label="复制">${SYM.copy}</button></div>
       <label class="pc-field pc-mt-s"><span>负面（选这串时一起换上，可不填）</span><textarea class="pc-textarea small mono" data-bind-group="${g.id}" data-field="neg" placeholder="比如 1girl, text">${esc(g.neg || '')}</textarea></label>
     </section>
@@ -4971,16 +5034,23 @@ async function onClick(ev, outside = false) {
                 saveStudio(); render();
                 break;
             }
-            case 'saveartist': {
-                const name = await promptText('给这串起个名字（正面、负面一起存进画师库）', '');
-                if (name == null) break;
-                const ref = M.createFromString(d, { name, text: ui.studio.pos, neg: ui.studio.neg });
-                if (!ref) { toastr.warning('正面提示词是空的', '智库'); break; }
-                E.setActive(ref);
-                commit();
-                toastr.success('已存进画师库', '智库');
-                break;
+            case 'samplingpreset': {
+                Object.assign(N.settings(), { novelai_sampler: 'k_dpmpp_2m_sde', Schedule: 'karras', cfg_rescale: '0.18', samplingDefaultsV2: true });
+                N.save(); render(); break;
             }
+            case 'clearstudio': {
+                const st = ui.studio;
+                if (!st.pos) break;
+                st.clearUndo = st.pos; st.pos = '';
+                saveStudio(); render(); break;
+            }
+            case 'undoclearstudio': {
+                if (!ui.studio.clearUndo) break;
+                if (ui.studio.pos.trim() && !(await confirmBox('恢复清空前的画师串？会替换现在的正面提示词'))) break;
+                ui.studio.pos = ui.studio.clearUndo; ui.studio.clearUndo = null;
+                saveStudio(); render(); break;
+            }
+            case 'saveartist': await saveStudioTicket(); break;
             case 'unticket': E.setActive(null); break;
             case 'use': {
                 const r = refFrom(el);
@@ -5037,13 +5107,20 @@ async function onClick(ev, outside = false) {
             }
             case 'editstring': {
                 const g = d.groups[el.dataset.id];
-                const text = await promptText('整串改写（画师 + 跟在后面的词）', M.ticketString(d, { type: 'group', id: g.id }), true);
+                if (!g) break;
+                const text = await promptText('改写画师串', M.ticketString(d, {type:'group',id:g.id}), true);
                 if (text == null) break;
-                const p = M.parseArtistString(text);
-                g.members = p.members.map(m => ({ artistId: M.ensureArtist(d, m.tag).id, weight: m.weight }));
-                g.extra = p.extra;
-                g.raw = text.trim();
-                commit();
+                if (!text.trim()) { toastr.warning('画师串是空的，请先填写再保存', '智库'); break; }
+                const mode = await chooseBox('保存画师串', ['覆盖原串：' + g.name, '另存为新画师串']);
+                if (mode == null) break;
+                if (mode === 0) M.overwriteGroup(d, {type:'group',id:g.id}, text, g.neg);
+                else {
+                    const name = await promptText('新画师串的名字', g.name + ' · 副本');
+                    if (name == null) break;
+                    const ref = M.createFromString(d, {name,text,neg:g.neg,forceGroup:true});
+                    if (ref) { ui.detailId = ref.id; ui.view = 'group'; }
+                }
+                await commit({immediate:true});
                 break;
             }
             case 'copytext':
@@ -5078,6 +5155,7 @@ async function onClick(ev, outside = false) {
                 const t = M.resolveTicket(d, r);
                 const imgs = t.item.images.slice();
                 if (r.type === 'group') M.deleteGroup(d, r.id); else M.deleteArtist(d, r.id);
+                if (M.sameRef(ui.studio.sourceRef, r)) { ui.studio.sourceRef = null; saveStudio(); }
                 if (['artist', 'group'].includes(ui.view)) ui.view = 'book';
                 DOC.querySelector('.pc-sheet-backdrop')?.remove();
                 commit();
@@ -5593,7 +5671,7 @@ async function doGenerate() {
 async function saveStudioResult() {
     const d = getData();
     const choices = [];
-    const owner = M.findTicketForString(d, ui.studio.pos);
+    const owner = studioSource() || M.findTicketForString(d, ui.studio.pos);
     if (owner) choices.push({ ref: owner, text: `${owner.type === 'group' ? '画师组' : '画师'}：${M.ticketName(d, owner)}` });
     const members = M.parseArtistString(ui.studio.pos).members;
     if (members.length > 1) {
@@ -5602,7 +5680,7 @@ async function saveStudioResult() {
             if (a) choices.push({ ref: { type: 'artist', id: a.id }, text: `组里的画师：${a.tag}` });
         }
     }
-    if (!choices.length) { toastr.warning('正面提示词里的画师还没存进画师库。先点「把这里的画师存进画师库」', '生成图片'); return; }
+    if (!choices.length) { toastr.warning('正面提示词里的画师还没存进画师库。先点「保存画师串」', '生成图片'); return; }
     const pick = await chooseBox('存到哪里？', choices.map(c => c.text));
     if (pick == null) return;
     const nsfw = await confirmBox('这张是 NSFW 吗？', { ok: '是 NSFW', cancel: '不是' });
