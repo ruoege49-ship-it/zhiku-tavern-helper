@@ -1,6 +1,6 @@
 # 智库 · SillyTavern 扩展
 
-作者 **if love** · 版本 **0.8.16**。NovelAI 生图、画师库、例图、角色、衣柜、标记生图与共享上传。
+作者 **if love** · 版本 **0.8.17**。NovelAI 生图、画师库、例图、角色、衣柜、标记生图与共享上传。
 
 ## 安装与更新
 
@@ -36,6 +36,10 @@ image###1boy, solo, sunset, cinematic lighting###
 ## 兼容脚本文件
 
 `zhiku.script.json` 和 `zhiku.js` 保留为此前的酒馆助手脚本交付文件。扩展安装使用仓库地址，不使用这两个文件的 Raw 地址。
+
+## 0.8.17 改动
+
+- 修正生图接口错误信息解析：依次读取顶层 `message`、嵌套 `error.message`、字符串或 JSON 形式的 `error`，最后回退原始响应。HTTP 错误与返回 JSON 错误的分支同步修复，避免对象显示为 `[object Object]`。
 
 ## 0.8.16 改动
 

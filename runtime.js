@@ -539,7 +539,7 @@ function imageInsertionPoint(text, sentence) {
     return last.start + last.text.trimEnd().length;
 }
 
-// 智库 · 原生扩展版 v0.8.16（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.17（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -557,7 +557,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.16';
+globalThis.__PC_VERSION = '0.8.17';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -1528,7 +1528,7 @@ function toDataUrl(b64) {
 /** 把常见的错误码翻成人话 */
 function explain(status, text, viaTavern = false) {
     let msg = text;
-    try { const j = JSON.parse(text); msg = j.message || j.error || text; } catch { /* 不是 JSON */ }
+    try { const j = JSON.parse(text); msg = j.message || j.error?.message || (typeof j.error === 'string' ? j.error : JSON.stringify(j.error)) || text; } catch { /* 不是 JSON */ }
     msg = String(msg || '').slice(0, 200);
     if (status === 401) return viaTavern ? '酒馆里的 NovelAI key 不对或没填（酒馆的「API 连接」→ NovelAI）' : 'NovelAI key 不对，到「设置」里重新填';
     if (status === 402) return 'NovelAI 点数不够，或者订阅不支持这个尺寸/步数';
@@ -1546,7 +1546,7 @@ async function imageFromResponse(u8) {
     if (isPng) return 'data:image/png;base64,' + toB64(u8);
     if (!isZip) {
         const t = new TextDecoder().decode(u8.slice(0, 2000)).trim();
-        if (t.startsWith('{')) { try { const j = JSON.parse(t); if (j.images?.[0]) return toDataUrl(j.images[0]); throw new Error(j.message || j.error || t.slice(0, 150)); } catch (e) { throw e; } }
+        if (t.startsWith('{')) { try { const j = JSON.parse(t); if (j.images?.[0]) return toDataUrl(j.images[0]); throw new Error(j.message || j.error?.message || (typeof j.error === 'string' ? j.error : JSON.stringify(j.error)) || t.slice(0, 150)); } catch (e) { throw e; } }
         if (t.startsWith('iVBOR')) return toDataUrl(t);
         if (/^<|<html/i.test(t)) throw new Error('站点返回的是网页，不是图片。检查一下地址对不对');
         throw new Error('返回的不是图片：' + t.slice(0, 120));
