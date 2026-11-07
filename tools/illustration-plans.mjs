@@ -17,8 +17,10 @@ export function applyIllustrationPlans(s) {
         askLLM: (...args) => __mod_translate.askLLM(...args), pickJson: text => __mod_translate.pickJson(text),
         warn: message => toastr.warning(message, '智库 · 自动插图', {timeOut:6000}),
         onRequest: request => { illustrationLastRequest = request; },
-        afterSave: id => setTimeout(() => { addMesButtons(); void __mod_marker.process(id); }, 0),
+        afterSave: async (id, selection = {}) => { addMesButtons(); return __mod_marker.process(id, selection.manual ? {manual:true,tokenIndices:selection.tokenIndices} : {}); },
     });
+    const selectedImages = createSelectedImageController({document:DOC,getContext:()=>SillyTavern.getContext(),settings:()=>__mod_marker.settings(),generate:(shot,count)=>illustrationPlanner.selected(shot,count),notify:message=>toastr.info(message,'智库 · 选段生图')});
+    cleanups.push(() => selectedImages.stop());
     const syncIllust = type => illustrationPlanner.sync(type);
     const illustAfter = id => illustrationPlanner.after(id);
     syncIllust();
@@ -26,6 +28,15 @@ export function applyIllustrationPlans(s) {
     if (event_types.GENERATION_STARTED) { eventSource.on(event_types.GENERATION_STARTED, syncIllust); cleanups.push(() => eventSource.removeListener?.(event_types.GENERATION_STARTED, syncIllust)); }
     cleanups.push(() => { illustrationPlanner.stop(); illustrationLastRequest = null; });
 `);
+    patch('const onChat = () => setTimeout(() => { UI.renderChip(); UI.renderStub(); E.applyBindingOnChatChange(); addMesButtons(); }, 300);', 'const onChat = () => { selectedImages.reset(); return setTimeout(() => { UI.renderChip(); UI.renderStub(); E.applyBindingOnChatChange(); addMesButtons(); }, 300); };');
+    {
+        const start=s.indexOf('<select data-illmax>'),end=s.indexOf('</select>',start)+9;
+        assert(start>=0&&end>start);
+        patch(s.slice(start,end),'<input type="number" min="1" step="1" inputmode="numeric" data-illmax value="${esc(d.options.illustMax ?? 1)}">');
+    }
+    patch('<span>每条回复最多几张</span>', '<span>每条回复最多几张 · 自行填写</span>');
+    patch("if (el.hasAttribute('data-illmax')) { d.options.illustMax = Number(el.value) || 1; commit(); return; }", "if (el.hasAttribute('data-illmax')) { try { d.options.illustMax = illustrationCount(el.value); commit(); } catch(e) { el.value = String(d.options.illustMax ?? 1); toastr.warning(e.message, '智库'); } return; }");
+    patch('不用另挂生图世界书', '也可选中文字后点「图片生成」');
     patch('    const nightMode = d.options.nightMode || \'day\';', `    const illustEditor = renderIllustrationEditor(d.options, ui.illustPromptDraft, !!illustrationLastRequest, esc);
     const nightMode = d.options.nightMode || 'day';`);
     // Insert the editor next to the existing chat controls, not in a disconnected dialog.
@@ -46,6 +57,6 @@ export function applyIllustrationPlans(s) {
 
 function viewSettings(d) {`);
     patch('挑画面写标签，插回正文。多一次请求', '先整理瞬间、人物姿势和镜头构图，再转成标签插回正文。多一次请求');
-    const helpers=['illustration-plans.js','illustration-runtime.js','illustration-ui.js'].map(name=>fs.readFileSync(new URL('../src/'+name,import.meta.url),'utf8').replace(/\r\n/g,'\n').replace(/^import .*;\n/gm,'').replace(/^export /gm,'')).join('\n');
+    const helpers=['illustration-plans.js','illustration-runtime.js','illustration-ui.js','selected-image.js'].map(name=>fs.readFileSync(new URL('../src/'+name,import.meta.url),'utf8').replace(/\r\n/g,'\n').replace(/^import .*;\n/gm,'').replace(/^export /gm,'')).join('\n');
     return helpers+'\nlet illustrationLastRequest = null;\n'+s;
 }

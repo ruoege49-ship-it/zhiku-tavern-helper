@@ -64,6 +64,12 @@ export function saveIllustrationPrompt(options, value) {
     options.illustPrompt = value; // Preserve the player's literal text, including whitespace.
 }
 
+export function illustrationCount(value = 1) {
+    const count=Number(value);
+    if (!Number.isSafeInteger(count) || count < 1) throw new Error('图片张数请填写大于 0 的整数');
+    return count;
+}
+
 export function illustrationRequest({ options, mode, roster, markers, story = '', prompt }) {
     const candidates = roster.filter(row => row.on).map(({ char }) => ({
         name: char.name, aliases: char.aliases || '',
@@ -71,7 +77,7 @@ export function illustrationRequest({ options, mode, roster, markers, story = ''
         outfitMode: char.outfitMode,
         outfit: char.outfitMode === 'fixed' ? ((char.outfits || []).find(o => o.id === char.outfitId) || char.outfits?.[0])?.tags?.map(t => t.en).filter(Boolean).join(', ') || '' : '',
     }));
-    const data = { mode, imageLimit: Math.min(3, Math.max(1, Math.floor(Number(options.illustMax) || 1))), markers, candidates, ...(mode === 'after' ? { story } : {}) };
+    const data = { mode, imageLimit: illustrationCount(options.illustMax ?? 1), markers, candidates, ...(mode === 'after' ? { story } : {}) };
     const system = prompt ?? illustrationPrompt(options);
     const user = JSON.stringify(data, null, 2);
     return { mode, system, user, injection: system + '\n\n【本次输入】\n' + user };

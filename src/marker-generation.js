@@ -15,6 +15,22 @@ export function parseImageMarkers(text, start, end) {
     }
     return result;
 }
+// Preserve identities when new markers are inserted before existing, possibly identical markers.
+export function shiftImageRecords(records, tokens, swipe, shifts) {
+    if(!records)return records;
+    const next={...records},prefix=String(swipe??0)+':',used=new Set(),moves=[];
+    for(const token of tokens){
+        const exact=prefix+token.index+':'+token.raw;
+        const candidates=Object.keys(records).filter(k=>k.startsWith(prefix)&&k.endsWith(':'+token.raw)&&/^\d+$/.test(k.slice(prefix.length,k.length-token.raw.length-1))).sort((a,b)=>parseInt(a.slice(prefix.length))-parseInt(b.slice(prefix.length)));
+        const old=records[exact]&&!used.has(exact)?exact:candidates.find(k=>!used.has(k));
+        if(!old)continue;used.add(old);
+        const index=token.index+shifts.filter(s=>s.at<=token.index).reduce((sum,s)=>sum+s.length,0);
+        moves.push([old,prefix+index+':'+token.raw]);
+    }
+    for(const [old]of moves)delete next[old];
+    for(const [old,key]of moves)next[key]=records[old];
+    return next;
+}
 export function createMarkerController({context,getData,generate,upload,notify,document:doc=globalThis.document,resolveUrl=u=>u}) {
     // 图存在本地浏览器时地址是 idb:xxx，要先换成能显示的地址；换不出来（存在别的设备上）就是空的
     function showUrl(url,apply,missing){Promise.resolve(resolveUrl(url)).then(u=>{if(u)apply(u);else missing?.();},()=>missing?.());}
@@ -220,12 +236,12 @@ export function createMarkerController({context,getData,generate,upload,notify,d
         decorateAll();
     }
     const chatKey=c=>String(c.getCurrentChatId?.() ?? c.chatId ?? '')+'|'+String(c.characterId ?? '')+'|'+String(c.groupId ?? '');
-    async function process(id,{manual=false,tokenIndex=null,promptOverride=null}={}) {
+    async function process(id,{manual=false,tokenIndex=null,tokenIndices=null,promptOverride=null}={}) {
         const c=context(),msg=c.chat?.[id],cfg=settings();
         if(stopped||!msg||msg.is_system||(!manual&&(!cfg.auto||msg.is_user)))return 0;
         const source=String(msg.mes||''),swipe=msg.swipe_id,chat=chatKey(c),all=parseImageMarkers(source,cfg.start,cfg.end);
-        if(manual&&tokenIndex===null&&all.length>1){notify('请点击具体提示词旁的生成按钮，一次只生成所选图片','info');decorate(id);return 0;}
-        const selected=tokenIndex===null?all:all.filter((_,i)=>i===tokenIndex);
+        if(manual&&tokenIndex===null&&!Array.isArray(tokenIndices)&&all.length>1){notify('请点击具体提示词旁的生成按钮，一次只生成所选图片','info');decorate(id);return 0;}
+        const selected=Array.isArray(tokenIndices)?all.filter((_,i)=>tokenIndices.includes(i)):tokenIndex===null?all:all.filter((_,i)=>i===tokenIndex);
         if(!selected.length){if(manual)notify('没有完整生图标记','info');return 0;}
         const jobs=selected.map(token=>{
             const key=recordKey(msg,token);let map=pending.get(msg);

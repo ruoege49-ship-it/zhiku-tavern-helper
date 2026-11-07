@@ -73,6 +73,12 @@ function saveIllustrationPrompt(options, value) {
     options.illustPrompt = value; // Preserve the player's literal text, including whitespace.
 }
 
+function illustrationCount(value = 1) {
+    const count=Number(value);
+    if (!Number.isSafeInteger(count) || count < 1) throw new Error('图片张数请填写大于 0 的整数');
+    return count;
+}
+
 function illustrationRequest({ options, mode, roster, markers, story = '', prompt }) {
     const candidates = roster.filter(row => row.on).map(({ char }) => ({
         name: char.name, aliases: char.aliases || '',
@@ -80,7 +86,7 @@ function illustrationRequest({ options, mode, roster, markers, story = '', promp
         outfitMode: char.outfitMode,
         outfit: char.outfitMode === 'fixed' ? ((char.outfits || []).find(o => o.id === char.outfitId) || char.outfits?.[0])?.tags?.map(t => t.en).filter(Boolean).join(', ') || '' : '',
     }));
-    const data = { mode, imageLimit: Math.min(3, Math.max(1, Math.floor(Number(options.illustMax) || 1))), markers, candidates, ...(mode === 'after' ? { story } : {}) };
+    const data = { mode, imageLimit: illustrationCount(options.illustMax ?? 1), markers, candidates, ...(mode === 'after' ? { story } : {}) };
     const system = prompt ?? illustrationPrompt(options);
     const user = JSON.stringify(data, null, 2);
     return { mode, system, user, injection: system + '\n\n【本次输入】\n' + user };
@@ -161,9 +167,12 @@ function applyIllustrationRating(positive, rating) {
 function createIllustrationPlanner({ getContext, getData, settings, roster, askLLM, pickJson, warn, onRequest = () => {}, afterSave = () => {} }) {
     let stopped = false;
     const seen = new WeakMap();
-    function request(mode, story = '') {
+    const selectedBusy = new WeakSet();
+    const chatKey=c=>String(c.getCurrentChatId?.() ?? c.chatId ?? '')+'|'+String(c.characterId??'')+'|'+String(c.groupId??'');
+    function request(mode, story = '', count) {
         const cfg = settings();
-        return illustrationRequest({options:getData().options, mode, roster:roster(), markers:{start:cfg.start,end:cfg.end}, story});
+        const options=count===undefined?getData().options:{...getData().options,illustMax:illustrationCount(count)};
+        return illustrationRequest({options, mode, roster:roster(), markers:{start:cfg.start,end:cfg.end}, story});
     }
     function sync(type) {
         const c = getContext(), cfg = settings();
@@ -173,25 +182,27 @@ function createIllustrationPlanner({ getContext, getData, settings, roster, askL
         c.setExtensionPrompt('zhiku_illust', req?.injection || '', 1, 0, false, 0);
         if (req) onRequest(req);
     }
-    async function after(id) {
+    async function after(id, selection = null) {
         const c = getContext(), cfg = settings(), msg = c.chat?.[id];
-        if (stopped || getData().options.illustMode !== 'after' || !cfg.start || !cfg.end || !msg || msg.is_user || msg.is_system || id !== c.chat.length - 1) return;
+        const manual=!!selection;
+        if (stopped || !cfg.start || !cfg.end || !msg || msg.is_system || (!manual && (getData().options.illustMode !== 'after' || msg.is_user || id !== c.chat.length - 1))) return;
         const source = String(msg.mes || '');
-        if (!source.trim() || parseImageMarkers(source,cfg.start,cfg.end).length) return;
-        const story = imageStoryText(source);
+        if (manual && (msg!==selection.msg || source!==selection.source || msg.swipe_id!==selection.swipe || chatKey(c)!==selection.chatKey)) throw new Error('聊天或原文已变化，请重新选择文字');
+        if (!source.trim() || (!manual && parseImageMarkers(source,cfg.start,cfg.end).length)) return;
+        const story = manual?selection.text:imageStoryText(source);
         if (!story) return;
-        const req = request('after', story), signature = String(msg.swipe_id) + source + req.system + req.user;
-        if (seen.get(msg) === signature) return;
-        seen.set(msg,signature);
+        const req = request('after', story,selection?.count), signature = String(msg.swipe_id) + source + req.system + req.user;
+        if (!manual && seen.get(msg) === signature) return;
+        if(!manual)seen.set(msg,signature);
         const forget=()=>{if(seen.get(msg)===signature)seen.delete(msg);};
-        const chatId = c.getCurrentChatId?.() ?? c.chatId, swipe = msg.swipe_id;
-        const current = () => { const now=getContext();return !stopped && (now.getCurrentChatId?.() ?? now.chatId) === chatId && now.chat?.[id] === msg && msg.swipe_id === swipe && String(msg.mes || '') === source; };
+        const chatId = chatKey(c), swipe = msg.swipe_id;
+        const current = () => { const now=getContext();return !stopped && chatKey(now) === chatId && now.chat?.[id] === msg && msg.swipe_id === swipe && String(msg.mes || '') === source; };
         const max = JSON.parse(req.user).imageLimit;
         onRequest(req);
         let response;
-        try { response = pickJson(await askLLM(req.system, req.user, {maxTokens:1200+1600*max})); }
+        try { response = pickJson(await askLLM(req.system, req.user, {maxTokens:Math.min(16384,1200+1600*max)})); }
         catch(e) { if (current()) warn('自动插图没写出来：'+e.message);forget();return; }
-        if (!current()) return;
+        if (!current()) { if(manual)warn('原文或聊天已变化，选段结果没有写入');return; }
         const items = Array.isArray(response?.images) ? response.images : [];
         const selected = [];
         for (const item of items) {
@@ -217,21 +228,34 @@ function createIllustrationPlanner({ getContext, getData, settings, roster, askL
         if (!selected.length) { warn('没有可用的画面方案；请检查提示词输出格式或重新生成正文');forget();return; }
         // Locate against the original story once. Preserve order for images sharing an anchor.
         const insertions = new Map();
-        for(const shot of selected){const at=imageInsertionPoint(source,shot.anchor);insertions.set(at,(insertions.get(at)||'')+'\n'+shot.raw+'\n');}
-        let next=source;
-        for(const [at,text] of [...insertions].sort((a,b)=>b[0]-a[0]))next=next.slice(0,at)+text+next.slice(at);
+        for(const shot of selected){const at=manual?selection.insertAt:imageInsertionPoint(source,shot.anchor);if(!Number.isInteger(at)||at<0||at>source.length)throw new Error('选段插入位置无效');insertions.set(at,[...(insertions.get(at)||[]),shot]);}
+        let next='',cursor=0;const positions=new Set(),shifts=[];
+        for(const [at,shots] of [...insertions].sort((a,b)=>a[0]-b[0])){next+=source.slice(cursor,at);const before=next.length;for(const shot of shots){next+='\n';positions.add(next.length);next+=shot.raw+'\n';}shifts.push({at,length:next.length-before});cursor=at;}
+        next+=source.slice(cursor);
         if(!current())return;
         const swipes=Array.isArray(msg.swipes)&&Number.isInteger(swipe)?msg.swipes:null,oldSwipe=swipes?.[swipe];
-        const hadExtra=!!msg.extra;msg.extra||={};const oldPlans=msg.extra.zhikuIllustrations;
-        msg.extra.zhikuIllustrations=selected.filter(s=>s.plan).map(s=>({raw:s.raw,plan:s.plan}));
+        const hadExtra=!!msg.extra;msg.extra||={};const oldPlans=msg.extra.zhikuIllustrations,oldImages=msg.extra.zhikuImages;
+        if(manual&&oldImages)msg.extra.zhikuImages=shiftImageRecords(oldImages,parseImageMarkers(source,cfg.start,cfg.end),swipe,shifts);
+        msg.extra.zhikuIllustrations=[...(manual&&Array.isArray(oldPlans)?oldPlans:[]),...selected.filter(s=>s.plan).map(s=>({raw:s.raw,plan:s.plan}))];
         msg.mes=next;if(swipes)swipes[swipe]=next;
         try{await getContext().saveChat();}
-        catch(e){msg.mes=source;if(swipes)swipes[swipe]=oldSwipe;if(oldPlans===undefined)delete msg.extra.zhikuIllustrations;else msg.extra.zhikuIllustrations=oldPlans;if(!hadExtra&&!Object.keys(msg.extra).length)delete msg.extra;forget();warn('自动插图存不进聊天：'+e.message);return;}
+        catch(e){msg.mes=source;if(swipes)swipes[swipe]=oldSwipe;if(oldPlans===undefined)delete msg.extra.zhikuIllustrations;else msg.extra.zhikuIllustrations=oldPlans;if(oldImages===undefined)delete msg.extra.zhikuImages;else msg.extra.zhikuImages=oldImages;if(!hadExtra&&!Object.keys(msg.extra).length)delete msg.extra;forget();warn('自动插图存不进聊天：'+e.message);return;}
         const now=getContext();
-        if(stopped || (now.getCurrentChatId?.()??now.chatId)!==chatId || now.chat?.[id]!==msg || msg.swipe_id!==swipe)return;
-        now.updateMessageBlock?.(id,msg);afterSave(id);
+        if(stopped || chatKey(now)!==chatId || now.chat?.[id]!==msg || msg.swipe_id!==swipe)return;
+        const tokenIndices=parseImageMarkers(next,cfg.start,cfg.end).map((t,i)=>positions.has(t.index)?i:-1).filter(i=>i>=0);
+        now.updateMessageBlock?.(id,msg);await afterSave(id,{manual,tokenIndices});
+        return selected.length;
     }
-    return {sync,after,stop(){stopped=true;getContext().setExtensionPrompt?.('zhiku_illust','',1,0,false,0);}};
+    async function selected(selection,count) {
+        illustrationCount(count);
+        if(!selection?.msg || selectedBusy.has(selection.msg))return;
+        if(typeof selection.text!=='string'||selection.text.trim().length<4)throw new Error('请至少选择 4 个字符的正文');
+        const location=locateSelectedText(selection.source,selection.text,{...settings(),occurrence:selection.occurrence??0});
+        if(!location||location.insertAt!==selection.insertAt)throw new Error('所选文字无法对应聊天原文，请重新选择');
+        selectedBusy.add(selection.msg);
+        try{return await after(selection.id,{...selection,count});}finally{selectedBusy.delete(selection.msg);}
+    }
+    return {sync,after,selected,stop(){stopped=true;getContext().setExtensionPrompt?.('zhiku_illust','',1,0,false,0);}};
 }
 
 
@@ -261,6 +285,105 @@ function createIllustrationEditor({ getOptions, getDraft, setDraft, commit, rend
             showRequest(illustrationRequest({options,mode,roster:roster(),markers:{start:cfg.start,end:cfg.end},story:imageStoryText(latest?.mes),prompt:getDraft()??illustrationPrompt(options)}),'当前编辑内容的请求预览');
         }
     };
+}
+
+
+// Match visible text back to original offsets without rewriting the original message.
+function selectionTextMap(text) {
+    let normalized='';const starts=[],ends=[];
+    const entities={amp:'&',lt:'<',gt:'>',quot:'"',apos:"'",nbsp:' '};
+    for(let i=0;i<text.length;){
+        const start=i;
+        if(text[i]==='<'){const m=text.slice(i).match(/^<!--[\s\S]*?-->|^<\/?[a-zA-Z][^>]*>/);if(m){i+=m[0].length;continue;}}
+        const entity=text[i]==='&'?text.slice(i).match(/^&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/i):null;
+        let value=text[i++];
+        if(entity){i=start+entity[0].length;const name=entity[1].toLowerCase();const code=name.startsWith('#x')?parseInt(name.slice(2),16):name.startsWith('#')?Number(name.slice(1)):null;value=code===null?entities[name]:code>=0&&code<=0x10ffff?String.fromCodePoint(code):'�';}
+        for(const char of value){if(/[\s*_~`]/.test(char))continue;normalized+=char;for(let k=0;k<char.length;k++){starts.push(start);ends.push(i);}}
+    }
+    return {normalized,starts,ends};
+}
+
+function locateSelectedText(source,text,{occurrence=0,start='image###',end='###'}={}) {
+    let raw=String(source||'');
+    for(const token of parseImageMarkers(raw,start,end).reverse())raw=raw.slice(0,token.index)+' '.repeat(token.raw.length)+raw.slice(token.index+token.raw.length);
+    const mapped=selectionTextMap(raw),needle=selectionTextMap(String(text||'')).normalized;
+    if(needle.length<4)return null;
+    let at=-1;
+    for(let n=0;n<=occurrence;n++){at=mapped.normalized.indexOf(needle,at+1);if(at<0)return null;}
+    const from=mapped.starts[at],to=mapped.ends[at+needle.length-1];
+    // Finish the selected paragraph, before a closing content boundary or trailing status block.
+    const tail=source.slice(to),boundary=tail.match(/\n|<\/(?:p|div|content)\s*>|<(?:details|image)\b/i);
+    let insertAt=source.length;
+    if(boundary){insertAt=to+boundary.index;if(/^<\/(?:p|div)\b/i.test(boundary[0]))insertAt+=boundary[0].length;}
+    return {from,to,insertAt};
+}
+
+function createSelectedImageController({document:doc,getContext,settings,generate,notify}) {
+    const win=doc.defaultView;
+    let stopped=false,snapshot=null,panel=null,busy=false,timer;
+    const key=c=>String(c.getCurrentChatId?.()??c.chatId??'')+'|'+String(c.characterId??'')+'|'+String(c.groupId??'');
+    const mount=el=>(doc.documentElement||doc.body).appendChild(el);
+    const style=doc.createElement('style');style.textContent=`
+      .pc-selection-image{position:fixed;right:16px;bottom:100px;z-index:2147480100;padding:12px 18px;border:1px solid #aebbc6;border-radius:24px;background:#202a36;color:#fff;font-size:15px;box-shadow:0 4px 16px #0005;cursor:pointer}
+      .pc-selection-image[hidden]{display:none}
+      .pc-selection-backdrop{position:fixed;inset:0;z-index:2147480200;display:flex;align-items:center;justify-content:center;background:#0009;padding:14px;box-sizing:border-box}
+      .pc-selection-dialog{width:min(100%,560px);max-height:90dvh;overflow:auto;box-sizing:border-box;border-radius:18px;padding:20px;background:#20242b;color:#f3f4f6;font:15px/1.6 sans-serif;scrollbar-width:none}
+      .pc-selection-dialog *{box-sizing:border-box;scrollbar-width:none}.pc-selection-dialog::-webkit-scrollbar,.pc-selection-dialog *::-webkit-scrollbar{display:none}
+      .pc-selection-dialog h3{margin:0 0 14px}.pc-selection-dialog label{display:block;margin:12px 0 6px}
+      .pc-selection-dialog textarea{display:block;width:100%;height:160px;resize:vertical;overflow:auto;border:1px solid #627082;border-radius:10px;padding:10px;background:#15191f;color:inherit;font:inherit}
+      .pc-selection-dialog input{display:block;width:100%;min-height:42px;padding:8px;border:1px solid #627082;border-radius:8px;background:#15191f;color:inherit;font:inherit}
+      .pc-selection-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}.pc-selection-actions button{min-height:42px;padding:8px 18px;border-radius:10px;border:1px solid #627082;background:#303e50;color:#fff;font:inherit;cursor:pointer}.pc-selection-actions button:disabled{opacity:.6}
+      .pc-selection-dialog p{font-size:13px;color:#bdc6d0;margin:10px 0}.pc-selection-status{white-space:pre-wrap;overflow-wrap:anywhere}
+    `;mount(style);
+    const button=doc.createElement('button');button.type='button';button.className='pc-selection-image';button.textContent='图片生成 · 选中文字';button.hidden=true;mount(button);
+    const current=s=>{const c=getContext();return !stopped&&key(c)===s.chatKey&&c.chat?.[s.id]===s.msg&&s.msg.mes===s.source&&s.msg.swipe_id===s.swipe;};
+    const element=node=>node?.nodeType===1?node:node?.parentElement;
+    function capture(){
+        if(stopped||panel||busy)return;
+        const selection=win?.getSelection?.();
+        if(!selection||selection.isCollapsed||!selection.rangeCount){button.hidden=true;snapshot=null;return;}
+        const range=selection.getRangeAt(0),a=element(range.startContainer),b=element(range.endContainer),host=a?.closest('.mes_text');
+        if(!host||host!==b?.closest('.mes_text')||a.closest('.pc-marker-slot,.custom-pc-marker-slot,.pc-image-actions,input,textarea,[contenteditable="true"]')||b.closest('.pc-marker-slot,.custom-pc-marker-slot,.pc-image-actions,input,textarea,[contenteditable="true"]')){button.hidden=true;snapshot=null;return;}
+        const text=selection.toString().trim(),id=Number(host.closest('.mes[mesid]')?.getAttribute('mesid')),c=getContext(),msg=c.chat?.[id];
+        if(text.length<4||!Number.isInteger(id)||!msg||msg.is_system){button.hidden=true;snapshot=null;return;}
+        const prefix=range.cloneRange();prefix.selectNodeContents(host);prefix.setEnd(range.startContainer,range.startOffset);
+        const before=selectionTextMap(prefix.toString()).normalized,needle=selectionTextMap(text).normalized;
+        const occurrence=needle?before.split(needle).length-1:0;
+        const source=String(msg.mes||''),location=locateSelectedText(source,text,{...settings(),occurrence});
+        snapshot={id,msg,source,swipe:msg.swipe_id,chatKey:key(c),text,occurrence,...location};button.hidden=false;
+    }
+    const schedule=()=>{clearTimeout(timer);timer=setTimeout(capture,120);};
+    const preserve=e=>{if(e.type==='mousedown'||e.pointerType==='mouse')e.preventDefault();};
+    button.addEventListener('pointerdown',preserve);button.addEventListener('mousedown',preserve);
+    function dismiss(){panel?.remove();panel=null;snapshot=null;button.hidden=true;}
+    button.addEventListener('click',()=>{
+        if(!snapshot||busy)return;
+        const shot=snapshot;
+        if(!current(shot)){notify('聊天或原文已变化，请重新选择文字');dismiss();return;}
+        if(!Number.isInteger(shot.insertAt)){notify('所选文字无法对应聊天原文，请在正文里重新选择一段');return;}
+        button.hidden=true;
+        panel=doc.createElement('div');panel.className='pc-selection-backdrop';
+        const box=doc.createElement('div');box.className='pc-selection-dialog';box.setAttribute('role','dialog');box.setAttribute('aria-modal','true');box.setAttribute('aria-label','选段生图');
+        box.innerHTML='<h3>选段生图</h3><label>只读取以下选中文字</label><textarea readonly aria-label="选中文字"></textarea><label>这次最多生成几张<input type="number" min="1" step="1" value="1" inputmode="numeric" aria-label="生成张数"></label><p>沿用设置里的生图提示词和角色资料；先提取所选画面，再调用已配置的生图服务。结果插回原楼层。</p><div class="pc-selection-status" role="status"></div><div class="pc-selection-actions"><button type="button" data-generate>生成图片</button><button type="button" data-close>关闭</button></div>';
+        box.querySelector('textarea').value=shot.text;
+        const submit=box.querySelector('[data-generate]'),count=box.querySelector('input'),status=box.querySelector('[role="status"]');
+        count.addEventListener('input',()=>{if(!busy)status.textContent='';});
+        box.querySelector('[data-close]').onclick=dismiss;
+        submit.onclick=async()=>{
+            if(busy)return;
+            if(!current(shot)){status.textContent='聊天或原文已变化，请关闭后重新选择';return;}
+            let n;try{n=illustrationCount(count.value);}catch(e){status.textContent=e.message;return;}
+            busy=true;submit.disabled=true;count.disabled=true;status.textContent='正在提取选段画面并生成图片…';
+            try{const result=await generate(shot,n);if(current({...shot,source:shot.msg.mes}))status.textContent=result?'已处理，图片结果显示在原楼层。':'没有生成新的画面，请查看提示信息。';submit.textContent=result?'已处理':'重试生成';if(!result)submit.disabled=false;}
+            catch(e){status.textContent=e.message||String(e);submit.disabled=false;}
+            finally{busy=false;count.disabled=false;}
+        };
+        panel.append(box);mount(panel);count.focus();
+    });
+    const escape=e=>{if(e.key==='Escape')dismiss();};
+    for(const event of ['selectionchange','pointerup','touchend','keyup'])doc.addEventListener(event,schedule);
+    doc.addEventListener('keydown',escape);
+    return {capture,reset:dismiss,stop(){stopped=true;clearTimeout(timer);for(const event of ['selectionchange','pointerup','touchend','keyup'])doc.removeEventListener(event,schedule);doc.removeEventListener('keydown',escape);dismiss();button.remove();style.remove();}};
 }
 
 let illustrationLastRequest = null;
@@ -389,7 +512,7 @@ function imageInsertionPoint(text, sentence) {
     return last.start + last.text.trimEnd().length;
 }
 
-// 智库 · 原生扩展版 v0.8.13（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.14（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -407,7 +530,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.13';
+globalThis.__PC_VERSION = '0.8.14';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -2787,6 +2910,22 @@ function parseImageMarkers(text, start, end) {
     }
     return result;
 }
+// Preserve identities when new markers are inserted before existing, possibly identical markers.
+function shiftImageRecords(records, tokens, swipe, shifts) {
+    if(!records)return records;
+    const next={...records},prefix=String(swipe??0)+':',used=new Set(),moves=[];
+    for(const token of tokens){
+        const exact=prefix+token.index+':'+token.raw;
+        const candidates=Object.keys(records).filter(k=>k.startsWith(prefix)&&k.endsWith(':'+token.raw)&&/^\d+$/.test(k.slice(prefix.length,k.length-token.raw.length-1))).sort((a,b)=>parseInt(a.slice(prefix.length))-parseInt(b.slice(prefix.length)));
+        const old=records[exact]&&!used.has(exact)?exact:candidates.find(k=>!used.has(k));
+        if(!old)continue;used.add(old);
+        const index=token.index+shifts.filter(s=>s.at<=token.index).reduce((sum,s)=>sum+s.length,0);
+        moves.push([old,prefix+index+':'+token.raw]);
+    }
+    for(const [old]of moves)delete next[old];
+    for(const [old,key]of moves)next[key]=records[old];
+    return next;
+}
 function createMarkerController({context,getData,generate,upload,notify,document:doc=globalThis.document,resolveUrl=u=>u}) {
     // 图存在本地浏览器时地址是 idb:xxx，要先换成能显示的地址；换不出来（存在别的设备上）就是空的
     function showUrl(url,apply,missing){Promise.resolve(resolveUrl(url)).then(u=>{if(u)apply(u);else missing?.();},()=>missing?.());}
@@ -2992,12 +3131,12 @@ function createMarkerController({context,getData,generate,upload,notify,document
         decorateAll();
     }
     const chatKey=c=>String(c.getCurrentChatId?.() ?? c.chatId ?? '')+'|'+String(c.characterId ?? '')+'|'+String(c.groupId ?? '');
-    async function process(id,{manual=false,tokenIndex=null,promptOverride=null}={}) {
+    async function process(id,{manual=false,tokenIndex=null,tokenIndices=null,promptOverride=null}={}) {
         const c=context(),msg=c.chat?.[id],cfg=settings();
         if(stopped||!msg||msg.is_system||(!manual&&(!cfg.auto||msg.is_user)))return 0;
         const source=String(msg.mes||''),swipe=msg.swipe_id,chat=chatKey(c),all=parseImageMarkers(source,cfg.start,cfg.end);
-        if(manual&&tokenIndex===null&&all.length>1){notify('请点击具体提示词旁的生成按钮，一次只生成所选图片','info');decorate(id);return 0;}
-        const selected=tokenIndex===null?all:all.filter((_,i)=>i===tokenIndex);
+        if(manual&&tokenIndex===null&&!Array.isArray(tokenIndices)&&all.length>1){notify('请点击具体提示词旁的生成按钮，一次只生成所选图片','info');decorate(id);return 0;}
+        const selected=Array.isArray(tokenIndices)?all.filter((_,i)=>tokenIndices.includes(i)):tokenIndex===null?all:all.filter((_,i)=>i===tokenIndex);
         if(!selected.length){if(manual)notify('没有完整生图标记','info');return 0;}
         const jobs=selected.map(token=>{
             const key=recordKey(msg,token);let map=pending.get(msg);
@@ -5263,10 +5402,10 @@ function viewSettings(d) {
       <label class="pc-field"><span>结束标记</span><input data-optstr="imageEndTag" value="${esc(marker.end)}" placeholder="###"></label>
       <div class="pc-hint">逐图调用角色：在图片提示词内写 $名字-sfw-upperbody$，也支持智绘姬 JSON 角色标记。只补这张图指定角色的外貌和参考图；纯英文标签照常使用。使用外部生图预设时，请在该预设中加入逐图角色标记规则。<br>已内置「智库 · 生图标记不发送」正则：过滤发送给聊天模型的生图标记，不影响生图读取。修改标记时自动同步。</div>
       <label class="pc-field"><span>标记生图额外负面词</span><input data-optstr="chatNegative" value="${esc(d.options.chatNegative || '')}"></label>
-      <div class="pc-row-between pc-mt-s"><b>正文自动插图</b><span class="pc-dim small">不用另挂生图世界书</span></div>
+      <div class="pc-row-between pc-mt-s"><b>正文自动插图</b><span class="pc-dim small">也可选中文字后点「图片生成」</span></div>
       <div class="pc-seg three">${[['off', '关'], ['inline', '跟正文一起写'], ['after', '写完再请求']].map(([v, t]) => `<button class="${(d.options.illustMode || 'off') === v ? 'on' : ''}" data-act="illmode" data-mode="${v}">${t}</button>`).join('')}</div>
       <div class="pc-hint">${d.options.illustMode === 'inline' ? '每次发消息时告诉聊天 AI：在有画面感的地方顺手写一行生图标记。不多花请求，但要模型听话；破限或预设管得很死的话可能不写。' : d.options.illustMode === 'after' ? '回复写完后，用「AI」设置里选的 API 另外请求一次，先整理瞬间、人物姿势和镜头构图，再转成标签插回正文。多一次请求，但不改聊天 AI 的输出，跟智绘姬的「自动 LLM 请求生图」一样。' : '打开后不用自己写标记，回复里会自动出现生图标记，再按上面的开关自动出图。'}</div>
-      ${d.options.illustMode && d.options.illustMode !== 'off' ? `<label class="pc-field"><span>每条回复最多几张</span><select data-illmax>${[1, 2, 3].map(n => `<option value="${n}" ${(Number(d.options.illustMax) || 1) === n ? 'selected' : ''}>${n}</option>`).join('')}</select></label>` : ''}`);
+      ${d.options.illustMode && d.options.illustMode !== 'off' ? `<label class="pc-field"><span>每条回复最多几张 · 自行填写</span><input type="number" min="1" step="1" inputmode="numeric" data-illmax value="${esc(d.options.illustMax ?? 1)}"></label>` : ''}`);
 
     const illustEditor = renderIllustrationEditor(d.options, ui.illustPromptDraft, !!illustrationLastRequest, esc);
     const nightMode = d.options.nightMode || 'day';
@@ -6002,7 +6141,7 @@ async function onChangeEv(ev) {
     if (el.dataset.bindCheck) { setPath(ui, el.dataset.bindCheck, el.checked); if (ui.view === 'batch') render(); return; }
     if (el.dataset.bind === 'batch.text') { render(); return; }
     if (el.dataset.opt) { d.options[el.dataset.opt] = el.checked; if (el.dataset.opt === 'imageExpanded') __mod_marker.applyImageDefault(); commit(); return; }
-    if (el.hasAttribute('data-illmax')) { d.options.illustMax = Number(el.value) || 1; commit(); return; }
+    if (el.hasAttribute('data-illmax')) { try { d.options.illustMax = illustrationCount(el.value); commit(); } catch(e) { el.value = String(d.options.illustMax ?? 1); toastr.warning(e.message, '智库'); } return; }
     if (el.dataset.optstr) { d.options[el.dataset.optstr] = el.value.trim(); if (['imageStartTag','imageEndTag'].includes(el.dataset.optstr)) __mod_marker.syncRegex(); commit({ silent: true }); return; }
     if (el.dataset.api) {
         const p = T.apiProfiles().find(x => x.id === T.activeApiId());
@@ -6939,7 +7078,7 @@ async function start() {
     UI.renderStub();
     cleanups.push(onChange(() => { UI.renderChip(); UI.renderStub(); }));
 
-    const onChat = () => setTimeout(() => { UI.renderChip(); UI.renderStub(); E.applyBindingOnChatChange(); addMesButtons(); }, 300);
+    const onChat = () => { selectedImages.reset(); return setTimeout(() => { UI.renderChip(); UI.renderStub(); E.applyBindingOnChatChange(); addMesButtons(); }, 300); };
     DOC.addEventListener('click', onChatClick, true);
     cleanups.push(() => { DOC.removeEventListener('click', onChatClick, true); DOC.querySelectorAll('.pc-mes-gen, .pc-mes-outfit').forEach(n => n.remove()); });
     const onRendered = id => { setTimeout(addMesButtons, 50); };
@@ -6951,8 +7090,10 @@ async function start() {
         askLLM: (...args) => __mod_translate.askLLM(...args), pickJson: text => __mod_translate.pickJson(text),
         warn: message => toastr.warning(message, '智库 · 自动插图', {timeOut:6000}),
         onRequest: request => { illustrationLastRequest = request; },
-        afterSave: id => setTimeout(() => { addMesButtons(); void __mod_marker.process(id); }, 0),
+        afterSave: async (id, selection = {}) => { addMesButtons(); return __mod_marker.process(id, selection.manual ? {manual:true,tokenIndices:selection.tokenIndices} : {}); },
     });
+    const selectedImages = createSelectedImageController({document:DOC,getContext:()=>SillyTavern.getContext(),settings:()=>__mod_marker.settings(),generate:(shot,count)=>illustrationPlanner.selected(shot,count),notify:message=>toastr.info(message,'智库 · 选段生图')});
+    cleanups.push(() => selectedImages.stop());
     const syncIllust = type => illustrationPlanner.sync(type);
     const illustAfter = id => illustrationPlanner.after(id);
     syncIllust();
