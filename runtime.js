@@ -86,7 +86,7 @@ function illustrationRequest({ options, mode, roster, markers, story = '', selec
         outfitMode: char.outfitMode,
         outfit: char.outfitMode === 'fixed' ? ((char.outfits || []).find(o => o.id === char.outfitId) || char.outfits?.[0])?.tags?.map(t => t.en).filter(Boolean).join(', ') || '' : '',
     }));
-    const data = { mode, imageLimit: illustrationCount(options.illustMax ?? 1), markers, candidates, ...(mode === 'after' ? { story, ...(selectedPassage ? { selectedPassage } : {}) } : {}) };
+    const data = { mode, imageLimit: selectedPassage ? 1 : illustrationCount(options.illustMax ?? 1), markers, candidates, ...(mode === 'after' ? { story, ...(selectedPassage ? { selectedPassage } : {}) } : {}) };
     const system = prompt ?? illustrationPrompt(options);
     const user = JSON.stringify(data, null, 2);
     return { mode, system, user, injection: system + '\n\n【本次输入】\n' + user };
@@ -391,7 +391,7 @@ function createSelectedImageController({document:doc,getContext,settings,generat
         button.hidden=true;
         panel=doc.createElement('div');panel.className='pc-selection-backdrop';
         const box=doc.createElement('div');box.className='pc-selection-dialog';box.setAttribute('role','dialog');box.setAttribute('aria-modal','true');box.setAttribute('aria-label','为这段生成图片？');
-        box.innerHTML='<h3>为这段生成图片？</h3><textarea readonly aria-label="选中段落"></textarea><p>结合整篇正文理解这段画面，张数沿用设置。图片插在这段之后。</p><div class="pc-selection-status" role="status"></div><div class="pc-selection-actions"><button type="button" data-generate>生成图片</button><button type="button" data-close>取消</button></div>';
+        box.innerHTML='<h3>为这段生成图片？</h3><textarea readonly aria-label="选中段落"></textarea><p>结合整篇正文，为这段生成一张图片，插在这段之后。</p><div class="pc-selection-status" role="status"></div><div class="pc-selection-actions"><button type="button" data-generate>生成图片</button><button type="button" data-close>取消</button></div>';
         box.querySelector('textarea').value=shot.text;
         const submit=box.querySelector('[data-generate]'),status=box.querySelector('[role="status"]');
         box.querySelector('[data-close]').onclick=dismiss;
@@ -539,7 +539,7 @@ function imageInsertionPoint(text, sentence) {
     return last.start + last.text.trimEnd().length;
 }
 
-// 智库 · 原生扩展版 v0.8.15（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.16（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -557,7 +557,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.15';
+globalThis.__PC_VERSION = '0.8.16';
 
 // ───── model.js ─────
 const __mod_model = (() => {

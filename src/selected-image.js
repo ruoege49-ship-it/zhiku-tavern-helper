@@ -104,7 +104,7 @@ export function createSelectedImageController({document:doc,getContext,settings,
         button.hidden=true;
         panel=doc.createElement('div');panel.className='pc-selection-backdrop';
         const box=doc.createElement('div');box.className='pc-selection-dialog';box.setAttribute('role','dialog');box.setAttribute('aria-modal','true');box.setAttribute('aria-label','为这段生成图片？');
-        box.innerHTML='<h3>为这段生成图片？</h3><textarea readonly aria-label="选中段落"></textarea><p>结合整篇正文理解这段画面，张数沿用设置。图片插在这段之后。</p><div class="pc-selection-status" role="status"></div><div class="pc-selection-actions"><button type="button" data-generate>生成图片</button><button type="button" data-close>取消</button></div>';
+        box.innerHTML='<h3>为这段生成图片？</h3><textarea readonly aria-label="选中段落"></textarea><p>结合整篇正文，为这段生成一张图片，插在这段之后。</p><div class="pc-selection-status" role="status"></div><div class="pc-selection-actions"><button type="button" data-generate>生成图片</button><button type="button" data-close>取消</button></div>';
         box.querySelector('textarea').value=shot.text;
         const submit=box.querySelector('[data-generate]'),status=box.querySelector('[role="status"]');
         box.querySelector('[data-close]').onclick=dismiss;

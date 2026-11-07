@@ -77,7 +77,7 @@ export function illustrationRequest({ options, mode, roster, markers, story = ''
         outfitMode: char.outfitMode,
         outfit: char.outfitMode === 'fixed' ? ((char.outfits || []).find(o => o.id === char.outfitId) || char.outfits?.[0])?.tags?.map(t => t.en).filter(Boolean).join(', ') || '' : '',
     }));
-    const data = { mode, imageLimit: illustrationCount(options.illustMax ?? 1), markers, candidates, ...(mode === 'after' ? { story, ...(selectedPassage ? { selectedPassage } : {}) } : {}) };
+    const data = { mode, imageLimit: selectedPassage ? 1 : illustrationCount(options.illustMax ?? 1), markers, candidates, ...(mode === 'after' ? { story, ...(selectedPassage ? { selectedPassage } : {}) } : {}) };
     const system = prompt ?? illustrationPrompt(options);
     const user = JSON.stringify(data, null, 2);
     return { mode, system, user, injection: system + '\n\n【本次输入】\n' + user };
