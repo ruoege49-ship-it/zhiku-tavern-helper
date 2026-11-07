@@ -19,7 +19,7 @@ export function applyIllustrationPlans(s) {
         onRequest: request => { illustrationLastRequest = request; },
         afterSave: async (id, selection = {}) => { addMesButtons(); return __mod_marker.process(id, selection.manual ? {manual:true,tokenIndices:selection.tokenIndices} : {}); },
     });
-    const selectedImages = createSelectedImageController({document:DOC,getContext:()=>SillyTavern.getContext(),settings:()=>__mod_marker.settings(),generate:(shot,count)=>illustrationPlanner.selected(shot,count),notify:message=>toastr.info(message,'智库 · 选段生图')});
+    const selectedImages = createSelectedImageController({document:DOC,getContext:()=>SillyTavern.getContext(),settings:()=>__mod_marker.settings(),generate:shot=>illustrationPlanner.selected(shot),notify:message=>toastr.info(message,'智库 · 选段生图')});
     cleanups.push(() => selectedImages.stop());
     const syncIllust = type => illustrationPlanner.sync(type);
     const illustAfter = id => illustrationPlanner.after(id);
@@ -36,7 +36,7 @@ export function applyIllustrationPlans(s) {
     }
     patch('<span>每条回复最多几张</span>', '<span>每条回复最多几张 · 自行填写</span>');
     patch("if (el.hasAttribute('data-illmax')) { d.options.illustMax = Number(el.value) || 1; commit(); return; }", "if (el.hasAttribute('data-illmax')) { try { d.options.illustMax = illustrationCount(el.value); commit(); } catch(e) { el.value = String(d.options.illustMax ?? 1); toastr.warning(e.message, '智库'); } return; }");
-    patch('不用另挂生图世界书', '也可选中文字后点「图片生成」');
+    patch('不用另挂生图世界书', '点击正文段落即可确认生图');
     patch('    const nightMode = d.options.nightMode || \'day\';', `    const illustEditor = renderIllustrationEditor(d.options, ui.illustPromptDraft, !!illustrationLastRequest, esc);
     const nightMode = d.options.nightMode || 'day';`);
     // Insert the editor next to the existing chat controls, not in a disconnected dialog.
