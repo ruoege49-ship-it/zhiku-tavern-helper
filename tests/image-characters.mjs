@@ -52,6 +52,7 @@ const sandbox={structuredClone,console,readIllustrationPlan,compileIllustrationP
 const chars=vm.runInNewContext(helperSource+'\n'+between('const __mod_chars =','// Marker-triggered generation')+'\n__mod_chars',sandbox);
 sandbox.__mod_chars=chars;
 const adapter=vm.runInNewContext(between("let pcMarkerRaw = ''",'const __mod_ui =')+'\n__mod_marker',sandbox);
+d.options.chatPositive='cinematic lighting, detailed background';
 // Same floor, three different casts, with five names in an unrelated status panel.
 context.chat=[{mes:`<content>小红和小蓝交谈。image###2girls, garden, $小红-sfw-upperbody$, smiling, $小蓝-sfw-upperbody$, waving###\n小绿离开。image###$小绿-sfw-upperbody$, walking###\n湖面平静。image###no humans, lake###</content><details>${names.join('、')}</details>`,swipe_id:0}];
 const original=context.chat[0].mes;
@@ -59,6 +60,7 @@ const notices=[];
 let controller=createMarkerController({...adapter,context:()=>context,getData:()=>d,document:undefined,upload:async()=>({url:'/test.png'}),notify:(...args)=>notices.push(args)});
 assert.equal(await controller.process(0),3);
 assert.equal(requests.length,3);
+for(const req of requests) assert.match(req.positive,/cinematic lighting, detailed background/);
 assert.equal(requests[0].chars.length,2);assert.equal(requests[1].chars.length,1);assert.equal(requests[2].chars.length,0);
 assert.equal(requests[0].director.map(r=>r.key).join(','),'ref_0,ref_1');
 assert.equal(requests[1].director[0].key,'ref_2');assert.equal(requests[2].director,null);
@@ -80,6 +82,7 @@ assert.equal(requests.length,count+1,'unregistered role still draws');assert.ok(
 // Direct V3 and Tavern paths flatten only selected people; no implicit rest-of-cast append.
 for (const mode of [{naiMode:'tavern',novelaimode:'nai-diffusion-4-5-full'},{naiMode:'direct',novelaimode:'nai-diffusion-3'}]) {
     Object.assign(nai,mode);await adapter.generate('$小红-sfw-upperbody$, smiling');
+    assert.match(requests.at(-1).positive,/cinematic lighting, detailed background/);
     assert.equal(requests.at(-1).chars.length,0);assert.match(requests.at(-1).positive,/hair_0/);assert(!requests.at(-1).positive.includes('hair_1'));
 }
 controller.stop();

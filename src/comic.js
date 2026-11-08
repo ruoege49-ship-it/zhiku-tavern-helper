@@ -13,14 +13,14 @@ const NEG_FORBIDDEN = [
     'text', 'chinese text', 'english text', 'japanese text', 'speech bubble', 'thought bubble', 'narration', 'sound effects',
     'comic', 'comic panel', 'panels', 'multiple views', 'multiple scenes', '4koma', '2koma', 'sequence', 'full page comic', 'cut-in',
     'border', 'white border', 'black border', 'ornate border', 'lace border', 'outside border', 'frame', 'outline', 'margins', 'negative space',
-    'screentone', 'halftone',
+    'screentone', 'halftone', 'monochrome', 'greyscale', 'grayscale',
 ];
 const bareTag = t => String(t || '').trim().replace(/^-?\d+(?:\.\d+)?::/, '').replace(/::$/, '').replace(/[{}\[\]]/g, '').replace(/_/g, ' ').trim().toLowerCase();
 const splitTags = s => String(s || '').split(/[,\n]/).map(t => t.trim()).filter(Boolean);
 
 /** 负面里会坏事的词 */
 export function comicNegativeConflicts(neg, { monochrome = true } = {}) {
-    const bad = new Set(NEG_FORBIDDEN.filter(t => monochrome || !['screentone', 'halftone'].includes(t)));
+    const bad = new Set(NEG_FORBIDDEN.filter(t => monochrome || !['screentone', 'halftone', 'monochrome', 'greyscale', 'grayscale'].includes(t)));
     return [...new Set(splitTags(neg).filter(t => bad.has(bareTag(t))))];
 }
 /** 去掉负面里会坏事的词 */
@@ -181,7 +181,7 @@ export function storyText(mes) {
         .replace(/\n{3,}/g, '\n\n').trim();
 }
 /** 「把这一楼画成漫画」的请求：读这一楼的正文，改编成几页漫画分镜 */
-export function adaptRequest(story, { pages = 0, cast = '', before = '' } = {}) {
+export function adaptRequest(story, { pages = 0, cast = '', before = '', color = 'color', extra = '' } = {}) {
     const system = '你是漫画分镜导演，把小说 / 角色扮演的正文改编成日式漫画页，给 NovelAI V5 出图用。'
         + '每一页先写一组 <comic_plan>（这一页讲什么、几格、每格的构图和对白），紧跟着写一组 <image>…</image>。只输出这些块，不要任何解释。'
         + '<image> 用分段文本协议：第一行 @page，下面写这一页的整体：分级（rating:general 或 rating:sensitive）、实际人数词（如 1boy, 1girl, 2boys）、comic page、画格数量与布局、留白、光影、色调。'
@@ -191,7 +191,8 @@ export function adaptRequest(story, { pages = 0, cast = '', before = '' } = {}) 
         + '\n\n格式示例：\n<comic_plan>第 1 页：两格。P1 远景交代咖啡馆和雨；P2 近景他看向窗外。</comic_plan>\n<image>\n@page\nrating:general, 1boy, comic page, 2 panels, vertical layout, rainy night, warm indoor light\n@panel P1\ntop half, wide shot, cafe interior, rain on window\n@panel P2\nbottom half, close-up\n@character C1\nboy, black hair, grey eyes, white shirt, black vest, sitting, looking outside, melancholic\nText: 「又下雨了。」\n</image>';
     const user = (cast ? `<characters>\n${cast}\n</characters>\n\n` : '')
         + (before ? `<previous readonly="true">\n${before}\n</previous>\n\n` : '')
-        + `<story>\n${story}\n</story>\n\n把 <story> 改编成${pages ? ` ${pages} 页` : ' 1–4 页（按剧情多少自己定，一页 2–5 格）'}漫画。只画 <story> 里发生的事。`;
+        + `<story>\n${story}\n</story>\n\n把 <story> 改编成${pages ? ` ${pages} 页` : ' 1–4 页（按剧情多少自己定，一页 2–5 格）'}${color === 'mono' ? '黑白网点' : '彩色'}漫画。只画 <story> 里发生的事。`
+        + (String(extra || '').trim() ? `\n额外要求：${String(extra).trim()}` : '');
     return { system, user };
 }
 /** AI 改编出来的几页：只留能用的 <comic_plan> + <image> */
@@ -242,7 +243,9 @@ const CSS = `
 .pc-comic-wait{min-height:96px;display:grid;place-items:center;text-align:center;border-radius:14px;border:1.5px dashed rgba(244,239,228,.45);background:rgba(244,239,228,.07);color:var(--SmartThemeBodyColor,#e9dfcf);font-size:13px;padding:14px}
 .pc-comic-wait small{display:block;font-size:11px;opacity:.7;margin-top:2px;white-space:pre-wrap}
 .pc-comic-wait button{margin-top:8px;min-height:34px;padding:0 16px;border-radius:999px;border:1.5px solid currentColor;background:transparent;color:inherit;font:inherit;cursor:pointer}
-.pc-comic-page.busy::after{content:"重画中…";position:absolute;inset:0;display:grid;place-items:center;background:rgba(20,18,16,.45);color:#fff;font-size:14px;letter-spacing:.2em}
+.pc-comic-busy{position:absolute;inset:0;display:grid;place-items:center;background:rgba(20,18,16,.5);z-index:2}
+.pc-comic-busy span{padding:8px 18px;border-radius:999px;background:rgba(20,18,16,.8);color:#fff;font-size:14px;letter-spacing:.15em;animation:pc-comic-pulse 1.2s ease-in-out infinite}
+@keyframes pc-comic-pulse{50%{opacity:.45}}
 .pc-comic-book{position:fixed;inset:0;z-index:2147480300;background:#141210;color:#f4efe4;font-family:"Noto Serif SC","Songti SC",serif;overflow:hidden;-webkit-user-select:none;user-select:none}
 .pc-comic-book header{position:absolute;top:0;left:0;right:0;z-index:10;display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;padding:max(10px,env(safe-area-inset-top)) 12px 6px}
 .pc-comic-book header b{flex:1;min-width:0;font-size:15px;letter-spacing:.1em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -291,6 +294,9 @@ const CSS = `
 .pc-comic-toc button.todo{border-style:dashed}
 .pc-comic-toc button.todo i{flex:0 0 44px;height:60px;border-radius:8px;border:1.5px dashed #b9a896;display:grid;place-items:center;font-style:normal;font-size:20px;color:#9a8878}
 .pc-comic-toc button.todo em{flex:0 0 auto;font-style:normal;font-size:12px;padding:4px 10px;border-radius:999px;background:#3a2a22;color:#f4efe4}
+.pc-comic-set .pc-label{margin-top:14px}
+.pc-comic-set>.pc-label:first-child,.pc-comic-set>.pc-banwarn:first-child+.pc-label{margin-top:0}
+.pc-comic-set select.pc-input{margin-top:4px}
 .pc-comic-toc-tip{font-size:12px;color:#6e5a4d;margin:-4px 0 10px;line-height:1.6}
 .pc-comic-book .empty .bb.wide{width:auto;padding:0 18px;margin-top:14px;border-radius:999px}
 .pc-comic-fail{border:1.5px dashed #9b4f45;border-radius:14px;padding:10px 12px;font-size:13px;line-height:1.6;color:inherit}
@@ -345,15 +351,18 @@ export function createComicController(deps) {
     const size = () => String(opts().comicSize || '832x1216').split('x').map(Number);
     function style_() {
         const d = getData();
-        const ref = d.active;
         const M = deps.model;
+        const own = String(opts().comicStyle || '');
+        const m = /^(group|artist):(.+)$/.exec(own);
+        const ownRef = m && M.resolveTicket(d, { type: m[1], id: m[2] }) ? { type: m[1], id: m[2] } : null;
+        const ref = ownRef || d.active;
         return { pos: ref ? M.ticketString(d, ref) : '', neg: ref ? M.ticketNeg(d, ref) : '', name: ref ? M.ticketName(d, ref) : '' };
     }
     function negativeFor() {
         const st = style_();
         const extra = opts().comicNeg ?? COMIC_DEFAULT_NEGATIVE;
         const neg = [st.neg, extra].filter(Boolean).join(', ');
-        return opts().comicStripNeg === false ? neg : stripComicNegative(neg);
+        return opts().comicStripNeg === false ? neg : stripComicNegative(neg, { monochrome: opts().comicColor === 'mono' });
     }
     async function saveChat(c = getContext()) { await (c.saveChatConditional || c.saveChat)?.call(c); }
     function pageSnapshot(id, block) {
@@ -388,7 +397,8 @@ export function createComicController(deps) {
             const st = style_();
             const [w, h] = size();
             const textMode = ['draw', 'overlay', 'none'].includes(opts().comicText) ? opts().comicText : 'overlay';
-            const req = comicRequest(parsed, { stylePos: st.pos, extraNeg: negativeFor(), width: w, height: h, textMode });
+            const mono = opts().comicColor === 'mono' ? 'monochrome, greyscale, screentone' : '';
+            const req = comicRequest(parsed, { stylePos: [st.pos, mono].filter(Boolean).join(', '), extraNeg: negativeFor(), width: w, height: h, textMode });
             running.set(job, 'run'); render(id);
             const r = await generatePage(req);
             if (!snap.current()) return;
@@ -440,7 +450,9 @@ export function createComicController(deps) {
             const ver = r.versions.length > 1 ? `<span class="pc-comic-ver"><button data-cv="-1" aria-label="上一版">‹</button>${(r.cur ?? 0) + 1}/${r.versions.length}<button data-cv="1" aria-label="下一版">›</button></span>` : '';
             const caps = v.textMode === 'overlay' ? captionsHtml(v.captions || parseComicPage(b.inner), esc) : '';
             const acts = `<div class="pc-comic-acts"><button data-cgen>重画这一页</button><button data-cwork>编辑本页</button></div>`;
-            return `<figure class="pc-comic-page${running.has(job) ? ' busy' : ''}" data-ckey="${b.key}" data-page="${b.page}"><img data-comic-src="${esc(v.url)}" alt="第 ${b.page} 页" draggable="false">${caps}${tag}${ver}${acts}</figure>`;
+            const st = running.get(job);
+            const busy = st ? `<div class="pc-comic-busy"><span>${st === 'wait' ? '排队中…' : '重画中…'}</span></div>` : '';
+            return `<figure class="pc-comic-page${st ? ' busy' : ''}" data-ckey="${b.key}" data-page="${b.page}"><img data-comic-src="${esc(v.url)}" alt="第 ${b.page} 页" draggable="false">${caps}${tag}${ver}${acts}${busy}</figure>`;
         }
         const st = running.get(job);
         const err = errors.get(job);
@@ -525,7 +537,7 @@ export function createComicController(deps) {
             });
             render(t.id); return;
         }
-        if (ev.target.closest('[data-cgen]')) { ev.stopPropagation(); doc.querySelectorAll('.pc-comic-page.acts').forEach(n => n.classList.remove('acts')); void generateOne(t.id, t.block); return; }
+        if (ev.target.closest('[data-cgen]')) { ev.stopPropagation(); doc.querySelectorAll('.pc-comic-page.acts').forEach(n => n.classList.remove('acts')); notify(`开始画第 ${t.block.page} 页，画好会自动换上`); void generateOne(t.id, t.block); return; }
         if (ev.target.closest('[data-cwork]')) { ev.stopPropagation(); doc.querySelectorAll('.pc-comic-page.acts').forEach(n => n.classList.remove('acts')); openWorkbench(t.id, t.block.key); return; }
         // 点一下图：只是显示 / 收起这一页的按钮，不会直接重画（以前双击就重画，滑动时很容易误触）
         if (ev.target.tagName !== 'IMG' && !ev.target.closest('.pc-comic-caps')) return;
@@ -630,6 +642,69 @@ export function createComicController(deps) {
         if (nb) await generateOne(id, nb);
     }
 
+    // ── 漫画设置：专门一个面板（漫画书右上角「设置」、智库设置里的「漫画」都能打开） ──
+    function openSettings(container) {
+        if (stopped) return;
+        const M = deps.model;
+        let box = null, root;
+        if (container) { container.innerHTML = '<div class="pc-comic-set"></div>'; root = container.firstChild; }
+        else {
+            box = modal('<div class="pc-comic-set"></div>');
+            box.parentElement.style.zIndex = '2147480400'; // 盖在漫画书上面
+            root = box.querySelector('.pc-comic-set');
+            const closeModal = box.closeModal.bind(box);
+            box.closeModal = () => { panels.delete(box.closeModal); closeModal(); };
+            panels.add(box.closeModal);
+        }
+        const seg = (key, list, def) => { const cur = String(opts()[key] ?? def); return `<div class="pc-seg ${list.length === 3 ? 'three' : ''}" style="${list.length > 3 ? `grid-template-columns:repeat(${list.length},minmax(0,1fr))` : ''}">${list.map(([v, t]) => `<button class="${cur === String(v) ? 'on' : ''}" data-cs="${key}" data-v="${v}">${t}</button>`).join('')}</div>`; };
+        const sw = (key, text, small, def = false) => `<label class="pc-switch"><input type="checkbox" data-cw="${key}" ${(opts()[key] ?? def) ? 'checked' : ''}><span></span>${text}${small ? `<small>${small}</small>` : ''}</label>`;
+        const draw = () => {
+            const d = getData(), o = opts();
+            const groups = Object.values(d.groups || {}).filter(g => g.members?.length).sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh'));
+            const st = style_();
+            const neg = o.comicNeg ?? COMIC_DEFAULT_NEGATIVE;
+            const posBad = comicPositiveConflicts(st.pos), negBad = comicNegativeConflicts([st.neg, neg].join(', '), { monochrome: o.comicColor === 'mono' });
+            const tavern = deps.naiMode?.() === 'tavern';
+            root.innerHTML = `${box ? '<div class="pc-row-between"><h3 class="pc-h3" style="margin:0">漫画设置</h3><button class="pc-btn small" data-cx>好了</button></div>' : ''}
+              ${tavern ? '<div class="pc-banwarn">⚠ 现在用的是酒馆里的 key：画不了漫画（分人物），到 NovelAI 设置里改成自己填 key 或第三方站点。</div>' : ''}
+              <div class="pc-label">开关</div>
+              ${sw('comicOn', '漫画模式', '认出回复里的 &lt;image&gt;@page…&lt;/image&gt;（漫画台预设）自动画；「画成漫画」不开也能用')}
+              ${sw('comicAuto', '回复写完自动出图', '关掉的话，在楼层里点「生成这一页」再画', true)}
+              <div class="pc-label">画风</div>
+              <select class="pc-input" data-cstyle><option value="">跟正文画师串一样${d.active ? `（现在是「${esc(M.ticketName(d, d.active))}」）` : '（还没选）'}</option>
+                ${groups.map(g => `<option value="group:${esc(g.id)}" ${o.comicStyle === 'group:' + g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>
+              <div class="pc-hint">漫画单独用一个画师串，不影响聊天插图。${posBad.length ? `<br><b>⚠ 这串里有人数词：${posBad.map(esc).join('、')}</b>，人数应该由每页自己写，建议去掉。` : ''}</div>
+              <div class="pc-label">颜色</div>
+              ${seg('comicColor', [['color', '彩色'], ['mono', '黑白网点']], 'color')}
+              <div class="pc-label">对白怎么出现</div>
+              ${seg('comicText', [['overlay', '插件叠字'], ['draw', 'NAI 画进图'], ['none', '不要对白']], 'overlay')}
+              <div class="pc-hint">NAI 画中文常常乱码，「插件叠字」让 NAI 只画画面，对白由浏览器显示，位置按分格数量竖向估算；下载的仍是未叠字原图。</div>
+              <div class="pc-label">页面尺寸（跨页自动横过来）</div>
+              ${seg('comicSize', [['832x1216', '竖'], ['1216x832', '横'], ['1024x1024', '方']], '832x1216')}
+              <div class="pc-label">「画成漫画」每楼画几页</div>
+              ${seg('comicPages', [[0, '自动'], [1, '1'], [2, '2'], [3, '3'], [4, '4']], 0)}
+              <label class="pc-field pc-mt-s"><span>给 AI 的改编要求（可不填）</span><textarea class="pc-textarea small" data-cstr="comicExtra" placeholder="比如：多用特写和留白；对白少一点；每页最多 3 格；不要画 user 的脸">${esc(o.comicExtra || '')}</textarea></label>
+              <label class="pc-field pc-mt-s"><span>漫画负面（加在画风负面后面）</span><textarea class="pc-textarea small mono" data-cstr="comicNeg">${esc(neg)}</textarea></label>
+              <div class="pc-actions wrap" style="margin-top:6px"><button class="pc-pill dashed tiny" data-cnegreset>恢复默认负面</button></div>
+              ${sw('comicStripNeg', '自动去掉负面里会压掉分格、留白、网点的词', negBad.length ? `现在负面里有：${negBad.map(esc).join('、')}` : '', true)}
+              <div class="pc-hint">改了以后对新画的页生效；已经画好的页点一下图 →「重画这一页」。</div>`;
+        };
+        root.addEventListener('click', ev => {
+            const b = ev.target.closest('[data-cs]');
+            if (b) { const v = b.dataset.v; opts()[b.dataset.cs] = /^\d+$/.test(v) && b.dataset.cs === 'comicPages' ? Number(v) : v; commit(); draw(); return; }
+            if (ev.target.closest('[data-cnegreset]')) { delete opts().comicNeg; commit(); draw(); return; }
+            if (ev.target.closest('[data-cx]')) { box?.closeModal(); renderAll(); }
+        });
+        root.addEventListener('change', ev => {
+            const t = ev.target;
+            if (t.dataset.cw) { opts()[t.dataset.cw] = t.checked; commit(); draw(); renderAll(); }
+            else if (t.matches('[data-cstyle]')) { opts().comicStyle = t.value; commit(); draw(); }
+        });
+        root.addEventListener('input', ev => { const t = ev.target; if (t.dataset.cstr) { opts()[t.dataset.cstr] = t.value; commit(); } });
+        draw();
+        return box;
+    }
+
     // ── 把一楼画成漫画：AI 读正文写分镜，存进这楼，再一页页出图 ──
     async function adapt(id, { pages = 0, redo = false } = {}) {
         const snap = pageSnapshot(id);
@@ -647,7 +722,7 @@ export function createComicController(deps) {
         try {
             const prevMsg = (c.chat || []).slice(0, id).reverse().find(m => m && !m.is_system && m.extra?.zhikuComicSrc);
             const before = prevMsg ? comicBlocks(srcOf(prevMsg)).slice(-1).map(b => b.inner).join('') : '';
-            const { system, user } = adaptRequest(story.slice(0, 12000), { pages, cast: deps.castText?.() || '', before });
+            const { system, user } = adaptRequest(story.slice(0, 12000), { pages: pages || Number(opts().comicPages) || 0, cast: deps.castText?.() || '', before, color: opts().comicColor === 'mono' ? 'mono' : 'color', extra: opts().comicExtra || '' });
             const out = parseAdapt(await askLLM(system, user, { maxTokens: 8000 }));
             if (!snap.current()) return;
             const restore = checkpoint(msg), removed = [];
@@ -710,7 +785,7 @@ export function createComicController(deps) {
             if (['book', 'flow', 'scroll'].includes(saved?.mode)) mode = saved.mode;
             if (saved?.chat === chatKey(getContext()) && Number.isInteger(saved.at)) at = Math.min(pages.length - 1, Math.max(0, saved.at));
         } catch { /* 没存过 */ }
-        book.innerHTML = `<header><b></b><small></small><button class="bb" data-b="toc">目录</button><button class="bb" data-b="x" aria-label="关闭">✕</button>
+        book.innerHTML = `<header><b></b><small></small><button class="bb" data-b="set">设置</button><button class="bb" data-b="toc">目录</button><button class="bb" data-b="x" aria-label="关闭">✕</button>
             <div class="seg">${[['book', '翻书'], ['flow', '卡片堆'], ['scroll', '上下滑']].map(([m, t]) => `<button data-mode="${m}">${t}</button>`).join('')}</div></header>
           <div class="pc-comic-stage"></div><div class="tip"></div>
           <footer><button class="bb" data-b="-1" aria-label="上一页">‹</button><input type="range" min="1" value="1" aria-label="翻到"><button class="bb" data-b="1" aria-label="下一页">›</button></footer>`;
@@ -873,7 +948,7 @@ export function createComicController(deps) {
             const m = ev.target.closest('[data-mode]');
             if (m) { mode = m.dataset.mode; build(); return; }
             const b = ev.target.closest('[data-b]')?.dataset.b;
-            if (b === 'x') close(); else if (b === 'toc') toc(); else if (b) go(Number(b));
+            if (b === 'x') close(); else if (b === 'toc') toc(); else if (b === 'set') openSettings(); else if (b) go(Number(b));
         });
         bar.addEventListener('input', () => {
             const v = Number(bar.value) - 1;
@@ -886,7 +961,7 @@ export function createComicController(deps) {
     }
 
     return {
-        process, render, renderAll, openBook, generateOne, adapt, unadapt,
+        process, render, renderAll, openBook, generateOne, adapt, unadapt, openSettings,
         stop() {
             stopped = true;
             cancelPress({type:'stop'});
