@@ -206,6 +206,8 @@ image###1girl, garden, ${"name":"小红","angle":"from front","upperBody":"sfw",
 
 ## 来源与署名
 
+漫画模式的页面协议（`@page` / `@panel` / `@character` / `Text:`）与玩法来自「漫画台 v1.3.1」预设；智库里的实现为重新编写。
+
 保留原脚本说明：二改自从前佬的智绘姬（https://github.com/damoshen123/st-chatu8，原脚本标注 AFPL v9）。本仓库保留该署名与说明，不另行覆盖原有许可。其余作者信息按原文件保留。
 
 
