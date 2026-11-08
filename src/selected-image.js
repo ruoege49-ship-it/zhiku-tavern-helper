@@ -79,15 +79,21 @@ export function createSelectedImageController({document:doc,getContext,settings,
         if(!selection||selection.isCollapsed||!selection.rangeCount){button.hidden=true;snapshot=null;return;}
         remember(selection.getRangeAt(0),selection.toString().trim());
     }
+    // 双击（手机上是连点两下）段落才弹确认框，单击不打扰阅读
+    let lastTap=null;
     function clickParagraph(event){
         if(stopped||panel||busy||event.defaultPrevented)return;
         const target=element(event.target),host=target?.closest('.mes_text');
-        if(!host||target.closest(excluded))return;
-        const selection=win?.getSelection?.();
-        if(selection&&!selection.isCollapsed){capture();return;}
+        if(!host||target.closest(excluded)){lastTap=null;return;}
         const block=target.closest('p,li,blockquote');
-        if(!block&&host.querySelector('p,li,blockquote'))return;
-        const paragraph=block||host;
+        const paragraph=block||(host.querySelector('p,li,blockquote')?null:host);
+        const now=Date.now();
+        const twice=!!paragraph&&(event.detail===2||(lastTap&&lastTap.paragraph===paragraph&&now-lastTap.at<400));
+        lastTap=twice?null:{paragraph,at:now};
+        const selection=win?.getSelection?.();
+        if(!twice){if(selection&&!selection.isCollapsed)capture();return;}
+        // 电脑上双击会顺手选中一个词，清掉，按整段处理
+        selection?.removeAllRanges?.();
         if(!host.contains(paragraph)||paragraph.querySelector(excluded))return;
         const range=doc.createRange();range.selectNodeContents(paragraph);
         if(remember(range,range.toString().trim()))openDialog();

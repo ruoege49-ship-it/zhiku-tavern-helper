@@ -5,13 +5,14 @@ import {applyUxFixes} from './ux-fixes.mjs';
 import {applyStudioUx} from './studio-ux.mjs';
 import {applyImageCharacters} from './image-characters.mjs';
 import {applyIllustrationPlans} from './illustration-plans.mjs';
+import {applyComic} from './comic.mjs';
 import {fileURLToPath} from 'node:url';
 process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.19';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.19');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.20';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.20');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -104,7 +105,7 @@ function applyBindingOnChatChange() {
 // 画师名没写 artist: 时：认出来，一键补上
 patch('function viewStudio(d) {',`/** 没写 artist: 的画师名：开头一串名字（遇到普通词就停），加上画师库里已有的名字 */
 function guessBareArtists(d, text) {
-    const GENERAL = /^(\\d+(boy|girl|other)s?|solo|male|female|nsfw|sfw|rating:.*|year \\d{4}|\\d{4}|newest|oldest|recent|early|mid|late|masterpiece|absurdres|highres|lowres|very aesthetic|aesthetic|no text|artist collaboration|.*quality.*|ultra[ -_]?detailed)$/i;
+    const GENERAL = /^(\\d+(boy|girl|other)s?|solo|male|female|nsfw|sfw|rating:.*|year \\d{4}|\\d{4}|newest|oldest|recent|early|mid|late|masterpiece|absurdres|highres|lowres|very aesthetic|aesthetic|no[ _]text|artist[ _]collaboration|uncensored|censored|.*quality.*|ultra[ -_]?detailed)$/i;
     const nameLike = t => !/\\s/.test(t) || /^[^\\s()]+ \\((?!medium|style)[^()]+\\)$/i.test(t);
     const out = [];
     let lead = true;
@@ -113,7 +114,7 @@ function guessBareArtists(d, text) {
         const name = t.text.trim();
         const known = !!M.findArtistByTag(d, 'artist:' + name);
         if (lead && (GENERAL.test(name) || !nameLike(name))) lead = false;
-        if ((lead || known) && !GENERAL.test(name) && !out.includes(name)) out.push(name);
+        if ((lead || known) && !GENERAL.test(name) && !name.includes(":") && /[\\p{L}\\p{N}]/u.test(name) && !out.includes(name)) out.push(name);
     }
     return out;
 }
@@ -145,6 +146,75 @@ patch(`            case 'saveartist': {`,`            case 'clearresult': ui.stu
                 break;
             }
             case 'saveartist': {`);
+// 队列早就编进了脚本 JSON，src/nai-gate.js 的改动不会再注入：在这里同步「酒馆 key 的 500 也重试」
+if(!s.includes('!e.retryable'))patch('catch(e){if(e.status!==429||attempt>=2)throw e;','catch(e){if((e.status!==429&&!e.retryable)||attempt>=2)throw e;');
+// 导入场外脚本做的「画师串包」（带例图），只往画师库里加，不替换
+patch(`function batchBanWarn(d, text) {`,`/** 导入 zhiku-artist-pack.mjs 打出来的画师串包；同一串、同一张图重复导入会跳过 */
+async function importPacks(files) {
+    const d = getData();
+    let strings = 0, images = 0, skipped = 0, failed = 0;
+    const say = msg => toastr.info(msg, '智库 · 导入画师串包', { timeOut: 1500 });
+    for (const f of files) {
+        let pack;
+        try { pack = JSON.parse(await f.text()); } catch { toastr.error(\`\${f.name} 不是画师串包\`, '智库'); continue; }
+        if (pack?.app !== 'zhiku-pack' || !Array.isArray(pack.items)) { toastr.error(\`\${f.name} 不是画师串包\`, '智库'); continue; }
+        say(\`正在导入 \${f.name}（\${pack.items.length} 串）\`);
+        for (const it of pack.items) {
+            const text = String(it.text || '').trim();
+            if (!text) continue;
+            const p = M.parseArtistString(text);
+            const single = p.members.length === 1 && !p.extra && Math.abs(p.members[0].weight - 1) < 0.001;
+            const unit = single ? { tag: p.members[0].tag } : { text, members: p.members };
+            let ref = findUnit(d, unit);
+            if (!ref) { ref = M.createFromString(d, { name: String(it.name || '').slice(0, 40), text, note: it.note || '' }); if (ref) strings++; }
+            if (!ref) continue;
+            const item = M.resolveTicket(d, ref).item;
+            if (it.collection) {
+                let col = Object.values(d.collections).find(c => c.name === it.collection);
+                if (!col) { const id = M.uid('c_'); col = d.collections[id] = { id, name: String(it.collection).slice(0, 20), createdAt: Date.now() }; }
+                item.collections ||= [];
+                if (!item.collections.includes(col.id)) item.collections.push(col.id);
+            }
+            for (const im of it.images || []) {
+                const key = \`\${it.key || ''}:\${im.template}:\${im.seed}\`;
+                if (item.images.some(x => x.packKey === key)) { skipped++; continue; }
+                try {
+                    const id = await E.saveImageTo(ref, im.data, { nsfw: !!im.nsfw, templateId: im.template || '' });
+                    const saved = item.images.find(x => x.id === id);
+                    if (saved) saved.packKey = key;
+                    images++;
+                } catch (e) { failed++; console.warn('[智库] 画师串包例图没存上', e); }
+            }
+        }
+        commit();
+    }
+    render();
+    toastr.success(\`新增 \${strings} 串、\${images} 张例图\${skipped ? \`，\${skipped} 张以前导过、跳过了\` : ''}\${failed ? \`，\${failed} 张没存上\` : ''}\`, '智库 · 导入画师串包', { timeOut: 6000 });
+}
+function batchBanWarn(d, text) {`);
+patch(`        <label class="pc-btn">导入<input type="file" accept=".json,application/json" data-importdata hidden></label>
+      </div>\`);`,`        <label class="pc-btn">导入<input type="file" accept=".json,application/json" data-importdata hidden></label>
+        <label class="pc-btn">导入画师串包<input type="file" accept=".json,application/json" multiple data-importpack hidden></label>
+      </div>
+      <div class="pc-hint">「导入画师串包」用来导入场外脚本 zhiku-artist-pack 生成的画师串和例图，只往画师库里加，不会替换现有的；可以一次选多个文件。</div>\`);`);
+patch(`    if (el.matches('[data-importdata]')) {`,`    if (el.matches('[data-importpack]')) {
+        const fs = [...el.files];
+        el.value = '';
+        if (fs.length) await importPacks(fs).catch(e => toastr.error('导入失败：' + e.message, '智库'));
+        return;
+    }
+    if (el.matches('[data-importdata]')) {`);
+// 画师串的封面只用它自己的例图，不拿组里单个画师的图顶上
+patch(`    const own = pick(t.item.images);
+    if (own) return own;
+    if (t.type === 'group') {
+        for (const m of t.item.members) {
+            const a = data.artists[m.artistId];
+            const img = a && pick(a.images);
+            if (img) return img;
+        }
+    }
+    return null;`,`    return pick(t.item.images) || null;`);
 const oldButtons=s.slice(s.indexOf('    // 酒馆助手的脚本按钮（输入框下方）'),s.indexOf("    if (N.isReady()) toastr.success('打开方式：输入框下方"));
 assert(oldButtons.length>100);
 patch(oldButtons,`    // Native settings entry; no Tavern Helper globals.
@@ -205,6 +275,80 @@ patch(`        <div class="pc-label">负面</div><p class="pc-quote small mono">
         \${st.sent.director ? \`<div class="pc-banwarn">还带了角色参考 \${st.sent.director} 张：人物长相会往参考图靠。</div>\` : ''}</details>\` : ''}`);
 patch(`      <div class="pc-label" style="margin-top:0">正面</div><p class="pc-quote small mono" id="pc-pv-pos">\${pv.pos || '（空）'}</p>`,`      \${d.vibeGroups?.[d.vibeActive]?.vibes?.length && N.vibeSupported() ? \`<div class="pc-banwarn" style="margin-top:0">生成时还会带上氛围「\${esc(d.vibeGroups[d.vibeActive].name)}」\${d.vibeGroups[d.vibeActive].vibes.length} 张参考图，画面会往它们靠。</div>\` : ''}
       <div class="pc-label" style="margin-top:0">正面</div><p class="pc-quote small mono" id="pc-pv-pos">\${pv.pos || '（空）'}</p>`);
+// 选图片：手机切出去选图时智库界面可能被重画，原来的文件框没了，选的图就丢了。改成在页面最外层临时放一个文件框
+patch(`        root.addEventListener('change', onChangeEv);`,`        root.addEventListener('change', onChangeEv);
+        root.addEventListener('click', ev => {
+            const label = ev.target.closest?.('label');
+            const input = ev.target.matches?.('input[type=file]') ? ev.target : label?.querySelector('input[type=file]');
+            if (!input || input.dataset.pcProxy) return;
+            ev.preventDefault(); ev.stopPropagation();
+            DOC.querySelectorAll('input[data-pc-proxy]').forEach(n => n.remove());
+            const tmp = DOC.createElement('input');
+            tmp.type = 'file'; tmp.accept = input.accept; tmp.multiple = input.multiple;
+            for (const [k, v] of Object.entries(input.dataset)) tmp.dataset[k] = v;
+            tmp.dataset.pcProxy = '1';
+            tmp.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0';
+            DOC.body.appendChild(tmp);
+            tmp.addEventListener('change', async () => { try { await onChangeEv({ target: tmp }); } catch (e) { toastr.error(e.message, '智库'); } finally { tmp.remove(); } }, { once: true });
+            tmp.click();
+        }, true);`);
+// 加氛围图：先存下来、马上显示，再在后台编码；加几张就提示进度
+patch(`                const v = { id: M.uid('vb_'), name: f.name.replace(/\\.\\w+$/, ''), path, strength: 0.6, info: 1, encodings: {} };
+                if (N.vibeSupported() && N.isReady()) {`,`                const v = { id: M.uid('vb_'), name: f.name.replace(/\\.\\w+$/, ''), path, strength: 0.6, info: 1, encodings: {} };
+                g.vibes.push(v); commit();
+                toastr.success(\`已加上「\${v.name}」\${files.length > 1 ? \`（\${files.indexOf(f) + 1}/\${files.length}）\` : ''}\`, '氛围', { timeOut: 1500 });
+                if (N.vibeSupported() && N.isReady()) {`);
+patch(`                    catch (e) { toastr.warning('先存下了，编码失败：' + e.message + '。生图时会再试。', '氛围'); }
+                }
+                g.vibes.push(v);`,`                    catch (e) { toastr.warning('先存下了，编码失败：' + e.message + '。生图时会再试。', '氛围'); }
+                }`);
+// 「批量生成例图」挪到画师库顶部那排按钮里，画师多了不用滑到底
+patch(`      <button class="pc-pill \${ui.selecting ? 'on' : 'dashed'}" data-act="selmode">\${ui.selecting ? '退出多选' : '多选'}</button>
+      \${ui.selecting ? '' : '<button class="pc-pill dashed" data-act="randstring">随机画师串</button>'}
+    </div>`,`    </div>
+    <div class="pc-chips wrap pc-book-acts">
+      <button class="pc-pill \${ui.selecting ? 'on' : 'dashed'}" data-act="selmode">\${ui.selecting ? '退出多选' : '多选'}</button>
+      \${ui.selecting ? '' : '<button class="pc-pill dashed" data-act="nav" data-view="batch">批量生成例图</button><button class="pc-pill dashed" data-act="randstring">随机画师串</button>'}
+    </div>`);
+patch(`    <div class="pc-center pc-mt"><button class="pc-pill dashed" data-act="nav" data-view="batch">批量生成例图</button></div>`,``);
+// 例图模板：统一成正脸、正对镜头的证件照式构图，不同画师之间好比较；旧的默认模板没改过的自动换新
+{
+  const a=s.indexOf("const BASE = '1boy, solo, male focus, adult';");
+  const b=s.indexOf("for (const t of Object.values(DEFAULT_TEMPLATES)) { t.width",a);
+  assert(a>0&&b>a);
+  const oldBlock=s.slice(a,b);
+  patch(oldBlock,`const BASE = '1boy, solo, male focus, adult';
+const NEG = '1girl, female, multiple boys, child, text, watermark, signature';
+const BG = 'simple background, white background';
+// 正脸、正对镜头、居中：每位画师的例图构图一样，只比画风
+const FRONT = 'front view, facing viewer, looking at viewer, straight-on, centered, symmetrical composition';
+const NOT_FRONT = 'profile, from side, from above, from below, dutch angle, tilted head, head tilt, looking away, looking to the side, three-quarter view, extreme close-up, close-up of eye, cropped head, head out of frame, multiple views';
+const DEFAULT_TEMPLATES = {
+    sfw_head: { id: 'sfw_head', name: 'SFW 头像', nsfw: false, shot: 'head', positive: \`\${BASE}, portrait, headshot, head and shoulders, \${FRONT}, neutral expression, closed mouth, \${BG}\`, negative: \`\${NEG}, \${NOT_FRONT}, hands\` },
+    sfw_bust: { id: 'sfw_bust', name: 'SFW 胸像', nsfw: false, shot: 'bust', positive: \`\${BASE}, upper body, \${FRONT}, standing straight, arms at sides, neutral expression, \${BG}\`, negative: \`\${NEG}, \${NOT_FRONT}\` },
+    sfw_full: { id: 'sfw_full', name: 'SFW 立绘', nsfw: false, shot: 'full', positive: \`\${BASE}, full body, standing, \${FRONT}, arms at sides, feet apart, \${BG}\`, negative: \`\${NEG}, \${NOT_FRONT}, cropped\` },
+    nsfw_head: { id: 'nsfw_head', name: 'NSFW 头像', nsfw: true, shot: 'head', positive: \`nsfw, \${BASE}, portrait, headshot, head and shoulders, \${FRONT}, blush, sweat, parted lips, half-closed eyes, \${BG}\`, negative: \`\${NEG}, \${NOT_FRONT}, hands\` },
+    nsfw_bust: { id: 'nsfw_bust', name: 'NSFW 胸像', nsfw: true, shot: 'bust', positive: \`nsfw, \${BASE}, upper body, \${FRONT}, shirtless, pectorals, nipples, sweat, \${BG}\`, negative: \`\${NEG}, \${NOT_FRONT}\` },
+    nsfw_full: { id: 'nsfw_full', name: 'NSFW 立绘', nsfw: true, shot: 'full', positive: \`nsfw, \${BASE}, full body, standing, \${FRONT}, completely nude, penis, \${BG}\`, negative: \`\${NEG}, \${NOT_FRONT}, cropped\` },
+};
+/** 上一版的默认模板（没改过的会换成上面的新版） */
+const OLD_TEMPLATE_TEXT = (() => {
+    ${oldBlock.replace(/const DEFAULT_TEMPLATES =/, 'const T =').replace(/^const (BASE|NEG|BG) =/gm, 'const $1 =')}
+    return T;
+})();
+`);
+}
+patch("    for (const t of Object.values(rawT)) t.shot ||= 'bust';","    for (const [k, old] of Object.entries(OLD_TEMPLATE_TEXT)) if (rawT[k] && rawT[k].positive === old.positive && rawT[k].negative === old.negative) delete rawT[k];\n    for (const t of Object.values(rawT)) t.shot ||= 'bust';");
+// 例图用同一个种子：不同画师同一张脸、同一个姿势，只比画风
+patch(`    return run({ noVibe: true, positive, negative, width: Number(template.width) || undefined, height: Number(template.height) || undefined });`,
+`    const o = getData().options;
+    const seed = o.sampleSameSeed === false ? undefined : (Number(o.sampleSeed) > 0 ? Number(o.sampleSeed) : (o.sampleSeed = Math.floor(Math.random() * 4294967294) + 1));
+    return run({ noVibe: true, positive, negative, width: Number(template.width) || undefined, height: Number(template.height) || undefined, seed });`);
+patch(`      <label class="pc-switch"><input type="checkbox" data-bind-check="batch.skipExisting" \${b.skipExisting ? 'checked' : ''}><span></span>已经有这种例图的画师跳过</label>`,
+`      <label class="pc-switch"><input type="checkbox" data-bind-check="batch.skipExisting" \${b.skipExisting ? 'checked' : ''}><span></span>已经有这种例图的画师跳过</label>
+      <label class="pc-switch"><input type="checkbox" data-opt="sampleSameSeed" \${d.options.sampleSameSeed !== false ? 'checked' : ''}><span></span>所有画师用同一个种子<small>同一张脸、同一个姿势，只比画风\${Number(d.options.sampleSeed) > 0 ? \` · 种子 \${d.options.sampleSeed}\` : ''}</small></label>
+      \${d.options.sampleSameSeed !== false && Number(d.options.sampleSeed) > 0 ? '<button class="pc-pill dashed tiny" data-act="newsampleseed">换一个种子</button>' : ''}`);
+patch("            case 'imgstore':","            case 'newsampleseed': getData().options.sampleSeed = Math.floor(Math.random() * 4294967294) + 1; commit(); render(); break;\n            case 'imgstore':");
 patch("    const fake = a => a && NOT_ARTIST.test(a.tag.replace(/^artist:/i, '').trim());","    const fake = a => a && (NOT_ARTIST.test(a.tag.replace(/^artist:/i, '').trim()) || /[<>]/.test(a.tag));");
 // 批量：<artist>…</artist><style>…</style> 这种写法、一行里混着画风词的，都不再把每个词当成画师
 {
@@ -262,6 +406,63 @@ function parseBatchLines(text) {
 
 `);
 }
+s=applyComic(s);
+// 历史生图存进数据文件：emptyData 里没有 history，重开酒馆读数据时被 normalizeData 丢掉了
+patch(`        studio: null,
+    };`,`        studio: null,
+        history: [],      // 历史生图：[{ id, url, thumb, raw, sent, from, at }]
+    };`);
+patch(`    d.recent = Array.isArray(d.recent) ? d.recent : [];
+    return d;`,`    d.recent = Array.isArray(d.recent) ? d.recent : [];
+    d.history = Array.isArray(d.history) ? d.history : [];
+    return d;`);
+// 提示词体检：多出来的 ::、权重前面混进的下划线、没关上的权重、SD 括号权重
+patch(`function banWarn(d, str) {`,`/** 找出会让 NovelAI 把后面一大段都按错权重读的写法；fixed 是能自动改好的版本 */
+function lintPrompt(text) {
+    const t = String(text || '');
+    const issues = [], cut = [];
+    let open = null;
+    for (const m of t.matchAll(/(-?\\d+(?:\\.\\d+)?)?::/g)) {
+        const head = t.slice(0, m.index);
+        const junk = m[1] && /(^|[,\\s])_+$/.test(head);
+        const isNum = m[1] && (m.index === 0 || /[\\s,{}\\[\\]()|:]/.test(head.at(-1)) || junk);
+        if (junk) { const u = head.match(/_+$/)[0]; cut.push([m.index - u.length, u.length]); issues.push(\`权重 \${m[1]}:: 前面多了「\${u}」，NovelAI 认不出这个权重\`); }
+        if (isNum) { open = { at: m.index, w: m[1] }; continue; }
+        const at = m.index + (m[1] ? m[1].length : 0);
+        if (open) { open = null; continue; }
+        cut.push([at, 2]);
+        const near = t.slice(Math.max(0, at - 12), at + 14).trim();
+        issues.push(\`多了一个「::」（\${near}）：前面没有开头的权重，可能打乱后面词的权重\`);
+    }
+    if (open) issues.push(\`「\${open.w}::」没有关上，后面整段（包括画面描述）都会按 \${open.w} 倍算\`);
+    const sd = (t.match(/\\([^()]*:\\s*-?\\d+(?:\\.\\d+)?\\s*\\)/g) || []).length;
+    let fixed = t;
+    for (const [at, len] of cut.sort((a, b) => b[0] - a[0])) fixed = fixed.slice(0, at) + fixed.slice(at + len);
+    fixed = fixed.replace(/,\\s*,/g, ',').replace(/\\s{2,}/g, ' ');
+    return { issues, sd, fixed, canFix: cut.length > 0 };
+}
+function lintHtml(text) {
+    const r = lintPrompt(text);
+    if (!r.issues.length && !r.sd) return '';
+    return \`<div class="pc-banwarn">\${r.issues.map(x => \`<div>⚠ \${esc(x)}</div>\`).join('')}\${r.sd ? \`<div>ⓘ 有 \${r.sd} 处 SD 写法的 (词:1.3)，发送时会自动换成 1.3::词::</div>\` : ''}\${r.canFix ? '<button class="pc-pill dashed tiny" data-act="lintfix" style="margin-top:6px">一键修正</button>' : ''}</div>\`;
+}
+function banWarn(d, str) {`);
+patch(`      <div id="pc-pos-ban">\${banWarn(d, st.pos)}</div>`,`      <div id="pc-pos-ban">\${banWarn(d, st.pos)}\${lintHtml(st.pos)}</div>`);
+patch(`if (w) w.innerHTML = banWarn(getData(), el.value); }`,`if (w) w.innerHTML = banWarn(getData(), el.value) + lintHtml(el.value); }`);
+patch(`            case 'clearresult':`,`            case 'lintfix': ui.studio.pos = lintPrompt(ui.studio.pos).fixed; saveStudio(); render(); toastr.success('改好了，发送前再看一眼', '智库', { timeOut: 2000 }); break;
+            case 'clearresult':`);
+// 从 SD / WebUI 复制来的 (tag:1.3) 权重，NovelAI 不认，发送前换成 1.3::tag::
+patch(`function composeStudio({ pos = '', neg = '', scene = '' }, s = N.settings()) {`,`/** (tag:1.3) → 1.3::tag::；不带数字的括号（比如 rourou (been)）不动 */
+function sdWeights(text) {
+    let t = String(text || ''), prev;
+    do { prev = t; t = t.replace(/\\(([^()]*?(?:\\([^()]*\\)[^()]*?)*?):\\s*(-?\\d+(?:\\.\\d+)?)\\s*\\)/g, (_, tag, w) => \`\${Number(w)}::\${tag.trim()}::\`); } while (t !== prev);
+    return t;
+}
+function composeStudio({ pos = '', neg = '', scene = '' }, s = N.settings()) {
+    pos = sdWeights(pos); neg = sdWeights(neg); scene = sdWeights(scene);`);
+// 没登记的角色照样画，提示一句
+patch(`    const built = buildChatPrompt(parsed.scene, parsed.picks);`,`    if (parsed.unknown?.length) toastr.info(\`「\${parsed.unknown.join('、')}」没在角色页登记（或这次聊天没开），按图里写的标签画\`, '智库', { timeOut: 4000 });
+    const built = buildChatPrompt(parsed.scene, parsed.picks);`);
 // 图片显示偏好：旧数据由 normalizeData 合并默认值，用户关闭后保留 false。
 patch('        options: {', '        options: {\n            imageExpanded: true,');
 patch("${sw('markerAuto', '开启标记自动生图', '默认开启 · 回复出现完整生图标记时自动生成，提示词默认折叠')}",
@@ -281,9 +482,9 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',prefix+s+'\n}\n');
 fs.copyFileSync('src/index.js',dir+'/index.js');
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.19',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.19',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.20',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.20',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.8.19 built; storage keys and shared upload preserved.');
+console.log('Extension 0.8.20 built; storage keys and shared upload preserved.');

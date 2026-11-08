@@ -27,10 +27,11 @@ export function resolveImageCharacters(prompt, roster) {
         const found = roster.filter(row => imageCharacterNames(row.char).some(n => normalize(n) === normalize(name)));
         const enabled = found.filter(row => row.on);
         if (enabled.length > 1) throw new Error(`角色「${name}」匹配到多人，请在角色页设置不同的名字或别名`);
-        if (!enabled.length) throw new Error(found.length ? `角色「${name}」未启用，请在「这次聊天」中开启` : `找不到角色「${name}」，请在角色页登记名字或别名`);
+        // 没登记或没开的人照样画：不带外貌和参考图，按这张图里写的标签画
+        if (!enabled.length) { unknown.push(name); return { name, appearance: [], outfits: [], outfitMode: 'story', negative: '', unregistered: true }; }
         return enabled[0].char;
     };
-    const picks = [], cast = [];
+    const picks = [], cast = [], unknown = [];
     let nsfw = false;
     function parsePart(text, uc = '', center = null) {
         const tokens = [...text.matchAll(/\$([^$]+)\$/g)];
@@ -43,13 +44,13 @@ export function resolveImageCharacters(prompt, roster) {
             nsfw ||= token.nsfw;
             const char = matchCharacter(token.name);
             const tags = [token.angle, clean(text.slice(tokens[i].index + tokens[i][0].length, tokens[i + 1]?.index ?? text.length))].filter(Boolean).join(', ');
-            const existing = picks.find(p => p.char === char);
+            const existing = picks.find(p => p.char === char || (char.unregistered && p.char.unregistered && p.char.name === char.name));
             if (existing) {
                 existing.tags = [existing.tags, tags].filter(Boolean).join(', ');
                 existing.uc = [existing.uc, uc].filter(Boolean).join(', ');
             } else {
                 picks.push({ char, tags, uc, ...(center || {}) });
-                cast.push(char);
+                if (!char.unregistered) cast.push(char);
             }
         }
         return clean(text.slice(0, tokens[0].index));
@@ -79,7 +80,7 @@ export function resolveImageCharacters(prompt, roster) {
         scene = ['nsfw', withoutRating(scene)].filter(Boolean).join(', ');
         picks.forEach(p => { p.tags = withoutRating(p.tags); });
     }
-    return { scene, picks, cast };
+    return { scene, picks, cast, unknown: [...new Set(unknown)] };
 }
 
 // A closed content block is the story boundary; status panels after it stay outside.

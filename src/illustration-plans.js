@@ -109,27 +109,22 @@ export function compileIllustrationPlan(plan, roster, story) {
     if (!composition || typeof composition !== 'object') throw new Error('画面方案缺少镜头构图 composition');
     for (const field of ['shot', 'camera', 'layout', 'lighting']) if (!clean(composition[field])) throw new Error(`镜头构图缺少 ${field}`);
     const picks = [], cast = [], seen = new Set(), counts = {girl:0,boy:0,other:0};
-    for (const person of plan.characters) {
+    for (let person of plan.characters) {
         if (!person || typeof person.name !== 'string' || !person.name.trim() || /[$\n]/.test(person.name)) throw new Error('入画人物需要有效名字');
-        if (typeof person.registered !== 'boolean') throw new Error('入画人物需要 registered 字段');
-        let char;
-        if (person.registered) {
-            char = resolveImageCharacters('$' + person.name + '-sfw-upperbody$', roster).cast[0];
-            cast.push(char);
-        } else {
-            if (!clean(person.appearance)) throw new Error(`未登记人物「${person.name}」缺少外貌标签`);
-            char = { name: person.name, appearance: [], outfits: [], outfitMode: 'story', negative: '' };
-        }
+        // registered 只是模型的判断：在角色页找得到才算登记；找不到、没开、没写外貌都照样画
+        let char = person.registered === false ? null : resolveImageCharacters('$' + person.name + '-sfw-upperbody$', roster).picks[0]?.char;
+        if (char && !char.unregistered) cast.push(char);
+        else { char = { name: person.name, appearance: [], outfits: [], outfitMode: 'story', negative: '', unregistered: true }; person = { ...person, registered: false }; }
         const identity = char.key || person.name.normalize('NFKC').replace(/\s+/g, '').toLowerCase();
         if (seen.has(identity)) throw new Error('同一人物在画面名单中出现两次，请合并动作');
         seen.add(identity);
         const registeredGender = (char.appearance || []).map(t => t.en?.trim().toLowerCase()).find(t => /^1(?:girl|boy|other)$/.test(t));
-        const gender = registeredGender?.slice(1) || person.gender;
-        if (!Object.hasOwn(counts, gender)) throw new Error('人物 gender 必须是 girl、boy 或 other');
+        let gender = registeredGender?.slice(1) || String(person.gender || '').toLowerCase().replace(/s$/, '');
+        if (!Object.hasOwn(counts, gender)) gender = 'other';
         counts[gender]++;
-        const pos = person.position;
-        if (!pos || ![pos.x,pos.y].every(n=>typeof n === 'number' && Number.isFinite(n) && n>=0 && n<=1) || !['foreground','midground','background'].includes(pos.depth)) throw new Error('人物站位需要 0～1 的 x、y 坐标和前中后景 depth');
-        for (const field of ['pose','action','expression','gaze']) if (!clean(person[field])) throw new Error(`人物「${person.name}」缺少 ${field}`);
+        // 站位缺了或写错就用默认的，不为这个卡住出图
+        const raw = person.position || {}, ok = n => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 1;
+        const pos = { x: ok(raw.x) ? raw.x : (picks.length + 1) / (plan.characters.length + 1), y: ok(raw.y) ? raw.y : 0.5, depth: ['foreground','midground','background'].includes(raw.depth) ? raw.depth : '' };
         const tags = [person.registered ? '' : person.appearance, person.pose, person.action, person.expression, person.gaze,
             char.outfitMode === 'fixed' ? '' : person.outfit, pos.x<0.4?'on left':pos.x>0.6?'on right':'centered', pos.depth, person.tags].map(clean).filter(Boolean).join(', ');
         picks.push({ char, tags, x:pos.x, y:pos.y });

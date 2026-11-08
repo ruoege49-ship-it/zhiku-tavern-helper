@@ -1,0 +1,29 @@
+{
+  "key": "",
+  "mode": "random",
+  "artistsFile": "artists.txt",
+  "stringsFile": "strings.txt",
+  "count": 20,
+  "minArtists": 2,
+  "maxArtists": 4,
+  "randomWeight": true,
+  "weightMin": 0.8,
+  "weightMax": 1.3,
+  "extra": "",
+  "templates": [
+    "sfw_bust"
+  ],
+  "model": "nai-diffusion-4-5-full",
+  "steps": 28,
+  "scale": 5,
+  "sampler": "k_dpmpp_2m_sde",
+  "schedule": "karras",
+  "cfgRescale": 0.18,
+  "quality": true,
+  "ucPreset": "Heavy",
+  "seed": "same",
+  "gapSeconds": 2,
+  "outDir": "out",
+  "perFile": 20,
+  "collection": ""
+}

@@ -20,8 +20,9 @@ for(const rating of ['sfw','nsfw']){
 }
 const clone=()=>structuredClone(makePlan());
 let invalid=clone();invalid.source='没有出现过的原句';assert.throws(()=>compileIllustrationPlan(invalid,roster,source),/定位句/);
-invalid=clone();delete invalid.characters[0].pose;assert.throws(()=>compileIllustrationPlan(invalid,roster,source),/pose/);
-invalid=clone();invalid.characters[0].position.x=3;assert.throws(()=>compileIllustrationPlan(invalid,roster,source),/站位/);
+invalid=clone();delete invalid.characters[0].pose;assert.doesNotThrow(()=>compileIllustrationPlan(invalid,roster,source),'missing pose still draws');
+invalid=clone();invalid.characters[0].position.x=3;assert.ok(compileIllustrationPlan(invalid,roster,source).picks[0].x<=1,'bad position falls back');
+invalid=clone();for(const c of invalid.characters){c.registered=true;}assert.equal(compileIllustrationPlan(invalid,[],source).cast.length,0,'no registered characters still draws');
 invalid=clone();invalid.characters[1].name='小红';assert.throws(()=>compileIllustrationPlan(invalid,roster,source),/两次/);
 invalid=clone();invalid.characters[0].pose='站着';assert.throws(()=>compileIllustrationPlan(invalid,roster,source),/英文/);
 invalid=clone();invalid.rating='unknown';assert.throws(()=>compileIllustrationPlan(invalid,roster,source),/分级/);
