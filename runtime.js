@@ -274,6 +274,15 @@ const CSS = `
 .pc-comic-toc button{display:flex;gap:10px;align-items:center;width:100%;margin:0 0 8px;padding:6px;border:1.5px solid #3a2a22;border-radius:14px;background:#f4efe4;color:#3a2a22;font:14px inherit;text-align:left;cursor:pointer}
 .pc-comic-toc button img{width:44px;height:60px;object-fit:cover;object-position:top;border-radius:8px;background:#ddd}
 .pc-comic-toc button small{display:block;font-size:11px;color:#6e5a4d}
+.pc-comic-toc button span{flex:1;min-width:0}
+.pc-comic-toc button.todo{border-style:dashed}
+.pc-comic-toc button.todo i{flex:0 0 44px;height:60px;border-radius:8px;border:1.5px dashed #b9a896;display:grid;place-items:center;font-style:normal;font-size:20px;color:#9a8878}
+.pc-comic-toc button.todo em{flex:0 0 auto;font-style:normal;font-size:12px;padding:4px 10px;border-radius:999px;background:#3a2a22;color:#f4efe4}
+.pc-comic-toc-tip{font-size:12px;color:#6e5a4d;margin:-4px 0 10px;line-height:1.6}
+.pc-comic-book .empty .bb.wide{width:auto;padding:0 18px;margin-top:14px;border-radius:999px}
+.pc-comic-fail{border:1.5px dashed #9b4f45;border-radius:14px;padding:10px 12px;font-size:13px;line-height:1.6;color:inherit}
+.pc-comic-fail b{color:#9b4f45}
+.pc-comic-fail button{margin:8px 8px 0 0;border:1px solid currentColor;background:transparent;color:inherit;border-radius:999px;padding:3px 12px;font-size:12px;cursor:pointer}
 .pc-comic-work textarea{min-height:200px}
 .pc-comic-work .pc-seg{grid-template-columns:repeat(3,minmax(0,1fr))}
 `;
@@ -307,6 +316,17 @@ function createComicController(deps) {
         return 'extra';
     }
     const adapting = new Map(); // id -> 状态文字
+    const failed = new Map(); // id -> 没改编成的原因（留在楼层里，能重试）
+    const isAdapting = id => {
+        const task = adapting.get(id);
+        if (task && !task.current()) { adapting.delete(id); return false; }
+        return !!task;
+    };
+    const failure = id => {
+        const err = failed.get(id);
+        if (err && !err.current()) { failed.delete(id); return ''; }
+        return err?.why || '';
+    };
     const rec = (msg, key) => msg?.extra?.zhikuComic?.[key] || null;
     const curVer = r => r?.versions?.[Math.min(r.cur ?? r.versions.length - 1, r.versions.length - 1)] || null;
     const size = () => String(opts().comicSize || '832x1216').split('x').map(Number);
@@ -418,11 +438,20 @@ function createComicController(deps) {
         if (!el || !msg || msg.is_user) return;
         const blocks = comicBlocks(srcOf(msg));
         const own = comicBlocks(msg.mes).length > 0;
-        if (adapting.has(id) && !blocks.length) {
+        if (failure(id) && !blocks.length && !isAdapting(id)) {
             const box = doc.createElement('div');
             box.className = 'pc-comic';
             box.dataset.mes = String(id);
-            box.innerHTML = `<div class="pc-comic-wait"><div>${esc(adapting.get(id))}</div></div>`;
+            box.innerHTML = `<div class="pc-comic-fail"><b>没画成漫画</b><br>${esc(failure(id))}<br><button data-cadapt="${id}">再试一次</button><button data-cremove="${id}">不画了</button></div>`;
+            const text = el.querySelector('.mes_text');
+            (text ? text.after(box) : el.appendChild(box));
+            return;
+        }
+        if (isAdapting(id) && !blocks.length) {
+            const box = doc.createElement('div');
+            box.className = 'pc-comic';
+            box.dataset.mes = String(id);
+            box.innerHTML = `<div class="pc-comic-wait"><div>${esc(adapting.get(id).text)}</div></div>`;
             const text = el.querySelector('.mes_text');
             (text ? text.after(box) : el.appendChild(box));
             return;
@@ -431,7 +460,8 @@ function createComicController(deps) {
         const box = doc.createElement('div');
         box.className = 'pc-comic';
         box.dataset.mes = String(id);
-        box.innerHTML = blocks.map(b => pageHtml(id, msg, b)).join('') + (own ? '' : `<div class="pc-comic-redo"><button data-cadapt="${id}">${adapting.has(id) ? esc(adapting.get(id)) : '重新改编这一楼'}</button><button data-cremove="${id}">收起漫画</button></div>`);
+        const fail = failure(id);
+        box.innerHTML = (fail ? `<div class="pc-comic-fail"><b>重新改编失败</b><br>${esc(fail)}<br><button data-cadapt="${id}">再试一次</button><button data-cremove="${id}">不画了</button></div>` : '') + blocks.map(b => pageHtml(id, msg, b)).join('') + (own ? '' : `<div class="pc-comic-redo"><button data-cadapt="${id}">${isAdapting(id) ? esc(adapting.get(id).text) : '重新改编这一楼'}</button><button data-cremove="${id}">收起漫画</button></div>`);
         const text = el.querySelector('.mes_text');
         (text ? text.after(box) : el.appendChild(box));
         hydrate(box);
@@ -441,9 +471,9 @@ function createComicController(deps) {
     }
     /** chatChanged：换了聊天，在途的图不再往旧楼里存 */
     function renderAll({ chatChanged = false } = {}) {
-        if (chatChanged) { chatSeq++; errors.clear(); cancelPress({type:'cancel'}); for (const close of [...panels]) close(); }
+        if (chatChanged) { chatSeq++; errors.clear(); failed.clear(); adapting.clear(); doc.querySelectorAll('.pc-comic').forEach(n => n.remove()); cancelPress({type:'cancel'}); for (const close of [...panels]) close(); }
         const chat = getContext().chat || [];
-        for (let i = 0; i < chat.length; i++) if (chat[i]?.mes?.includes('<image') || chat[i]?.extra?.zhikuComicSrc || adapting.has(i)) render(i);
+        for (let i = 0; i < chat.length; i++) if (chat[i]?.mes?.includes('<image') || chat[i]?.extra?.zhikuComicSrc || isAdapting(i) || failed.has(i)) render(i);
     }
 
     // ── 点击、双击、长按 ──
@@ -461,7 +491,7 @@ function createComicController(deps) {
         const ad = ev.target?.closest?.('[data-cadapt],[data-cremove]');
         if (ad) {
             ev.stopPropagation();
-            if (ad.dataset.cadapt) { if (!adapting.has(Number(ad.dataset.cadapt))) void adapt(Number(ad.dataset.cadapt), { redo: true }); }
+            if (ad.dataset.cadapt) { if (!isAdapting(Number(ad.dataset.cadapt))) void adapt(Number(ad.dataset.cadapt), { redo: true }); }
             else void unadapt(Number(ad.dataset.cremove));
             return;
         }
@@ -594,15 +624,17 @@ function createComicController(deps) {
         if (msg.is_system) return;
         if (msg.is_user) { notify('只能把角色的回复画成漫画'); return; }
         if (comicBlocks(msg.mes).length || (source && !redo)) { await process(id, { manual: true }); return; }
-        if (adapting.has(id)) return;
+        if (isAdapting(id)) return;
         const story = storyText(msg.mes);
         if (!story) { notify('这一楼没有正文'); return; }
-        adapting.set(id, 'AI 正在把这一楼改编成漫画分镜…'); render(id);
+        failed.delete(id);
+        const task = { text: 'AI 正在把这一楼改编成漫画分镜…（用的是智库设置里的 AI）', current: snap.current };
+        adapting.set(id, task); render(id);
         try {
             const prevMsg = (c.chat || []).slice(0, id).reverse().find(m => m && !m.is_system && m.extra?.zhikuComicSrc);
             const before = prevMsg ? comicBlocks(srcOf(prevMsg)).slice(-1).map(b => b.inner).join('') : '';
             const { system, user } = adaptRequest(story.slice(0, 12000), { pages, cast: deps.castText?.() || '', before });
-            const out = parseAdapt(await askLLM(system, user, { maxTokens: 12000 }));
+            const out = parseAdapt(await askLLM(system, user, { maxTokens: 8000 }));
             if (!snap.current()) return;
             const restore = checkpoint(msg), removed = [];
             setSrc(msg, out);
@@ -615,14 +647,18 @@ function createComicController(deps) {
             removed.forEach(v => discard(v.url));
             if (!snap.current(out)) return;
         } catch (e) {
-            notify('没改编成：' + (e?.message || e));
+            const why = String(e?.message || e) + (e?.diag && !String(e.message).includes(e.diag) ? `（${e.diag}）` : '');
+            if (!snap.current()) return;
+            failed.set(id, { why, current: snap.current });
+            (deps.notifyError || notify)('第 ' + id + ' 楼没画成漫画：' + why);
             return;
-        } finally { adapting.delete(id); render(id); }
+        } finally { if (adapting.get(id) === task) adapting.delete(id); render(id); }
         await process(id, { manual: true });
     }
     async function unadapt(id) {
+        if (failed.delete(id)) { render(id); return; }
         const snap = pageSnapshot(id);
-        if (!snap || adapting.has(id)) return;
+        if (!snap || isAdapting(id)) return;
         const { c, msg, source } = snap;
         if (!msg.extra?.zhikuComicSrc?.[swipeKey(msg)]) return;
         const restore = checkpoint(msg), removed = [];
@@ -742,7 +778,7 @@ function createComicController(deps) {
         }
         function build() {
             book.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
-            if (!pages.length) { stage.innerHTML = '<div class="empty">这个聊天里还没有漫画页<br>点楼层按钮里的 📖「画成漫画」，把那一楼改编成漫画；<br>或者配合漫画台预设聊天，回复里的漫画页会自动画出来</div>'; book.querySelector('footer').hidden = true; info(); return; }
+            if (!pages.length) { stage.innerHTML = '<div class="empty">这个聊天里还没有漫画页<br>点右上角「目录」，挑一楼点「画成漫画」；<br>也可以点楼层按钮里的 📖。<br><button class="bb wide" data-b="toc">打开目录选一楼</button></div>'; book.querySelector('footer').hidden = true; info(); return; }
             mode === 'book' ? buildBook() : mode === 'scroll' ? buildScroll() : buildFlow();
         }
         function go(n) {
@@ -754,11 +790,23 @@ function createComicController(deps) {
         const close = () => { book.remove(); doc.removeEventListener('keydown', key); panels.delete(close); };
         panels.add(close);
         const toc = () => {
-            const floors = []; pages.forEach((p, n) => { if (!floors.some(f => f.id === p.id)) floors.push({ ...p, n }); });
+            const first = new Map(); pages.forEach((p, n) => { if (!first.has(p.id)) first.set(p.id, { ...p, n }); });
+            const chatNow = getContext().chat || [];
+            const rows = [];
+            chatNow.forEach((m, id) => {
+                if (!m || m.is_user || m.is_system) return;
+                const f = first.get(id);
+                if (f) { rows.push(`<button data-goto="${f.n}"><img data-cb="${esc(f.url)}" alt=""><span>第 ${id} 楼 · ${esc(f.name)}<small>${f.total} 页 · 点一下翻到这里</small></span></button>`); return; }
+                const text = storyText(m.mes);
+                if (!text) return;
+                const busy = isAdapting(id);
+                rows.push(`<button data-adapt="${id}" class="todo"><i>${busy ? '…' : '＋'}</i><span>第 ${id} 楼 · ${esc(m.name || '')}<small>${busy ? '正在改编…' : esc(text.replace(/\s+/g, ' ').slice(0, 36)) + (text.length > 36 ? '…' : '')}</small></span><em>${busy ? '' : '画成漫画'}</em></button>`);
+            });
             const sheet = doc.createElement('div');
             sheet.className = 'pc-comic-toc';
-            sheet.innerHTML = `<h4>目录</h4>${floors.map(f => `<button data-goto="${f.n}"><img data-cb="${esc(f.url)}" alt=""><span>第 ${f.id} 楼 · ${esc(f.name)}<small>${f.total} 页</small></span></button>`).join('')}`;
+            sheet.innerHTML = `<h4>目录</h4><p class="pc-comic-toc-tip">已经画了的点一下翻过去；没画的点「画成漫画」，AI 会读那一楼的正文改编成漫画，画好就出现在这本书里。</p>${rows.join('') || '<p class="pc-comic-toc-tip">这个聊天里还没有角色的回复</p>'}`;
             book.appendChild(sheet); fill(sheet);
+            sheet.querySelector('button:last-of-type')?.scrollIntoView({ block: 'end' });
         };
         // 手势
         let sx = null, moved = false, drag = null;
@@ -795,6 +843,15 @@ function createComicController(deps) {
         stage.addEventListener('pointerup', up);
         stage.addEventListener('pointercancel', () => { sx = null; if (mode === 'book') layoutBook(); else if (mode === 'flow') layoutFlow(); });
         book.addEventListener('click', ev => {
+            const ad = ev.target.closest('[data-adapt]');
+            if (ad) {
+                const id = Number(ad.dataset.adapt);
+                if (isAdapting(id)) return;
+                close();
+                doc.querySelector(`.mes[mesid="${id}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+                void adapt(id);
+                return;
+            }
             const g = ev.target.closest('[data-goto]');
             if (g) { at = Number(g.dataset.goto); g.closest('.pc-comic-toc').remove(); build(); return; }
             if (ev.target.closest('.pc-comic-toc')) return;
@@ -1363,7 +1420,7 @@ function imageInsertionPoint(text, sentence) {
     return last.start + last.text.trimEnd().length;
 }
 
-// 智库 · 原生扩展版 v0.8.23（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.25（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1381,7 +1438,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.23';
+globalThis.__PC_VERSION = '0.8.25';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -3379,7 +3436,19 @@ async function outfitFromText(name, desc, accDescs = []) {
     return (Array.isArray(j.tags) ? j.tags : []).map(x => ({ en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim(), ...(x?.acc === true ? { acc: true } : x?.acc === false ? { acc: false } : {}) })).filter(x => x.en && !hasChinese(x.en));
 }
 
-return { extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
+/** 英文标签 → 简短中文。返回 { 小写英文: 中文 } */
+async function zhForTags(ens) {
+    const list = [...new Set((ens || []).map(s => String(s || '').trim()).filter(Boolean))];
+    const out = {};
+    for (let i = 0; i < list.length; i += 60) {
+        const part = list.slice(i, i + 60);
+        const j = pickJson(await askLLM('把 NovelAI / Danbooru 英文标签翻成简短自然的中文（一般 2–6 个字），照原意翻，不要解释，每一个都要翻。只输出 JSON：{"zh": {"英文标签": "中文", ...}}', part.join('\n'), { maxTokens: Math.min(3000, 200 + part.length * 40) }));
+        if (Array.isArray(j.zh)) j.zh.forEach((z, k) => { const en = part[k]; const v = String(z?.zh ?? z ?? '').trim(); if (en && v) out[en.toLowerCase()] = v; });
+        else if (j.zh && typeof j.zh === 'object') for (const [en, z] of Object.entries(j.zh)) { const v = String(z || '').trim(); if (v) out[en.trim().toLowerCase()] = v; }
+    }
+    return out;
+}
+return { zhForTags, extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
 })();
 
 // ───── chars.js ─────
@@ -5776,6 +5845,19 @@ function newOutfitBox(defName) {
     });
 }
 
+/** 一个角色的全部标签：外貌 + 每一套衣服 */
+const charPairs = c => [...(c.appearance || []), ...(c.outfits || []).flatMap(o => o.tags || [])];
+/** 给没有中文的标签补上中文；quiet 时出错不弹窗 */
+async function fillZh(c, { quiet = false } = {}) {
+    const need = charPairs(c).filter(t => t.en && !t.zh).map(t => ({ tag: t, en: t.en }));
+    if (!need.length) return 0;
+    const map = await T.zhForTags(need.map(t => t.en)).catch(e => { if (!quiet) throw e; return {}; });
+    if (getData().characters[c.key] !== c) return 0;
+    const current = new Set(charPairs(c));
+    let n = 0;
+    for (const { tag: t, en } of need) { const z = map[en.toLowerCase()]; if (z && current.has(t) && t.en === en && !t.zh) { t.zh = z; n++; } }
+    return n;
+}
 function pairChips(list, where) {
     return list.map((t, i) => `<span class="pc-pair"><button data-act="editpair" data-where="${where}" data-i="${i}"><span class="mono">${esc(t.en)}</span>${t.zh ? `<em>${esc(t.zh)}</em>` : ''}</button><button class="pc-pair-x" data-act="delpair" data-where="${where}" data-i="${i}" aria-label="删掉">×</button></span>`).join('');
 }
@@ -5799,6 +5881,7 @@ function viewCharEdit(d) {
       <div class="pc-dim small">头发、眼睛、脸、身材这类不会变的。第一个写 1boy 或 1girl。点标签可以改，× 删掉。</div>
       ${c.kind === 'char' || c.kind === 'side' ? `<button class="pc-pill dashed tiny pc-mt-s" data-act="readcast" ${busy ? 'disabled' : ''}>${busy === 'cast' ? '<span class="pc-busy">读取中</span>' : '读出这张卡里所有人（含世界书）'}</button>` : ''}
       <label class="pc-field pc-mt-s"><span>别名（逗号隔开）· 图片角色标记可使用名字或别名</span><input data-charalias value="${esc(c.aliases || '')}" placeholder="比如 小秋，秋秋"></label>
+      ${(() => { const n = charPairs(c).filter(t => !t.zh).length; return n ? `<div class="pc-chips wrap"><button class="pc-pill dashed tiny" data-act="zhtags" ${busy ? 'disabled' : ''}>${busy === 'zh' ? '<span class="pc-busy">翻译中</span>' : `译成中文 · ${n} 个没有中文`}</button></div>` : ''; })()}
       <div class="pc-pairs">${pairChips(c.appearance, 'app') || '<span class="pc-dim small">还没有</span>'}</div>
       <div class="pc-addrow"><textarea rows="1" data-bind="addText.app" placeholder="自己加，中文也行，可以一次粘贴好几个" data-enter="addpair-app">${esc(ui.addText.app)}</textarea><button class="pc-btn dark" data-act="addpair" data-where="app" ${busy ? 'disabled' : ''}>${busy === 'app' ? '…' : '加'}</button></div>
     </section>
@@ -6022,6 +6105,17 @@ async function charAction(act, el) {
                 ui.addText[where] = '';
             } catch (e) { toastr.error(e.message, '加不进去'); }
             ui.charBusy = ''; save();
+            // 刚加的英文标签悄悄补上中文
+            if (charPairs(c).some(t => !t.zh)) void fillZh(c, { quiet: true }).then(n => { if (n && getData().characters[c.key] === c) save(); });
+            return true;
+        }
+        case 'zhtags': {
+            ui.charBusy = 'zh'; render();
+            try {
+                const n = await fillZh(c);
+                toastr.success(n ? `翻好了 ${n} 个` : 'AI 没给出中文，再点一次试试', '标签翻译', { timeOut: 1800 });
+            } catch (e) { toastr.error(e.message || String(e), '翻译失败'); }
+            ui.charBusy = ''; if (getData().characters[c.key] === c) save(); else render();
             return true;
         }
         case 'editpair': {
@@ -8441,7 +8535,7 @@ async function start() {
         generatePage: req => N.generate({ ...req, comic: true }), storeImage: pcStoreImage, resolveUrl: u => pcLocal.url(u), dropImage: pcDropImage,
         recordImage: shot => pcRecordImage(shot), askLLM: (...a) => __mod_translate.askLLM(...a),
         castText: () => __mod_chars.currentCast().filter(x => x.on || (x.char.appearance || []).length).map(x => `${x.char.name}：${__mod_chars.fixedTags(x.char) || '（还没写外貌，按正文描写画）'}`).join('\n'),
-        notify: m => toastr.info(m, '智库 · 漫画', { timeOut: 1500 }), modal: UI.modal, esc: UI.esc,
+        notify: m => toastr.info(m, '智库 · 漫画', { timeOut: 1500 }), notifyError: m => toastr.error(m, '智库 · 漫画', { timeOut: 9000 }), modal: UI.modal, esc: UI.esc,
     });
     globalThis.__zhikuComic = comic;
     cleanups.push(() => { comic.stop(); if (globalThis.__zhikuComic === comic) globalThis.__zhikuComic = null; });

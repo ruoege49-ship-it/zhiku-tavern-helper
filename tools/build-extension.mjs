@@ -11,8 +11,8 @@ process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.23';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.23');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.25';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.25');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -750,6 +750,54 @@ patch(`    d.history = Array.isArray(d.history) ? d.history : [];
     }
     d.recent = d.recent.filter(r => r.type !== 'group' || d.groups[r.id]);
     return d;`);
+// 角色页：英文标签一键翻成中文（外貌 + 这个角色所有衣服），新加的英文标签也自动补上中文
+patch(`return { extractCast, hasChinese,`,`/** 英文标签 → 简短中文。返回 { 小写英文: 中文 } */
+async function zhForTags(ens) {
+    const list = [...new Set((ens || []).map(s => String(s || '').trim()).filter(Boolean))];
+    const out = {};
+    for (let i = 0; i < list.length; i += 60) {
+        const part = list.slice(i, i + 60);
+        const j = pickJson(await askLLM('把 NovelAI / Danbooru 英文标签翻成简短自然的中文（一般 2–6 个字），照原意翻，不要解释，每一个都要翻。只输出 JSON：{"zh": {"英文标签": "中文", ...}}', part.join('\\n'), { maxTokens: Math.min(3000, 200 + part.length * 40) }));
+        if (Array.isArray(j.zh)) j.zh.forEach((z, k) => { const en = part[k]; const v = String(z?.zh ?? z ?? '').trim(); if (en && v) out[en.toLowerCase()] = v; });
+        else if (j.zh && typeof j.zh === 'object') for (const [en, z] of Object.entries(j.zh)) { const v = String(z || '').trim(); if (v) out[en.trim().toLowerCase()] = v; }
+    }
+    return out;
+}
+return { zhForTags, extractCast, hasChinese,`);
+patch(`      <div class="pc-pairs">\${pairChips(c.appearance, 'app') || '<span class="pc-dim small">还没有</span>'}</div>`,`      \${(() => { const n = charPairs(c).filter(t => !t.zh).length; return n ? \`<div class="pc-chips wrap"><button class="pc-pill dashed tiny" data-act="zhtags" \${busy ? 'disabled' : ''}>\${busy === 'zh' ? '<span class="pc-busy">翻译中</span>' : \`译成中文 · \${n} 个没有中文\`}</button></div>\` : ''; })()}
+      <div class="pc-pairs">\${pairChips(c.appearance, 'app') || '<span class="pc-dim small">还没有</span>'}</div>`);
+patch(`function pairChips(list, where) {`,`/** 一个角色的全部标签：外貌 + 每一套衣服 */
+const charPairs = c => [...(c.appearance || []), ...(c.outfits || []).flatMap(o => o.tags || [])];
+/** 给没有中文的标签补上中文；quiet 时出错不弹窗 */
+async function fillZh(c, { quiet = false } = {}) {
+    const need = charPairs(c).filter(t => t.en && !t.zh).map(t => ({ tag: t, en: t.en }));
+    if (!need.length) return 0;
+    const map = await T.zhForTags(need.map(t => t.en)).catch(e => { if (!quiet) throw e; return {}; });
+    if (getData().characters[c.key] !== c) return 0;
+    const current = new Set(charPairs(c));
+    let n = 0;
+    for (const { tag: t, en } of need) { const z = map[en.toLowerCase()]; if (z && current.has(t) && t.en === en && !t.zh) { t.zh = z; n++; } }
+    return n;
+}
+function pairChips(list, where) {`);
+patch(`            ui.charBusy = ''; save();
+            return true;
+        }
+        case 'editpair': {`,`            ui.charBusy = ''; save();
+            // 刚加的英文标签悄悄补上中文
+            if (charPairs(c).some(t => !t.zh)) void fillZh(c, { quiet: true }).then(n => { if (n && getData().characters[c.key] === c) save(); });
+            return true;
+        }
+        case 'zhtags': {
+            ui.charBusy = 'zh'; render();
+            try {
+                const n = await fillZh(c);
+                toastr.success(n ? \`翻好了 \${n} 个\` : 'AI 没给出中文，再点一次试试', '标签翻译', { timeOut: 1800 });
+            } catch (e) { toastr.error(e.message || String(e), '翻译失败'); }
+            ui.charBusy = ''; if (getData().characters[c.key] === c) save(); else render();
+            return true;
+        }
+        case 'editpair': {`);
 // 下载成功提醒：智库里所有下载（看大图、生图结果、历史生图、漫画、导出数据）
 patch(`download.download='image.png';`,`download.download='zhiku_'+Date.now()+'.png';`);
 patch(`function updateStudioPreview() {`,`/** 点了智库的下载链接后提示一下；连着下好几张的合成一条 */
@@ -843,9 +891,9 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',prefix+s+'\n}\n');
 fs.copyFileSync('src/index.js',dir+'/index.js');
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.23',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.23',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.25',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.25',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.8.23 built; storage keys and shared upload preserved.');
+console.log('Extension 0.8.25 built; storage keys and shared upload preserved.');
