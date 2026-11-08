@@ -1562,7 +1562,7 @@ function imageInsertionPoint(text, sentence) {
     return last.start + last.text.trimEnd().length;
 }
 
-// 智库 · 原生扩展版 v0.8.35（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.36（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1580,7 +1580,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.35';
+globalThis.__PC_VERSION = '0.8.36';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -5093,6 +5093,7 @@ function histDetail(x) {
       <div class="pc-actions wrap pc-mt-s">
         <button class="pc-btn dark" type="button" data-h="reuse">用这组参数再生成</button>
         <a class="pc-btn" data-pc-href="${esc(x.url)}" download="zhiku_${x.at}.png">下载</a>
+        <button class="pc-btn" type="button" data-h="share">上传到共享</button>
         <button class="pc-btn danger" type="button" data-h="delete">删除</button>
         <button class="pc-btn" type="button" data-h="close">关闭</button>
       </div></div>`);
@@ -5101,6 +5102,11 @@ function histDetail(x) {
     box.addEventListener('click', async ev => {
         const act = ev.target.closest('[data-h]')?.dataset.h;
         if (act === 'close') box.closeModal();
+        if (act === 'share') {
+            if (!L.serverBase()) { toastr.warning('先到「设置」里填共享服务器地址', '共享'); return; }
+            box.closeModal();
+            openSharedUpload({ artistString: x.raw || x.prompt || '', negative: x.negative || '', image: await pcLocal.url(x.url) });
+        }
         if (act === 'delete') { if (!(await confirmBox('删掉这张图？图片也会删掉。', { ok: '删除', cancel: '算了' }))) return; histRemove([x]); box.closeModal(); render(); }
         if (act === 'reuse') {
             const st = ui.studio, n = N.settings();
@@ -5160,6 +5166,7 @@ function viewStudio(d) {
       <img src="${esc(st.result)}" alt="生成结果" data-act="viewimg" data-src="${esc(st.result)}">
       <div class="pc-actions wrap">
         <button class="pc-btn" data-act="saveresult">存为例图</button>
+        <button class="pc-btn" data-act="quickshare">上传到共享</button>
         <button class="pc-btn" data-act="inpaint">局部重绘</button>
         <button class="pc-btn" data-act="insertresult">插到聊天最后一楼</button>
         <a class="pc-btn" href="${esc(st.result)}" download="piaoce_${Date.now()}.png">下载</a>
@@ -6908,9 +6915,8 @@ function viewSettings(d) {
 
     const cur = T.activeApiId();
     const prof = T.apiProfiles().find(x => x.id === cur);
-    const ai = setFold('ai', '翻译和 AI', esc(T.currentApi().from) + (T.currentApi().model ? ' · ' + esc(T.currentApi().model) : ''), `
+    const ai0 = setFold('ai', '翻译和 AI', esc(T.currentApi().from) + (T.currentApi().model ? ' · ' + esc(T.currentApi().model) : ''), `
       <div class="pc-dim small">翻译、补全细节、读角色外貌、聊天生图都用这个。点一下就切换，可以存好几个。</div>
-      <div class="pc-actions wrap" style="margin-top:6px"><button class="pc-btn dark" data-act="nav" data-view="aipreset">AI 预设（发送结构）· ${(() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })()}</button></div>
       ${apiChips()}
       ${prof ? `
       <label class="pc-field"><span>名字</span><input data-api="name" value="${esc(prof.name)}"></label>
@@ -6923,6 +6929,25 @@ function viewSettings(d) {
       <div class="pc-actions wrap"><button class="pc-btn" data-act="transmodels">拉取模型</button><button class="pc-btn" data-act="transtest">测试</button><button class="pc-linkdanger" data-act="apidel">删掉这个</button></div>`
         : `<div class="pc-actions wrap"><button class="pc-btn" data-act="transtest">测试</button></div>`}`);
 
+    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), `
+      <div class="pc-dim small">AI 发出去的结构：系统 / 用户 / 助手条目，可以直接跟酒馆的预设走；每个功能还能单独选 API 和模型。</div>
+      <div class="pc-actions wrap" style="margin-top:6px"><button class="pc-btn dark" data-act="nav" data-view="aipreset">打开 AI 预设</button></div>`);
+    const dlo = dlOpts();
+    const opt = (v, t, cur) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${t}</option>`;
+    const dlFold = setFold('dl', '下载和水印', [dlo.strip ? '读不出画师串' : '', dlo.on ? '水印「' + esc(dlo.text) + '」' : ''].filter(Boolean).join(' · ') || '原图下载', `
+      <div class="pc-dim small">看大图、生图结果、历史生图、漫画里点「下载」都按这里来。原图在智库里不变。</div>
+      <label class="pc-field"><span>手机上点下载</span><select data-optstr="dlMode">${opt('auto', '自动：iPhone 弹分享面板，安卓存进 Download', dlo.mode)}${opt('share', '总是弹分享面板（选「存储图像」进相册）', dlo.mode)}${opt('file', '总是下载成文件', dlo.mode)}</select></label>
+      <div class="pc-hint">iPhone 下载的文件在「文件」App 里，不进相册；要进相册得从分享面板点「存储图像」。安卓下载的在 Download 文件夹，相册一般有「Download / 下载」相簿。</div>
+      ${sw('dlStrip', '下载的图读不出画师串', 'NovelAI 原图里藏着正面、负面和画师串，别人拖进读图工具就能看到。开了以后下载的图会去掉这些。')}
+      ${sw('dlMark', '下载的图打水印', '填了文字才会打。打水印也会顺带去掉图里的提示词。')}
+      <label class="pc-field"><span>水印文字</span><input data-optstr="dlMarkText" maxlength="60" value="${esc(dlo.text)}" placeholder="比如 @if love"></label>
+      <div class="pc-row" style="gap:8px;flex-wrap:wrap">
+        <label class="pc-field" style="flex:1;min-width:120px"><span>位置</span><select data-optstr="dlMarkPos">${opt('br', '右下', dlo.pos)}${opt('bl', '左下', dlo.pos)}${opt('tr', '右上', dlo.pos)}${opt('tl', '左上', dlo.pos)}${opt('c', '正中', dlo.pos)}${opt('tile', '斜着铺满', dlo.pos)}</select></label>
+        <label class="pc-field" style="flex:1;min-width:120px"><span>不透明度</span><input type="range" min="0.1" max="1" step="0.05" data-optstr="dlMarkAlpha" value="${dlo.alpha}"></label>
+        <label class="pc-field" style="flex:1;min-width:120px"><span>字号</span><input type="range" min="1" max="10" step="0.5" data-optstr="dlMarkSize" value="${dlo.size}"></label>
+      </div>
+      <div class="pc-actions wrap"><button class="pc-btn" data-act="dlmarkpreview">看看效果</button></div>`);
+    const ai = ai0 + aipFold + dlFold;
     const tpl = setFold('tpl', '例图提示词', '头像 · 胸像 · 立绘', `
       <div class="pc-dim small">头像 1:1、胸像 3:4、立绘 9:16，SFW 和 NSFW 各一套。</div>
       <button class="pc-btn pc-mt-s" data-act="edittplid" data-tpl="sfw_head">编辑例图提示词</button>`);
@@ -7277,10 +7302,12 @@ async function onClick(ev, outside = false) {
             case 'castopen': openCastPicker(); break;
             case 'aipuse': { const cfg = T.aiCfg(); cfg.active = el.dataset.v; commit(); render(); break; }
             case 'aipnew': {
-                const name = await promptText('新预设的名字', '我的预设');
-                if (name == null) break;
                 const cfg = T.aiCfg(), id = M.uid('ap');
-                cfg.list[id] = { id, name: name.trim() || '我的预设', ents: [{ id: M.uid('e'), n: '主指令', r: 'system', on: true, t: '' }, { id: 'ctx', n: '上下文', r: 'user', on: true, ctx: true }] };
+                let k = Object.keys(cfg.list).length + 1;
+                while (Object.values(cfg.list).some(x => x.name === '我的预设 ' + k)) k++;
+                const name = '我的预设 ' + k;
+                toastr.success(`新建好了「${name}」，想换名字点「改名」`, 'AI 预设', { timeOut: 2500 });
+                cfg.list[id] = { id, name, ents: [{ id: M.uid('e'), n: '主指令', r: 'system', on: true, t: '' }, { id: 'ctx', n: '上下文', r: 'user', on: true, ctx: true }] };
                 cfg.active = id; commit(); render(); break;
             }
             case 'aipcopy': {
@@ -7369,11 +7396,9 @@ async function onClick(ev, outside = false) {
                 const p = sceneSnapshot();
                 if (!p.scene) { toastr.info('固定提示词还是空的', '固定提示词'); break; }
                 if ((ui.studio.scenes || []).some(x => sceneSig(x) === sceneSig(p))) { toastr.info('这段已经存过了', '固定提示词'); break; }
-                const name = await promptText('给这段固定提示词起个名字', sceneName(p.scene));
-                if (name == null) break;
-                ui.studio.scenes = [{ ...p, name: name.trim() || '没起名' }, ...(ui.studio.scenes || [])];
+                ui.studio.scenes = [{ ...p, name: sceneName(p.scene) || '没起名' }, ...(ui.studio.scenes || [])];
                 ui.studio.recentScenes = (ui.studio.recentScenes || []).filter(x => sceneSig(x) !== sceneSig(p));
-                saveStudio(); toastr.success('存好了', '固定提示词', { timeOut: 1500 }); render(); break;
+                saveStudio(); toastr.success('存好了，想换名字点它旁边的「改名」', '固定提示词', { timeOut: 2500 }); render(); break;
             }
             case 'sceneuse': {
                 const p = (el.dataset.kind === 'saved' ? ui.studio.scenes : ui.studio.recentScenes)?.[Number(el.dataset.i)];
@@ -7498,6 +7523,28 @@ async function onClick(ev, outside = false) {
                 break;
             }
             case 'exportdata': exportData(); break;
+            case 'dlmarkpreview': {
+                const o = { ...dlOpts(), on: true };
+                if (!o.text) o.text = '水印示例';
+                let blob;
+                if (ui.studio.result) { try { blob = await (await fetch(ui.studio.result)).blob(); } catch { } }
+                if (!blob) {
+                    const c = DOC.createElement('canvas'); c.width = 832; c.height = 1216;
+                    const g = c.getContext('2d'), gr = g.createLinearGradient(0, 0, 832, 1216);
+                    gr.addColorStop(0, '#c9b9a6'); gr.addColorStop(1, '#5b6b7a'); g.fillStyle = gr; g.fillRect(0, 0, 832, 1216);
+                    blob = await new Promise(r => c.toBlob(r, 'image/png'));
+                }
+                const url = URL.createObjectURL(await processImage(blob, o));
+                const box = modal(`<h3 class="pc-h3">水印效果</h3><img src="${url}" alt="" style="width:100%;border-radius:10px"><div class="pc-actions"><button class="pc-btn" type="button" data-x="close">关闭</button></div>`);
+                box.addEventListener('click', ev => { if (ev.target.closest('[data-x="close"]')) box.closeModal(); });
+                break;
+            }
+            case 'quickshare': {
+                if (!L.serverBase()) { toastr.warning('先到「设置」里填共享服务器地址', '共享'); break; }
+                const st = ui.studio;
+                openSharedUpload({ artistString: st.pos, negative: st.neg, image: st.result });
+                break;
+            }
             case 'saveresult': await saveStudioResult(); break;
             case 'insertresult':
                 await E.insertIntoLastMessage(ui.studio.result);
@@ -7684,18 +7731,104 @@ async function onClick(ev, outside = false) {
 
 /** 点了智库的下载链接后提示一下；连着下好几张的合成一条 */
 let dlCount = 0, dlTimer = null, dlLast = '';
-function onDownloadClick(ev) {
-    const a = ev.target?.closest?.('a[download]');
-    if (!a || !a.getAttribute('href')) return;
-    const name = a.getAttribute('download') || '';
-    if (!/^(zhiku|piaoce|漫画|画师库)/.test(name)) return;
+const isIOS = () => /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isAndroid = () => /Android|HarmonyOS/i.test(navigator.userAgent);
+function dlOpts() {
+    const o = getData().options, text = String(o.dlMarkText || '').trim();
+    return { strip: !!o.dlStrip, on: !!o.dlMark && !!text, text, pos: o.dlMarkPos || 'br', alpha: Number(o.dlMarkAlpha ?? 0.5) || 0.5, size: Number(o.dlMarkSize ?? 3) || 3, mode: o.dlMode || 'auto' };
+}
+function dlNote(name) {
     dlCount++; dlLast = name;
     clearTimeout(dlTimer);
     dlTimer = setTimeout(() => {
         const json = /\.json$/i.test(dlLast);
-        toastr.success(dlCount > 1 ? `已发起 ${dlCount} 项下载，请在浏览器的「下载」里查看` : `${json ? '数据' : '图片'}已发起下载：${dlLast}`, '智库', { timeOut: 2500 });
+        const where = json ? '' : isIOS() ? '。在「文件」App 的「下载」里，不在相册；想进相册，到 设置 →「下载和水印」把「手机上点下载」改回「自动」，再从分享面板点「存储图像」' : isAndroid() ? '。存在手机的 Download 文件夹，相册里一般在「Download / 下载」相簿' : '，在浏览器的「下载」里';
+        toastr.success(dlCount > 1 ? `已下载 ${dlCount} 项${where}` : `${json ? '数据' : '图片'}已下载：${dlLast}${where}`, '智库', { timeOut: json ? 2500 : 5000 });
         dlCount = 0;
     }, 700);
+}
+/** 水印：pos = br 右下 / bl 左下 / tr 右上 / tl 左上 / c 正中 / tile 铺满；size 是短边的百分比 */
+function drawMark(ctx, w, h, o) {
+    const fs = Math.max(12, Math.round(Math.min(w, h) * o.size / 100));
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, Math.max(0.05, o.alpha));
+    ctx.font = `bold ${fs}px "PingFang SC","Microsoft YaHei",sans-serif`;
+    ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(0,0,0,.55)'; ctx.lineWidth = Math.max(1, fs / 10); ctx.lineJoin = 'round';
+    ctx.textBaseline = 'middle';
+    const put = (x, y) => { ctx.strokeText(o.text, x, y); ctx.fillText(o.text, x, y); };
+    const tw = ctx.measureText(o.text).width;
+    if (o.pos === 'tile') {
+        ctx.translate(w / 2, h / 2); ctx.rotate(-Math.PI / 6);
+        const R = Math.hypot(w, h) / 2, stepX = tw + fs * 3, stepY = fs * 4;
+        for (let y = -R, row = 0; y < R; y += stepY, row++) for (let x = -R - (row % 2) * stepX / 2; x < R; x += stepX) put(x, y);
+    } else {
+        const m = fs * 0.8;
+        const x = o.pos.endsWith('l') ? m : o.pos === 'c' ? (w - tw) / 2 : w - m - tw;
+        const y = o.pos.startsWith('t') ? m + fs / 2 : o.pos === 'c' ? h / 2 : h - m - fs / 2;
+        put(x, y);
+    }
+    ctx.restore();
+}
+function blobImage(blob) {
+    return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(blob), img = new Image();
+        img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片读不出来')); };
+        img.src = url;
+    });
+}
+/** 在不透明画布上重画一遍：PNG 里的文字信息和 NovelAI 藏在透明通道里的提示词都会没掉；需要时再打水印 */
+async function processImage(blob, o) {
+    if (!o.strip && !o.on) return blob;
+    const img = await blobImage(blob);
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const c = DOC.createElement('canvas'); c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0);
+    if (o.on) drawMark(ctx, w, h, o);
+    return await new Promise((resolve, reject) => c.toBlob(b => b ? resolve(b) : reject(new Error('图片处理失败')), 'image/png'));
+}
+function saveBlob(blob, name) {
+    const url = URL.createObjectURL(blob), a = DOC.createElement('a');
+    a.href = url; a.download = name; a.dataset.zkdl = '1';
+    pcMount(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    dlNote(name);
+}
+/** 分享面板要「刚点过」才肯打开；处理图片耽误久了就再给一个按钮点 */
+function shareAsk(file) {
+    const box = modal(`<h3 class="pc-h3">图片准备好了</h3><p class="pc-dim small">点下面的按钮打开分享面板，选「存储图像 / 保存到相册」就进相册了。</p>
+      <div class="pc-actions"><button class="pc-btn" type="button" data-x="file">下载成文件</button><button class="pc-btn dark" type="button" data-x="share">存到相册 / 分享</button></div>`);
+    box.addEventListener('click', ev => {
+        const x = ev.target.closest('[data-x]')?.dataset.x;
+        if (x === 'share') { navigator.share({ files: [file] }).catch(e => { if (e?.name !== 'AbortError') saveBlob(file, file.name); }); box.closeModal(); }
+        if (x === 'file') { saveBlob(file, file.name); box.closeModal(); }
+    });
+}
+async function dlImage(href, name, o, wantShare) {
+    let blob;
+    try { blob = await (await fetch(href)).blob(); blob = await processImage(blob, o); }
+    catch (e) { console.warn('[智库] 下载处理', e); toastr.error('图片处理失败：' + (e.message || e), '智库'); return; }
+    const fname = (o.strip || o.on) ? name.replace(/\.(jpe?g|webp)$/i, '.png') : name;
+    if (wantShare) {
+        const file = new File([blob], fname, { type: blob.type || 'image/png' });
+        if (navigator.canShare?.({ files: [file] })) {
+            try { await navigator.share({ files: [file] }); return; }
+            catch (e) { if (e?.name === 'AbortError') return; if (e?.name === 'NotAllowedError') { shareAsk(file); return; } console.warn('[智库] 分享', e); }
+        }
+    }
+    saveBlob(blob, fname);
+}
+function onDownloadClick(ev) {
+    const a = ev.target?.closest?.('a[download]');
+    if (!a || !a.getAttribute('href') || a.dataset.zkdl) return;
+    const name = a.getAttribute('download') || '';
+    if (!/^(zhiku|piaoce|漫画|画师库)/.test(name)) return;
+    const img = !/\.json$/i.test(name), o = dlOpts();
+    const wantShare = img && ev.isTrusted && !!navigator.canShare && (o.mode === 'share' || (o.mode === 'auto' && isIOS()));
+    if (img && (o.strip || o.on || wantShare)) { ev.preventDefault(); ev.stopPropagation(); dlImage(a.href, name, o, wantShare); return; }
+    dlNote(name);
 }
 if (globalThis.__zhikuDl) DOC.removeEventListener('click', globalThis.__zhikuDl, true);
 globalThis.__zhikuDl = onDownloadClick;
@@ -8339,22 +8472,23 @@ function viewAiPreset(d) {
       </section>
       <div style="height:24px"></div>`;
 }
-function openSharedUpload() {
+function openSharedUpload(pre = {}) {
     const d = getData();
     const box = modal(`<form data-share-form>
       <h3 class="pc-h3">上传画师串</h3>
-      <label class="pc-field"><span>名称</span><input class="pc-input" name="title" maxlength="200" required placeholder="给这串起个名字"></label>
+      <label class="pc-field"><span>名称</span><input class="pc-input" name="title" maxlength="200" required placeholder="给这串起个名字" value="${esc(pre.title || '')}"></label>
       <label class="pc-field"><span>署名</span><input class="pc-input" name="signature" maxlength="24" required value="${esc(d.lobby.nickname || '')}" placeholder="显示在共享卡片上的名字"></label>
       <div class="pc-field"><span>例图（可选，最多 6 张）</span><label class="pc-pill dashed pc-share-pick">＋ 选图<input name="images" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden></label>
         <small class="pc-dim" style="display:block;margin-top:4px">选 NovelAI 原图，会自动读出正面和负面填到下面</small></div>
       <div data-share-previews style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0"></div>
       <button class="pc-pill dashed" type="button" data-share-clear hidden>清空例图</button>
       <p class="pc-dim small" data-share-meta role="status" aria-live="polite"></p>
-      <label class="pc-field"><span>画师串（正面）</span><textarea class="pc-textarea mono" name="artistString" maxlength="20000" required placeholder="artist:aaa, 0.8::artist:bbb::"></textarea></label>
-      <label class="pc-field"><span>负面（可选）</span><textarea class="pc-textarea mono" name="negative" maxlength="20000" placeholder="lowres, bad anatomy …"></textarea></label>
+      <label class="pc-field"><span>画师串（正面）</span><textarea class="pc-textarea mono" name="artistString" maxlength="20000" required placeholder="artist:aaa, 0.8::artist:bbb::">${esc(pre.artistString || '')}</textarea></label>
+      <label class="pc-field"><span>负面（可选）</span><textarea class="pc-textarea mono" name="negative" maxlength="20000" placeholder="lowres, bad anatomy …">${esc(pre.negative || '')}</textarea></label>
       <label class="pc-field"><span>标签（可选，逗号隔开）</span><input class="pc-input" name="tags" maxlength="800" placeholder="BL, 厚涂, 柔和"></label>
       <label class="pc-field"><span>说明（可选）</span><textarea class="pc-textarea" name="note" maxlength="5000" placeholder="适合的画面、使用建议或来源"></textarea></label>
       <label class="pc-switch"><input type="checkbox" name="nsfw"><span></span>含 NSFW 内容</label>
+      ${(() => { const o = dlOpts(); return `<label class="pc-switch"><input type="checkbox" name="mark" ${o.on ? 'checked' : ''} ${o.text ? '' : 'disabled'}><span></span>例图打上我的水印<small>${o.text ? '「' + esc(o.text) + '」，位置和大小在 设置 →「下载和水印」' : '先到 设置 →「下载和水印」填水印文字'}</small></label>`; })()}
       <p class="pc-dim small" data-share-status role="status" aria-live="polite"></p>
       <div class="pc-actions"><button class="pc-btn" type="button" data-share-cancel>取消</button><button class="pc-btn dark" type="submit">发布到共享</button></div>
     </form>`);
@@ -8408,6 +8542,14 @@ function openSharedUpload() {
         if (version === previewVersion && box.isConnected) await fillFromImageMeta(version);
     });
     box.querySelector('[data-share-cancel]').addEventListener('click', () => { if (!busy) box.closeModal(); });
+    if (pre.image) (async () => {
+        try {
+            const blob = await (await fetch(pre.image)).blob();
+            const dt = new DataTransfer();
+            dt.items.add(new File([blob], 'zhiku.png', { type: blob.type || 'image/png' }));
+            files.files = dt.files; files.dispatchEvent(new Event('change'));
+        } catch (e) { console.warn('[智库] 带上例图', e); say('例图没带上，可以自己点「选图」。'); }
+    })();
     box.parentElement.addEventListener('click', ev => { if (busy && ev.target === box.parentElement) ev.stopImmediatePropagation(); }, true);
     form.addEventListener('submit', async ev => {
         ev.preventDefault();
@@ -8421,6 +8563,7 @@ function openSharedUpload() {
         const selected = Array.from(files.files);
         if (selected.some(f => !['image/png', 'image/jpeg', 'image/webp'].includes(f.type) || f.size > 20 * 1024 * 1024)) { say('请选择 20MB 以内的 PNG、JPEG 或 WebP 图片。'); return; }
         const nsfw = form.elements.namedItem('nsfw').checked;
+        const mark = !!form.elements.namedItem('mark')?.checked;
         const tags = value('tags').split(/[,，\n]/).map(s => s.trim()).filter(Boolean);
         const note = value('note');
         busy = true;
@@ -8429,7 +8572,8 @@ function openSharedUpload() {
             const images = [];
             for (let i = 0; i < selected.length; i++) {
                 say(`正在处理例图 ${i + 1}/${selected.length}…`);
-                const data = await shrinkDataUrl(await fileToDataUrl(selected[i]), 1024, 0.85);
+                const src = mark ? await processImage(selected[i], { ...dlOpts(), strip: false, on: true }) : selected[i];
+                const data = await shrinkDataUrl(await fileToDataUrl(src), 1024, 0.85);
                 if ((data.split(',')[1]?.length || 0) * 0.75 > 1024 * 1024) throw new Error('例图压缩后仍超过 1MB，请换一张较小的图片。');
                 images.push({ data, nsfw });
             }
