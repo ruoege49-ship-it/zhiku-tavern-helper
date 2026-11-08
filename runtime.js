@@ -153,14 +153,14 @@ function comicRequest(parsed, { stylePos = '', styleNeg = '', extraNeg = '', wid
     return { positive, negative, chars, width: w, height: h };
 }
 /** 叠在图上的对白：每格的字放在这一格（按竖着平分估算）底部，整页旁白放最上面 */
-function captionsHtml(parsed, esc) {
-    if (!parsed?.ok) return '';
+function captionsHtml(parsed, esc, size = 's') {
+    if (!parsed?.ok || size === 'hide') return '';
     const n = Math.max(1, parsed.panelTexts.length);
     const box = (t, style, cls = '') => `<div class="pc-comic-cap ${cls}" style="${style}">${t.map(x => esc(x).replace(/\n+/g, '<br>')).join('<br>')}</div>`;
     const out = [];
     if (parsed.pageTexts.length) out.push(box(parsed.pageTexts, 'top:8px', 'top'));
     parsed.panelTexts.forEach((t, i) => { if (t.length) out.push(box(t, `top:calc(${((i + 1) / n * 100).toFixed(2)}% - ${i === n - 1 ? 44 : 8}px)`)); }); // 最后一格让开左下角的页码
-    return out.length ? `<div class="pc-comic-caps">${out.join('')}</div>` : '';
+    return out.length ? `<div class="pc-comic-caps sz-${size}">${out.join('')}</div>` : '';
 }
 
 /** 「让 AI 重写本页」的请求 */
@@ -191,7 +191,7 @@ function storyText(mes) {
         .replace(/\n{3,}/g, '\n\n').trim();
 }
 /** 「把这一楼画成漫画」的请求：读这一楼的正文，改编成几页漫画分镜 */
-function adaptRequest(story, { pages = 0, cast = '', before = '', color = 'color', extra = '' } = {}) {
+function adaptRequest(story, { pages = 0, panels = '', cast = '', before = '', color = 'color', extra = '' } = {}) {
     const system = '你是漫画分镜导演，把小说 / 角色扮演的正文改编成日式漫画页，给 NovelAI V5 出图用。'
         + '每一页先写一组 <comic_plan>（这一页讲什么、几格、每格的构图和对白），紧跟着写一组 <image>…</image>。只输出这些块，不要任何解释。'
         + '<image> 用分段文本协议：第一行 @page，下面写这一页的整体：分级（rating:general 或 rating:sensitive）、实际人数词（如 1boy, 1girl, 2boys）、comic page、画格数量与布局、留白、光影、色调。'
@@ -201,7 +201,7 @@ function adaptRequest(story, { pages = 0, cast = '', before = '', color = 'color
         + '\n\n格式示例：\n<comic_plan>第 1 页：两格。P1 远景交代咖啡馆和雨；P2 近景他看向窗外。</comic_plan>\n<image>\n@page\nrating:general, 1boy, comic page, 2 panels, vertical layout, rainy night, warm indoor light\n@panel P1\ntop half, wide shot, cafe interior, rain on window\n@panel P2\nbottom half, close-up\n@character C1\nboy, black hair, grey eyes, white shirt, black vest, sitting, looking outside, melancholic\nText: 「又下雨了。」\n</image>';
     const user = (cast ? `<characters>\n${cast}\n</characters>\n\n` : '')
         + (before ? `<previous readonly="true">\n${before}\n</previous>\n\n` : '')
-        + `<story>\n${story}\n</story>\n\n把 <story> 改编成${pages ? ` ${pages} 页` : ' 1–4 页（按剧情多少自己定，一页 2–5 格）'}${color === 'mono' ? '黑白网点' : '彩色'}漫画。只画 <story> 里发生的事。`
+        + `<story>\n${story}\n</story>\n\n把 <story> 改编成${pages ? ` ${pages} 页` : '若干页（按剧情多少自己定：短的 1–2 页，长的可以 5–8 页，剧情每个转折都要有画面，不要压缩成几格）'}${color === 'mono' ? '黑白网点' : '彩色'}漫画，${panels ? `每页 ${panels} 格` : '每页 2–5 格'}。只画 <story> 里发生的事${pages ? `，${pages} 页要把整段剧情从头画到尾，平均分配` : ''}。`
         + (String(extra || '').trim() ? `\n额外要求：${String(extra).trim()}` : '');
     return { system, user };
 }
@@ -241,9 +241,14 @@ const CSS = `
 .pc-comic-page{position:relative;margin:0;border-radius:14px;overflow:hidden;border:1.5px solid var(--pc-paper,#f4efe4);background:var(--pc-paper-2,#ebe4d2);-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}
 .pc-comic-page img{display:block;width:100%;height:auto;cursor:pointer;-webkit-user-drag:none}
 .pc-comic-caps{position:absolute;inset:0;pointer-events:none}
-.pc-comic-cap{position:absolute;left:50%;transform:translate(-50%,-100%);width:max-content;max-width:86%;background:rgba(255,255,255,.93);color:#16120f;border:1.5px solid #16120f;border-radius:12px;padding:3px 11px;font:600 13px/1.5 "Noto Serif SC","Songti SC",serif;text-align:center;box-shadow:0 2px 0 rgba(0,0,0,.25);word-break:break-word}
+.pc-comic-cap{position:absolute;left:50%;transform:translate(-50%,-100%);width:max-content;max-width:80%;background:rgba(255,255,255,.84);color:#16120f;border:1px solid rgba(22,18,15,.7);border-radius:10px;padding:2px 8px;font:600 11px/1.45 "Noto Serif SC","Songti SC",serif;text-align:center;word-break:break-word}
+.pc-comic-caps.sz-m .pc-comic-cap{font-size:13px;padding:3px 10px;max-width:86%}
+.pc-comic-caps.sz-l .pc-comic-cap{font-size:15px;padding:4px 12px;max-width:90%}
 .pc-comic-cap.top{transform:translate(-50%,0);background:#16120f;color:#f4efe4}
-.pc-cb-art .pc-comic-cap{font-size:11px;padding:2px 8px}
+.pc-cb-art .pc-comic-cap{font-size:10px;padding:1px 7px}
+.pc-comic.nocap .pc-comic-caps{display:none}
+.pc-comic-fold{display:flex;gap:8px;align-items:center;margin-top:6px}
+.pc-comic-fold button{border:1px dashed currentColor;background:transparent;color:inherit;border-radius:999px;padding:4px 14px;font-size:13px;cursor:pointer}
 .pc-comic-acts{position:absolute;left:0;right:0;top:0;display:none;gap:8px;justify-content:center;padding:10px;background:linear-gradient(rgba(20,18,16,.55),transparent)}
 .pc-comic-page.acts .pc-comic-acts{display:flex}
 .pc-comic-acts button{border:1.5px solid #f4efe4;background:rgba(20,18,16,.65);color:#f4efe4;border-radius:999px;padding:5px 14px;font-size:13px;cursor:pointer}
@@ -326,6 +331,7 @@ function createComicController(deps) {
     const running = new Map(); // `${id}:${key}` -> 'wait' | 'run'
     const errors = new Map();
     const panels = new Set();
+    const readers = new Set();
     let stopped = false, chatSeq = 0;
 
     const opts = () => getData().options;
@@ -383,7 +389,7 @@ function createComicController(deps) {
     }
     function checkpoint(msg) {
         const body = msg.mes, swipe = msg.swipe_id, oldSwipe = msg.swipes?.[swipe], hadExtra = !!msg.extra;
-        const fields = ['zhikuComic', 'zhikuComicSrc'];
+        const fields = ['zhikuComic', 'zhikuComicSrc', 'zhikuComicFold'];
         const saved = fields.map(k => msg.extra?.[k] ? { ...msg.extra[k] } : undefined);
         return () => {
             msg.mes = body;
@@ -458,7 +464,7 @@ function createComicController(deps) {
         const tag = `<span class="pc-comic-tag">第 ${b.page} / ${b.total} 页</span>`;
         if (v) {
             const ver = r.versions.length > 1 ? `<span class="pc-comic-ver"><button data-cv="-1" aria-label="上一版">‹</button>${(r.cur ?? 0) + 1}/${r.versions.length}<button data-cv="1" aria-label="下一版">›</button></span>` : '';
-            const caps = v.textMode === 'overlay' ? captionsHtml(v.captions || parseComicPage(b.inner), esc) : '';
+            const caps = v.textMode === 'overlay' ? captionsHtml(v.captions || parseComicPage(b.inner), esc, opts().comicCapSize || 's') : '';
             const acts = `<div class="pc-comic-acts"><button data-cgen>重画这一页</button><button data-cwork>编辑本页</button></div>`;
             const st = running.get(job);
             const busy = st ? `<div class="pc-comic-busy"><span>${st === 'wait' ? '排队中…' : '重画中…'}</span></div>` : '';
@@ -496,10 +502,16 @@ function createComicController(deps) {
         }
         if (!blocks.length || (own && !enabled() && !blocks.some(b => rec(msg, b.key)?.versions?.length))) return;
         const box = doc.createElement('div');
-        box.className = 'pc-comic';
+        box.className = 'pc-comic' + (capsHidden ? ' nocap' : '');
         box.dataset.mes = String(id);
+        if (msg.extra?.zhikuComicFold?.[swipeKey(msg)]) {
+            box.innerHTML = `<div class="pc-comic-fold"><button data-cunfold="${id}">📖 漫画 · ${blocks.length} 页（点开）</button></div>`;
+            const text = el.querySelector('.mes_text');
+            (text ? text.after(box) : el.appendChild(box));
+            return;
+        }
         const fail = failure(id);
-        box.innerHTML = (fail ? `<div class="pc-comic-fail"><b>重新改编失败</b><br>${esc(fail)}<br><button data-cadapt="${id}">再试一次</button><button data-cremove="${id}">不画了</button></div>` : '') + blocks.map(b => pageHtml(id, msg, b)).join('') + (own ? '' : `<div class="pc-comic-redo"><button data-cadapt="${id}">${isAdapting(id) ? esc(adapting.get(id).text) : '重新改编这一楼'}</button><button data-cremove="${id}">收起漫画</button></div>`);
+        box.innerHTML = (fail ? `<div class="pc-comic-fail"><b>重新改编失败</b><br>${esc(fail)}<br><button data-cadapt="${id}">再试一次</button><button data-cremove="${id}">不画了</button></div>` : '') + blocks.map(b => pageHtml(id, msg, b)).join('') + `<div class="pc-comic-redo">${own ? '' : `<button data-cadapt="${id}">${isAdapting(id) ? esc(adapting.get(id).text) : '重新改编这一楼'}</button>`}<button data-ccap>${capsHidden ? '显示对白' : '隐藏对白'}</button><button data-cfold="${id}">收起</button>${own ? '' : `<button data-cremove="${id}">删掉漫画</button>`}</div>`;
         const text = el.querySelector('.mes_text');
         (text ? text.after(box) : el.appendChild(box));
         hydrate(box);
@@ -511,7 +523,8 @@ function createComicController(deps) {
     function renderAll({ chatChanged = false } = {}) {
         if (chatChanged) { chatSeq++; errors.clear(); failed.clear(); adapting.clear(); doc.querySelectorAll('.pc-comic').forEach(n => n.remove()); cancelPress({type:'cancel'}); for (const close of [...panels]) close(); }
         const chat = getContext().chat || [];
-        for (let i = 0; i < chat.length; i++) if (chat[i]?.mes?.includes('<image') || chat[i]?.extra?.zhikuComicSrc || isAdapting(i) || failed.has(i)) render(i);
+        for (let i = 0; i < chat.length; i++) if (chat[i]?.mes?.includes('<image') || chat[i]?.extra?.zhikuComicSrc || chat[i]?.extra?.zhikuComicFold || isAdapting(i) || failed.has(i)) render(i);
+        for (const refresh of readers) refresh();
     }
 
     // ── 点击、双击、长按 ──
@@ -526,11 +539,13 @@ function createComicController(deps) {
     let lastTap = null, press = null, suppressClick = false;
     function onClick(ev) {
         if (suppressClick) { suppressClick = false; ev.preventDefault(); ev.stopPropagation(); return; }
-        const ad = ev.target?.closest?.('[data-cadapt],[data-cremove]');
+        const ad = ev.target?.closest?.('[data-cadapt],[data-cremove],[data-cfold],[data-cunfold],[data-ccap]');
         if (ad) {
             ev.stopPropagation();
             if (ad.dataset.cadapt) { if (!isAdapting(Number(ad.dataset.cadapt))) void adapt(Number(ad.dataset.cadapt), { redo: true }); }
-            else void unadapt(Number(ad.dataset.cremove));
+            else if (ad.dataset.cremove) { if (win.confirm('删掉这一楼的漫画？画好的图也会一起删掉。只想先不看，点「收起」就行。')) void unadapt(Number(ad.dataset.cremove)); }
+            else if (ad.dataset.cfold || ad.dataset.cunfold) void setFold(Number(ad.dataset.cfold || ad.dataset.cunfold), !!ad.dataset.cfold);
+            else if (ad.hasAttribute('data-ccap')) { capsHidden = !capsHidden; renderAll(); }
             return;
         }
         const t = targetOf(ev);
@@ -689,10 +704,16 @@ function createComicController(deps) {
               <div class="pc-label">对白怎么出现</div>
               ${seg('comicText', [['overlay', '插件叠字'], ['draw', 'NAI 画进图'], ['none', '不要对白']], 'overlay')}
               <div class="pc-hint">NAI 画中文常常乱码，「插件叠字」让 NAI 只画画面，对白由浏览器显示，位置按分格数量竖向估算；下载的仍是未叠字原图。</div>
+              <div class="pc-label">叠字大小</div>
+              ${seg('comicCapSize', [['s', '小'], ['m', '中'], ['l', '大'], ['hide', '不显示']], 's')}
+              <div class="pc-hint">挡图的话调小，或者在楼层里点「隐藏对白」临时收起。想少点对白，在下面「给 AI 的改编要求」里写「对白少一点」。</div>
               <div class="pc-label">页面尺寸（跨页自动横过来）</div>
               ${seg('comicSize', [['832x1216', '竖'], ['1216x832', '横'], ['1024x1024', '方']], '832x1216')}
               <div class="pc-label">「画成漫画」每楼画几页</div>
-              ${seg('comicPages', [[0, '自动'], [1, '1'], [2, '2'], [3, '3'], [4, '4']], 0)}
+              ${seg('comicPages', [[0, '自动'], [2, '2'], [3, '3'], [4, '4'], [6, '6'], [8, '8']], 0)}
+              <div class="pc-label">每页几格</div>
+              ${seg('comicPanels', [['', '自动'], ['1–2', '1–2'], ['3–4', '3–4'], ['5–6', '5–6']], '')}
+              <div class="pc-hint">「自动」时 AI 按剧情长短分：短的 1–2 页，长的 5–8 页。页数多、每页格数少，剧情切得越细。</div>
               <label class="pc-field pc-mt-s"><span>给 AI 的改编要求（可不填）</span><textarea class="pc-textarea small" data-cstr="comicExtra" placeholder="比如：多用特写和留白；对白少一点；每页最多 3 格；不要画 user 的脸">${esc(o.comicExtra || '')}</textarea></label>
               <label class="pc-field pc-mt-s"><span>漫画负面（加在画风负面后面）</span><textarea class="pc-textarea small mono" data-cstr="comicNeg">${esc(neg)}</textarea></label>
               <div class="pc-actions wrap" style="margin-top:6px"><button class="pc-pill dashed tiny" data-cnegreset>恢复默认负面</button></div>
@@ -701,7 +722,7 @@ function createComicController(deps) {
         };
         root.addEventListener('click', ev => {
             const b = ev.target.closest('[data-cs]');
-            if (b) { const v = b.dataset.v; opts()[b.dataset.cs] = /^\d+$/.test(v) && b.dataset.cs === 'comicPages' ? Number(v) : v; commit(); draw(); return; }
+            if (b) { const v = b.dataset.v; opts()[b.dataset.cs] = /^\d+$/.test(v) && b.dataset.cs === 'comicPages' ? Number(v) : v; commit(); draw(); if (b.dataset.cs === 'comicCapSize') renderAll(); return; }
             if (ev.target.closest('[data-cnegreset]')) { delete opts().comicNeg; commit(); draw(); return; }
             if (ev.target.closest('[data-cx]')) { box?.closeModal(); renderAll(); }
         });
@@ -732,8 +753,9 @@ function createComicController(deps) {
         try {
             const prevMsg = (c.chat || []).slice(0, id).reverse().find(m => m && !m.is_system && m.extra?.zhikuComicSrc);
             const before = prevMsg ? comicBlocks(srcOf(prevMsg)).slice(-1).map(b => b.inner).join('') : '';
-            const { system, user } = adaptRequest(story.slice(0, 12000), { pages: pages || Number(opts().comicPages) || 0, cast: deps.castText?.() || '', before, color: opts().comicColor === 'mono' ? 'mono' : 'color', extra: opts().comicExtra || '' });
-            const out = parseAdapt(await askLLM(system, user, { maxTokens: 8000 }));
+            const { system, user } = adaptRequest(story.slice(0, 12000), { pages: pages || Number(opts().comicPages) || 0, panels: opts().comicPanels || '', cast: deps.castText?.() || '', before, color: opts().comicColor === 'mono' ? 'mono' : 'color', extra: opts().comicExtra || '' });
+            const want = pages || Number(opts().comicPages) || 6;
+            const out = parseAdapt(await askLLM(system, user, { maxTokens: Math.min(16000, 3000 + 1800 * want) }));
             if (!snap.current()) return;
             const restore = checkpoint(msg), removed = [];
             setSrc(msg, out);
@@ -754,6 +776,21 @@ function createComicController(deps) {
         } finally { if (adapting.get(id) === task) adapting.delete(id); render(id); }
         await process(id, { manual: true });
     }
+    let capsHidden = false; // 这次打开酒馆里先不看对白
+    async function setFold(id, on) {
+        const snap = pageSnapshot(id);
+        if (!snap) return;
+        const { msg } = snap, key = swipeKey(msg);
+        const previous = msg.extra?.zhikuComicFold?.[key];
+        const folds = ((msg.extra ||= {}).zhikuComicFold ||= {});
+        if (on) folds[key] = true; else delete folds[key];
+        try { await saveChat(snap.c); }
+        catch (e) {
+            if (previous === undefined) delete folds[key]; else folds[key] = previous;
+            (deps.notifyError || notify)('收起状态保存失败：' + (e?.message || e));
+        }
+        if (snap.current()) render(id);
+    }
     async function unadapt(id) {
         if (failed.delete(id)) { render(id); return; }
         const snap = pageSnapshot(id);
@@ -762,6 +799,7 @@ function createComicController(deps) {
         if (!msg.extra?.zhikuComicSrc?.[swipeKey(msg)]) return;
         const restore = checkpoint(msg), removed = [];
         delete msg.extra.zhikuComicSrc[swipeKey(msg)];
+        if (msg.extra.zhikuComicFold) delete msg.extra.zhikuComicFold[swipeKey(msg)];
         const retained = new Set(Object.values(msg.extra.zhikuComicSrc).flatMap(text => comicBlocks(text).map(b => b.key)));
         for (const b of comicBlocks(source)) if (!retained.has(b.key)) {
             removed.push(...(rec(msg, b.key)?.versions || []));
@@ -779,7 +817,7 @@ function createComicController(deps) {
         const pages = [];
         chat.forEach((msg, id) => {
             if (!msg || msg.is_user) return;
-            for (const b of comicBlocks(srcOf(msg))) { const v = curVer(rec(msg, b.key)); if (v) pages.push({ id, page: b.page, total: b.total, url: v.url, name: msg.name || '', caps: v.textMode === 'overlay' ? captionsHtml(v.captions || parseComicPage(b.inner), esc) : '' }); }
+            for (const b of comicBlocks(srcOf(msg))) { const v = curVer(rec(msg, b.key)); if (v) pages.push({ id, captionSource: v.textMode === 'overlay' ? (v.captions || parseComicPage(b.inner)) : null, page: b.page, total: b.total, url: v.url, name: msg.name || '', caps: v.textMode === 'overlay' ? captionsHtml(v.captions || parseComicPage(b.inner), esc, opts().comicCapSize || 's') : '' }); }
         });
         const urls = new Map();
         const url = async p => { if (!urls.has(p.url)) urls.set(p.url, await resolveUrl(p.url)); return urls.get(p.url); };
@@ -886,7 +924,12 @@ function createComicController(deps) {
             at = Math.max(0, Math.min(pages.length - 1, at + n));
             if (mode === 'flow') layoutFlow(); else { stage.querySelector(`[data-k="${at}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }); info(); }
         }
-        const close = () => { book.remove(); doc.removeEventListener('keydown', key); panels.delete(close); };
+        const refresh = () => {
+            for (const p of pages) p.caps = p.captionSource ? captionsHtml(p.captionSource, esc, opts().comicCapSize || 's') : '';
+            build();
+        };
+        readers.add(refresh);
+        const close = () => { readers.delete(refresh); book.remove(); doc.removeEventListener('keydown', key); panels.delete(close); };
         panels.add(close);
         const toc = () => {
             const first = new Map(); pages.forEach((p, n) => { if (!first.has(p.id)) first.set(p.id, { ...p, n }); });
@@ -1519,7 +1562,7 @@ function imageInsertionPoint(text, sentence) {
     return last.start + last.text.trimEnd().length;
 }
 
-// 智库 · 原生扩展版 v0.8.30（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.34（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1537,7 +1580,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.30';
+globalThis.__PC_VERSION = '0.8.34';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -1631,6 +1674,7 @@ function emptyData() {
         blacklist: {},    // 画师 key -> { tag, note, at }  拉黑的画师
         studio: null,
         history: [],      // 历史生图：[{ id, url, thumb, raw, sent, from, at }]
+        aiPresets: { active: 'tavern:', list: {}, fn: {}, markOn: {} }, // AI 预设：active = plain / tavern:预设名（空 = 酒馆现在用的）/ 自己的预设 id
     };
 }
 
@@ -1684,6 +1728,9 @@ function normalizeData(raw) {
     }
     d.recent = Array.isArray(d.recent) ? d.recent : [];
     d.history = Array.isArray(d.history) ? d.history : [];
+    if (!d.aiPresets || typeof d.aiPresets !== 'object') d.aiPresets = { active: 'tavern:', list: {}, fn: {}, markOn: {} };
+    d.aiPresets.list ||= {}; d.aiPresets.fn ||= {}; d.aiPresets.markOn ||= {};
+    if (typeof d.aiPresets.active !== 'string') d.aiPresets.active = 'tavern:';
     // 一位画师都没有、也没有例图的画师串（批量时把画风词误当成一串）删掉
     for (const g of Object.values(d.groups)) {
         if (g.members.length || g.images.length) continue;
@@ -3220,24 +3267,115 @@ function cleanOutput(raw) {
 }
 
 /** 调一次 AI，返回原始文本（用设置里选的 API） */
-async function askLLM(system, user, { maxTokens = 800 } = {}) {
+/** 各个让 AI 干活的功能：[键, 名字, 在哪用] */
+const AI_FNS = [['img', '看图写提示词', '生图页「看图写提示词」'], ['pose', '读姿势构图', '生图页「看图读姿势构图」'], ['tr', '中文转标签', '固定提示词、正面、角色页里写的中文'], ['scene', '聊天生图写画面', '双击段落 / 聊天里生图'], ['ill', '正文插图', '「写完再请求」读剧情插图（指令在「正文转生图提示词」里改）'], ['look', '读角色外貌', '从角色卡、人设、图片、世界书读'], ['outfit', '设计 / 读衣服', 'AI 设计、从剧情读、看图读'], ['comic', '漫画改编', '「画成漫画」「重新改编」'], ['zh', '标签翻中文', '角色页「译成中文」']];
+const aiSeen = {}; // 这次打开酒馆后各功能实际用过的指令，给设置页看
+function aiCfg() {
+    const d = __mod_store.getData();
+    const c = d.aiPresets ||= { active: 'tavern:', list: {}, fn: {}, markOn: {} };
+    c.list ||= {}; c.fn ||= {}; c.markOn ||= {};
+    return c;
+}
+/** 指令拆成「主指令」和「输出格式」：输出格式插件要靠它读回复，不让改 */
+function splitFormat(sys) {
+    const s = String(sys || ''), i = s.search(/只输出\s*JSON|<image> 用分段文本协议/);
+    return i > 0 ? [s.slice(0, i).trim(), s.slice(i).trim()] : [s.trim(), ''];
+}
+/** 功能指令 + 自己加的要求 */
+function fnSystem(fn, sys) {
+    if (!fn) return sys;
+    const [main, fmt] = splitFormat(sys);
+    aiSeen[fn] = { main, fmt };
+    const extra = (aiCfg().fn[fn]?.extra || []).filter(e => e.on !== false && String(e.t || '').trim());
+    return [main, extra.length ? '额外要求：\n' + extra.map(e => '- ' + e.t.trim()).join('\n') : '', fmt].filter(Boolean).join('\n\n');
+}
+const ST_MARKERS = { chatHistory: '上下文', worldInfoBefore: '世界书（前）', worldInfoAfter: '世界书（后）', charDescription: '角色卡描述', charPersonality: '角色性格', scenario: '场景', personaDescription: '人设描述', dialogueExamples: '对话示例' };
+const MARK_MACRO = { charDescription: '{{description}}', charPersonality: '{{personality}}', scenario: '{{scenario}}', personaDescription: '{{persona}}', dialogueExamples: '{{mesExamples}}' };
+/** 酒馆的对话补全预设 → 条目 */
+function stToEntries(p) {
+    const prompts = Array.isArray(p?.prompts) ? p.prompts : [];
+    const orders = Array.isArray(p?.prompt_order) ? p.prompt_order : [];
+    const ord = (orders.find(o => String(o.character_id) === '100001') || orders.at(-1))?.order || prompts.map(x => ({ identifier: x.identifier, enabled: true }));
+    const out = [];
+    for (const o of ord) {
+        const pr = prompts.find(x => x.identifier === o.identifier);
+        if (!pr) continue;
+        if (pr.identifier === 'chatHistory') { out.push({ id: 'ctx', n: '上下文', r: 'user', on: true, ctx: true }); continue; }
+        if (ST_MARKERS[pr.identifier] || pr.marker) { out.push({ id: pr.identifier, n: ST_MARKERS[pr.identifier] || pr.name || pr.identifier, r: pr.role || 'system', on: false, mark: pr.identifier }); continue; }
+        out.push({ id: pr.identifier, n: pr.name || pr.identifier, r: pr.role || 'system', on: o.enabled !== false, t: String(pr.content || '') });
+    }
+    if (!out.some(e => e.ctx)) out.push({ id: 'ctx', n: '上下文', r: 'user', on: true, ctx: true });
+    return out;
+}
+let stPresetCache = null;
+/** 酒馆里所有对话补全预设：[{ name, data }] */
+async function tavernPresets(force = false) {
+    if (stPresetCache && !force) return stPresetCache;
+    const res = await fetch('/api/settings/get', { method: 'POST', headers: getRequestHeaders(), body: '{}' });
+    if (!res.ok) throw new Error('读不到酒馆的预设（' + res.status + '）');
+    const j = await res.json();
+    const names = j.openai_setting_names || [], list = j.openai_settings || [];
+    stPresetCache = names.map((name, i) => { try { return { name, data: typeof list[i] === 'string' ? JSON.parse(list[i]) : list[i] }; } catch { return null; } }).filter(Boolean);
+    return stPresetCache;
+}
+const currentTavernPreset = () => SillyTavern.getContext().chatCompletionSettings?.preset_settings_openai || '';
+/** 某个预设现在的条目；酒馆的预设还没读到时返回 null */
+function entriesFor(active, stList = stPresetCache) {
+    const c = aiCfg();
+    if (active === 'plain') return [{ id: 'ctx', n: '上下文', r: 'user', on: true, ctx: true }];
+    if (active.startsWith('tavern:')) {
+        const name = active.slice(7);
+        const p = !name || name === currentTavernPreset() ? SillyTavern.getContext().chatCompletionSettings : stList?.find(x => x.name === name)?.data;
+        return p ? stToEntries(p).map(e => e.mark ? { ...e, on: !!c.markOn[e.mark] } : e) : null;
+    }
+    return c.list[active]?.ents || null;
+}
+function markText(id) {
+    const ctx = SillyTavern.getContext();
+    return MARK_MACRO[id] && ctx.substituteParams ? ctx.substituteParams(MARK_MACRO[id]) : '';
+}
+/** 按选中的预设拼出要发的消息；智库的指令和内容放在「上下文」那一格 */
+async function aiMessages(fn, system, userContent) {
+    const core = [{ role: 'system', content: fnSystem(fn, system) }, { role: 'user', content: userContent }];
+    const c = aiCfg(), act = c.active ?? 'tavern:';
+    if (!fn || act === 'plain') return core;
+    let ents = null;
+    try {
+        if (act.startsWith('tavern:') && act.slice(7) && act.slice(7) !== currentTavernPreset()) await tavernPresets();
+        ents = entriesFor(act);
+    } catch (e) { console.warn('[智库] 读酒馆预设失败，这次不套预设', e); }
+    if (!ents?.length) return core;
+    const ctx = SillyTavern.getContext(), sp = s => (ctx.substituteParams ? ctx.substituteParams(s) : s);
+    const out = [];
+    for (const e of ents) {
+        if (e.ctx) { out.push(...core); continue; }
+        if (!e.on) continue;
+        const text = e.mark ? markText(e.mark) : sp(String(e.t || ''));
+        if (text.trim()) out.push({ role: ['system', 'user', 'assistant'].includes(e.r) ? e.r : 'system', content: text });
+    }
+    if (!out.includes(core[0])) out.push(...core);
+    return out;
+}
+async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {
     const api = currentApi();
+    const messages = await aiMessages(fn, system, user);
+    let res;
     if (api.st) {
         const ctx = SillyTavern.getContext();
         if (typeof ctx.generateRaw !== 'function') throw new Error('这个版本的酒馆不支持，请到设置里改用「单独填」');
-        const out = String(await ctx.generateRaw({ prompt: user, systemPrompt: system, responseLength: maxTokens }) ?? '');
+        // ST 1.14.0 generateRaw accepts ordered text messages and keeps backend settings.
+        const out = String(await ctx.generateRaw({ prompt: messages, responseLength: maxTokens, trimNames: false }) ?? '');
         if (!out.trim()) throw Object.assign(new Error('AI 回复是空的'), { emptyLength: true, diag: `通过酒馆现在连接的 API 转发，这次限长 ${maxTokens}；酒馆没把详细原因传回来，想看原因可以在智库设置「AI」里改成「单独填」再读一次` });
         return out;
     }
-    if (!api.url) throw new Error('单独填的 AI 没填地址，到设置里填');
-    if (!api.model) throw new Error('单独填的 AI 没选模型');
-    const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
-    let res;
-    if (api.bypass) {
+    if (!res && !api.url) throw new Error('单独填的 AI 没填地址，到设置里填');
+    if (!res && !api.model) throw new Error('单独填的 AI 没选模型');
+    if (res) { /* 上面已经照预设发给酒馆了 */ }
+    else if (api.bypass) {
         res = await fetch(`${api.url}/chat/completions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...(api.key ? { Authorization: `Bearer ${api.key}` } : {}) },
-            body: JSON.stringify({ model: api.model, messages, temperature: 0.3, stream: false }),
+            body: JSON.stringify({ model: api.model, messages, temperature: 0.3, stream: false, max_tokens: maxTokens }),
         });
     } else {
         res = await fetch('/api/backends/chat-completions/generate', {
@@ -3268,7 +3406,7 @@ async function askLLM(system, user, { maxTokens = 800 } = {}) {
 }
 
 async function translateToTags(text, { expand = false } = {}) {
-    return cleanOutput(await askLLM(expand ? EXPAND : SYSTEM, text, { maxTokens: 600 }));
+    return cleanOutput(await askLLM(expand ? EXPAND : SYSTEM, text, { maxTokens: 600, fn: 'tr' }));
 }
 
 /** 从 AI 的回复里挖出 JSON */
@@ -3307,7 +3445,7 @@ async function extractAppearance(name, description) {
     const sys = `你从角色设定里挑出画图用的外貌标签。只挑不会变的外貌：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身等。衣服另外放。
 ${PAIRS}
 只输出 JSON：{"appearance": [...], "outfit": [...]}。设定里没写的不要编。`;
-    const j = await askShrinking(sys, limit => `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000 });
+    const j = await askShrinking(sys, limit => `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000, fn: 'look' });
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x.en || '').trim(), zh: String(x.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
     return { appearance: norm(j.appearance), outfit: norm(j.outfit) };
 }
@@ -3352,7 +3490,7 @@ async function extractCast(cardName, description) {
 外貌只挑不会变的：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身等。衣服另外放。设定里没写的不要编。
 ${PAIRS}
 只输出 JSON：{"people": [{"name": "设定里的名字", "aliases": ["昵称、简称、别的叫法"], "appearance": [...], "outfit": [...]}]}`;
-    const j = await askShrinking(sys, limit => `卡名：${cardName}\n设定：\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000 });
+    const j = await askShrinking(sys, limit => `卡名：${cardName}\n设定：\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000, fn: 'look' });
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
     return (Array.isArray(j.people) ? j.people : []).map(p => ({
         name: String(p?.name || '').trim().slice(0, 30),
@@ -3368,7 +3506,7 @@ async function textToPairs(text) {
     const out = parts.map(p => hasChinese(p) ? null : { en: p, zh: '' });
     const zh = parts.filter(hasChinese);
     if (!zh.length) return out;
-    const j = pickJson(await askLLM(`把用户写的外貌或衣服描述翻成 NovelAI 标签，每一行都要翻。${PAIRS}只输出 JSON：{"tags": [...]}`, zh.join('\n'), { maxTokens: Math.min(2400, 300 + zh.length * 80) }));
+    const j = pickJson(await askLLM(`把用户写的外貌或衣服描述翻成 NovelAI 标签，每一行都要翻。${PAIRS}只输出 JSON：{"tags": [...]}`, zh.join('\n'), { maxTokens: Math.min(2400, 300 + zh.length * 80), fn: 'tr' }));
     const got = (j.tags || []).map(x => ({ en: String(x.en || '').trim(), zh: String(x.zh || '').trim() })).filter(x => x.en && !hasChinese(x.en));
     const at = out.indexOf(null);
     return [...out.slice(0, at).filter(Boolean), ...got, ...out.slice(at).filter(Boolean)];
@@ -3387,7 +3525,7 @@ async function sceneFromChat(chatText, cast, { maxChars = 3 } = {}) {
 {"scene": "场景、背景、时间、光线、构图的英文标签，逗号隔开",
  "characters": [{"name": "登记的角色名", "tags": "这个角色此刻的动作表情姿势${cast.some(c => c.story) ? '和衣服' : ''}，英文标签", "x": 0.1到0.9, "y": 0.1到0.9}]}
 规则：只用常见 Danbooru 英文标签；不写画师，不写质量词，不写长相；x、y 是角色在画面里的大概位置。`;
-    const j = pickJson(await askLLM(sys, chatText.slice(-6000), { maxTokens: 900 }));
+    const j = pickJson(await askLLM(sys, chatText.slice(-6000), { maxTokens: 900, fn: 'scene' }));
     return {
         scene: String(j.scene || '').trim(),
         characters: (Array.isArray(j.characters) ? j.characters : []).map(c => ({ name: String(c.name || '').trim(), tags: String(c.tags || '').trim(), x: Number(c.x), y: Number(c.y) })).filter(c => c.name),
@@ -3424,7 +3562,7 @@ async function designOutfit(name, appearance, desc, want) {
 ${PAIRS}
 只输出 JSON：{"name": "这套衣服的中文名，6 个字以内", "tags": [...]}。标签 6 到 14 个，从上到下写全（上衣、外套、下装、鞋、配饰）。`;
     const user = `角色：${name}\n长相标签：${appearance || '（没写）'}\n设定（节选）：${String(desc || '').slice(0, 1500)}\n想要的衣服：${want}`;
-    const j = pickJson(await askLLM(sys, user, { maxTokens: 600 }));
+    const j = pickJson(await askLLM(sys, user, { maxTokens: 600, fn: 'outfit' }));
     return { name: String(j.name || '').slice(0, 12), tags: (j.tags || []).map(x => ({ en: String(x.en || '').trim(), zh: String(x.zh || '').trim() })).filter(x => x.en && !hasChinese(x.en)) };
 }
 
@@ -3433,7 +3571,7 @@ async function outfitFromStory(name, chatText) {
     const sys = `读剧情，找出「${name}」此刻穿的衣服，写成 NovelAI 标签。只写衣服、鞋、配饰；剧情没写到的不要编。
 ${PAIRS}
 只输出 JSON：{"name": "这套衣服的中文名，6 个字以内", "tags": [...]}。完全没写到就输出 {"name": "", "tags": []}。`;
-    const j = pickJson(await askLLM(sys, chatText.slice(-6000), { maxTokens: 500 }));
+    const j = pickJson(await askLLM(sys, chatText.slice(-6000), { maxTokens: 500, fn: 'outfit' }));
     return { name: String(j.name || '').slice(0, 12), tags: (j.tags || []).map(x => ({ en: String(x.en || '').trim(), zh: String(x.zh || '').trim() })).filter(x => x.en && !hasChinese(x.en)) };
 }
 
@@ -3449,7 +3587,7 @@ ${demand ? `用户的要求：${demand}` : '用户没提要求：按剧情此刻
 规则：只写衣服、鞋、配饰、发饰，不写长相、动作、背景。每套 6 到 14 个标签，从上到下写全。可以给同一个角色出两套备选。
 ${PAIRS}
 只输出 JSON：{"outfits": [{"owner": "角色名（必须是上面列出的）", "name": "这套衣服的中文名，6 个字以内", "tags": [...]}]}`;
-    const j = pickJson(await askLLM(sys, chatText.slice(-6000) || '（没有剧情）', { maxTokens: 1500 }));
+    const j = pickJson(await askLLM(sys, chatText.slice(-6000) || '（没有剧情）', { maxTokens: 1500, fn: 'outfit' }));
     return (Array.isArray(j.outfits) ? j.outfits : []).map(o => ({
         owner: String(o.owner || '').trim(),
         name: String(o.name || '').slice(0, 12),
@@ -3460,12 +3598,9 @@ ${PAIRS}
 // ───────────── 看图 ─────────────
 
 /** 让 AI 看一张图（要能看图的模型）。imageDataUrl 是 data:image/... */
-async function askVision(system, text, imageDataUrl, { maxTokens = 800 } = {}) {
+async function askVision(system, text, imageDataUrl, { maxTokens = 800, fn = '' } = {}) {
     const api = currentApi();
-    const messages = [
-        { role: 'system', content: system },
-        { role: 'user', content: [{ type: 'text', text }, { type: 'image_url', image_url: { url: imageDataUrl } }] },
-    ];
+    const messages = await aiMessages(fn, system, [{ type: 'text', text }, { type: 'image_url', image_url: { url: imageDataUrl } }]);
     let body;
     if (api.st) {
         const ctx = SillyTavern.getContext();
@@ -3513,7 +3648,7 @@ async function outfitFromImage(imageDataUrl) {
     const sys = `你看图，把画面里主要人物穿的衣服写成 NovelAI 标签。只写衣服、鞋、配饰、发饰，不写长相、动作、背景、画风。从上到下写全，颜色、材质、款式写清楚。
 ${PAIRS}
 只输出 JSON：{"name": "这套衣服的中文名，6 个字以内", "tags": [...]}`;
-    const j = pickJson(await askVision(sys, '提取这张图里的衣服。', imageDataUrl, { maxTokens: 700 }));
+    const j = pickJson(await askVision(sys, '提取这张图里的衣服。', imageDataUrl, { maxTokens: 700, fn: 'outfit' }));
     return { name: String(j.name || '').slice(0, 12), tags: normPairs(j.tags) };
 }
 /** 看图提取长相 */
@@ -3521,7 +3656,7 @@ async function lookFromImage(imageDataUrl) {
     const sys = `你看图，把画面里主要人物不会变的长相写成 NovelAI 标签：先写 1boy 或 1girl，再写年龄感、发型发色、眼睛颜色和形状、脸部特征、身材、肤色、明显的痣疤纹身、动物耳尾等。不写衣服、动作、表情、背景、画风。
 ${PAIRS}
 只输出 JSON：{"appearance": [...]}`;
-    const j = pickJson(await askVision(sys, '提取这张图里人物的长相。', imageDataUrl, { maxTokens: 700 }));
+    const j = pickJson(await askVision(sys, '提取这张图里人物的长相。', imageDataUrl, { maxTokens: 700, fn: 'look' }));
     return normPairs(j.appearance);
 }
 
@@ -3531,7 +3666,7 @@ async function outfitFromText(name, desc, accDescs = []) {
 每个标签写成 {"en": "英文 Danbooru 标签", "zh": "简短中文意思", "acc": 是不是配饰}。眼镜、首饰、帽子、发饰、包、手套、围巾、手表、面具这类 acc 写 true，其余写 false。只用常见的 Danbooru 标签。
 只输出 JSON：{"tags": [...]}`;
     const user = `穿搭名：${name || '（没写）'}\n描述：${String(desc || '').slice(0, 3000)}${accDescs.length ? '\n单品：\n' + accDescs.map(a => '- ' + String(a).slice(0, 600)).join('\n') : ''}`;
-    const j = pickJson(await askLLM(sys, user, { maxTokens: 900 }));
+    const j = pickJson(await askLLM(sys, user, { maxTokens: 900, fn: 'outfit' }));
     return (Array.isArray(j.tags) ? j.tags : []).map(x => ({ en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim(), ...(x?.acc === true ? { acc: true } : x?.acc === false ? { acc: false } : {}) })).filter(x => x.en && !hasChinese(x.en));
 }
 
@@ -3541,13 +3676,35 @@ async function zhForTags(ens) {
     const out = {};
     for (let i = 0; i < list.length; i += 60) {
         const part = list.slice(i, i + 60);
-        const j = pickJson(await askLLM('把 NovelAI / Danbooru 英文标签翻成简短自然的中文（一般 2–6 个字），照原意翻，不要解释，每一个都要翻。只输出 JSON：{"zh": {"英文标签": "中文", ...}}', part.join('\n'), { maxTokens: Math.min(3000, 200 + part.length * 40) }));
+        const j = pickJson(await askLLM('把 NovelAI / Danbooru 英文标签翻成简短自然的中文（一般 2–6 个字），照原意翻，不要解释，每一个都要翻。只输出 JSON：{"zh": {"英文标签": "中文", ...}}', part.join('\n'), { maxTokens: Math.min(3000, 200 + part.length * 40), fn: 'zh' }));
         if (Array.isArray(j.zh)) j.zh.forEach((z, k) => { const en = part[k]; const v = String(z?.zh ?? z ?? '').trim(); if (en && v) out[en.toLowerCase()] = v; });
         else if (j.zh && typeof j.zh === 'object') for (const [en, z] of Object.entries(j.zh)) { const v = String(z || '').trim(); if (v) out[en.trim().toLowerCase()] = v; }
     }
     return out;
 }
-return { zhForTags, extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
+/** 看图写成 NovelAI 标签（不写画师和质量词） */
+async function imageToPrompt(imageDataUrl) {
+    const sys = `你看图，把这张图写成 NovelAI 能直接用的英文标签（Danbooru 风格，逗号隔开）。按顺序写：人数（1girl、2boys、no humans 等）→ 每个人的外貌、衣服、动作、表情、视线 → 构图和镜头（cowboy shot、from above 等）→ 背景和场景 → 光影和色调 → 画面风格特征（watercolor、thick painting 等）。不要写画师名，不要写质量词，看不见的不要编。
+只输出 JSON：{"tags": "标签1, 标签2, ...", "zh": "一句话中文描述"}`;
+    const j = pickJson(await askVision(sys, '把这张图写成提示词。', imageDataUrl, { maxTokens: 1500, fn: 'img' }));
+    const tags = (Array.isArray(j.tags) ? j.tags.join(', ') : String(j.tags || '')).trim();
+    if (!tags) throw new Error('AI 没写出标签，换个能识图的模型试试');
+    return { positive: tags, negative: '', zh: String(j.zh || '').trim() };
+}
+/** 看图只读姿势和构图（带中文） */
+async function imagePose(imageDataUrl) {
+    const sys = `你看图，只写人物的姿势和画面构图，写成 NovelAI 标签。
+姿势：身体姿势（standing、sitting、leaning forward、lying on side 等）、手和手臂的动作、腿的动作、头的朝向和视线方向；多人时写互动和相对位置（hug、holding hands、back-to-back 等）；表情最多写一两个。
+构图：取景范围（full body、cowboy shot、upper body、portrait、close-up 等）、镜头角度（from above、from below、from side、from behind、dutch angle 等）、人物在画面里的位置、透视和景深。
+不写长相、衣服、背景、画风、画师。看不清的不要编。
+${PAIRS}
+只输出 JSON：{"pose": [...], "composition": [...]}`;
+    const j = pickJson(await askVision(sys, '读这张图的姿势和构图。', imageDataUrl, { maxTokens: 1200, fn: 'pose' }));
+    const pose = normPairs(j.pose), composition = normPairs(j.composition);
+    if (!pose.length && !composition.length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
+    return { pose, composition };
+}
+return { AI_FNS, aiSeen, aiCfg, splitFormat, stToEntries, tavernPresets, entriesFor, currentTavernPreset, imagePose, imageToPrompt, zhForTags, extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
 })();
 
 // ───── chars.js ─────
@@ -4963,7 +5120,7 @@ function viewStudio(d) {
     ${!N.isReady() ? `<section class="pc-card pc-pad pc-warn-card"><b>还没填 NovelAI key</b><div class="pc-hint">填好才能生图。</div><button class="pc-btn dark pc-mt-s" data-act="nav" data-view="settings">去填</button></section>` : ''}
     <section class="pc-card pc-pad ${!N.isReady() ? 'pc-mt' : ''}">
       <div class="pc-row-between"><h2 class="pc-h2" style="margin:0">生成图片</h2><span class="pc-dim small">${esc(modelName)}</span></div>
-      <div class="pc-row-between" style="margin-top:10px"><span class="pc-label" style="margin:0">正面提示词</span><span class="pc-dim small">画师串就是这一整段</span></div>
+      <div class="pc-row-between" style="margin-top:10px"><span class="pc-label" style="margin:0">正面提示词</span><span class="pc-chips" style="margin:0;flex-wrap:wrap;justify-content:flex-end"><label class="pc-pill dashed tiny" style="cursor:pointer">${ui.img2pBusy ? '<span class="pc-busy">看图中</span>' : '看图写提示词'}<input type="file" accept="image/*" data-img2prompt hidden ${ui.img2pBusy ? 'disabled' : ''}></label><label class="pc-pill dashed tiny" style="cursor:pointer">${ui.poseBusy ? '<span class="pc-busy">读姿势中</span>' : '看图读姿势构图'}<input type="file" accept="image/*" data-imgpose hidden ${ui.poseBusy ? 'disabled' : ''}></label></span></div>
       <div class="pc-artline">
         ${(() => { const cv = owner && M.ticketCover(d, owner); return cv ? `<img class="pc-artcover" src="${esc(imgUrl(cv))}" alt="看例图" data-act="viewticket" data-type="${owner.type}" data-id="${esc(owner.id)}">` : seal(); })()}
         <div class="pc-grow"><b>${owner ? esc(M.ticketName(d, owner)) : (st.pos.trim() ? '这串还没存进画师库' : '还没写')}</b><small>${[nArtists ? nArtists + ' 位画师' : '没有 artist: 画师', nOther ? nOther + ' 个别的词' : ''].filter(Boolean).join(' · ')}${owner && M.ticketCover(d, owner) ? ' · 点图看大图' : ''}</small></div>
@@ -5415,6 +5572,7 @@ function viewGroup(d) {
       <div class="pc-actions wrap"><button class="pc-pill dashed" data-act="editstring" data-id="${g.id}">改写原串</button><button class="pc-pill dashed danger" data-act="delete" ${refAttr(ref)}>删除整串</button></div>
       <div class="pc-strrow"><p class="pc-quote small mono">${markStr(d, str)}</p><button class="pc-round dashed" data-act="copytext" data-text="${esc(str)}" aria-label="复制">${SYM.copy}</button></div>
       <label class="pc-field pc-mt-s"><span>负面（选这串时一起换上，可不填）</span><textarea class="pc-textarea small mono" data-bind-group="${g.id}" data-field="neg" placeholder="比如 1girl, text">${esc(g.neg || '')}</textarea></label>
+      <label class="pc-field pc-mt-s"><span>绑定模型（这串当正文画师串时自动换成这个模型）</span><select class="pc-input" data-bind-group="${g.id}" data-field="model"><option value="">不绑，跟设置走</option>${N.MODELS.map(([v, t]) => `<option value="${v}" ${g.model === v ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
     </section>
     <section class="pc-card pc-pad pc-mt">
       <b>标签</b><div class="pc-chips wrap">${tagChips(d, ref)}</div>
@@ -6741,6 +6899,7 @@ function viewSettings(d) {
     const prof = T.apiProfiles().find(x => x.id === cur);
     const ai = setFold('ai', '翻译和 AI', esc(T.currentApi().from) + (T.currentApi().model ? ' · ' + esc(T.currentApi().model) : ''), `
       <div class="pc-dim small">翻译、补全细节、读角色外貌、聊天生图都用这个。点一下就切换，可以存好几个。</div>
+      <div class="pc-actions wrap" style="margin-top:6px"><button class="pc-btn dark" data-act="nav" data-view="aipreset">AI 预设（发送结构）· ${(() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })()}</button></div>
       ${apiChips()}
       ${prof ? `
       <label class="pc-field"><span>名字</span><input data-api="name" value="${esc(prof.name)}"></label>
@@ -6837,7 +6996,7 @@ function viewComic(d) {
       <section class="pc-card pc-pad pc-mt"><h3 class="pc-h3">漫画设置</h3><div id="pc-comic-view"></div></section>
       <div style="height:24px"></div>`;
 }
-const VIEWS = { comic: viewComic, cast: viewCast, charedit: viewCharEdit, outfit: viewOutfit, studio: viewStudio, book: viewBook, artist: viewArtist, group: viewGroup, batch: viewBatch, vibe: viewVibe, lobby: viewLobby, settings: viewSettings };
+const VIEWS = { aipreset: viewAiPreset, comic: viewComic, cast: viewCast, charedit: viewCharEdit, outfit: viewOutfit, studio: viewStudio, book: viewBook, artist: viewArtist, group: viewGroup, batch: viewBatch, vibe: viewVibe, lobby: viewLobby, settings: viewSettings };
 
 // ═════════════════════ 事件 ═════════════════════
 
@@ -7105,6 +7264,87 @@ async function onClick(ev, outside = false) {
             }
             case 'generate': await doGenerate(); break;
             case 'castopen': openCastPicker(); break;
+            case 'aipuse': { const cfg = T.aiCfg(); cfg.active = el.dataset.v; commit(); render(); break; }
+            case 'aipnew': {
+                const name = await promptText('新预设的名字', '我的预设');
+                if (name == null) break;
+                const cfg = T.aiCfg(), id = M.uid('ap');
+                cfg.list[id] = { id, name: name.trim() || '我的预设', ents: [{ id: M.uid('e'), n: '主指令', r: 'system', on: true, t: '' }, { id: 'ctx', n: '上下文', r: 'user', on: true, ctx: true }] };
+                cfg.active = id; commit(); render(); break;
+            }
+            case 'aipcopy': {
+                const cfg = T.aiCfg(), act = cfg.active;
+                const ents = T.entriesFor(act, ui.stPresets);
+                if (!ents) { toastr.info('预设还没读出来，等一下再点', 'AI 预设'); break; }
+                const id = M.uid('ap');
+                cfg.list[id] = { id, name: (act.slice(7) || T.currentTavernPreset() || '酒馆预设') + ' · 副本', ents: ents.map(e => ({ ...e, id: e.ctx ? 'ctx' : M.uid('e') })) };
+                cfg.active = id; commit(); render(); toastr.success('复制好了，现在可以改了', 'AI 预设', { timeOut: 1500 }); break;
+            }
+            case 'aiprename': { const p = T.aiCfg().list[T.aiCfg().active]; if (!p) break; const n = await promptText('改名', p.name); if (n == null) break; p.name = n.trim() || p.name; commit(); render(); break; }
+            case 'aipdel': {
+                const cfg = T.aiCfg(), p = cfg.list[cfg.active];
+                if (!p || !(await confirmBox(`删掉预设「${p.name}」？`, { ok: '删除', cancel: '算了' }))) break;
+                delete cfg.list[p.id]; cfg.active = 'tavern:'; commit(); render(); break;
+            }
+            case 'aipexport': {
+                const cfg = T.aiCfg(), p = cfg.list[cfg.active];
+                if (!p) break;
+                const blob = new Blob([JSON.stringify({ app: 'zhiku-ai-preset', version: 1, name: p.name, ents: p.ents, fn: cfg.fn }, null, 2)], { type: 'application/json' });
+                const a = DOC.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `zhiku_AI预设_${p.name}.json`; DOC.body.appendChild(a); a.click(); a.remove();
+                break;
+            }
+            case 'aipadd': {
+                const p = T.aiCfg().list[T.aiCfg().active]; if (!p) break;
+                const t = await promptText('这一条的内容（之后点左边可以切 system / user / assistant）', '', true);
+                if (t == null || !t.trim()) break;
+                p.ents.splice(p.ents.findIndex(e => e.ctx), 0, { id: M.uid('e'), n: '条目 ' + p.ents.length, r: 'system', on: true, t: t.trim() });
+                commit(); render(); break;
+            }
+            case 'aiprole': { const p = T.aiCfg().list[T.aiCfg().active]; const e = p?.ents[Number(el.dataset.i)]; if (!e || e.ctx) break; const R = ['system', 'user', 'assistant']; e.r = R[(R.indexOf(e.r) + 1) % 3]; commit(); render(); break; }
+            case 'aipsw': {
+                const cfg = T.aiCfg(), i = Number(el.dataset.i);
+                const own = cfg.list[cfg.active];
+                if (own) { const e = own.ents[i]; if (e && !e.ctx) e.on = !e.on; }
+                else { const e = T.entriesFor(cfg.active, ui.stPresets)?.[i]; if (e?.mark) cfg.markOn[e.mark] = !cfg.markOn[e.mark]; }
+                commit(); render(); break;
+            }
+            case 'aipmove': {
+                const p = T.aiCfg().list[T.aiCfg().active]; if (!p) break;
+                const i = Number(el.dataset.i), j = i + Number(el.dataset.d);
+                if (j < 0 || j >= p.ents.length) break;
+                [p.ents[i], p.ents[j]] = [p.ents[j], p.ents[i]]; commit(); render(); break;
+            }
+            case 'aipedit': {
+                const cfg = T.aiCfg(), own = cfg.list[cfg.active], i = Number(el.dataset.i);
+                const e = own ? own.ents[i] : T.entriesFor(cfg.active, ui.stPresets)?.[i];
+                if (!e) break;
+                if (!own) { modal(`<h3 class="pc-h3">${esc(e.n)}</h3><div class="pc-dim small">${esc(e.r)} · 跟着酒馆的预设，这里只能看</div><textarea class="pc-textarea mono" readonly style="min-height:240px">${esc(e.t || '')}</textarea>`); break; }
+                const name = await promptText('名字', e.n);
+                if (name == null) break;
+                const t = await promptText(`「${name.trim() || e.n}」的内容（留空就删掉这一条）`, e.t || '', true);
+                if (t == null) break;
+                if (!t.trim() && await confirmBox('内容空了，删掉这一条？', { ok: '删除', cancel: '留着' })) own.ents.splice(i, 1);
+                else { e.n = name.trim() || e.n; e.t = t; }
+                commit(); render(); break;
+            }
+            case 'aipfn': ui.aipOpen = ui.aipOpen === el.dataset.k ? '' : el.dataset.k; render(); break;
+            case 'aipseen': { const s = T.aiSeen[el.dataset.k]; if (!s) break; modal(`<h3 class="pc-h3">${el.dataset.w === 'fmt' ? '输出格式（只能看）' : '内置指令'}</h3><textarea class="pc-textarea mono" readonly style="min-height:260px">${esc(el.dataset.w === 'fmt' ? s.fmt : s.main)}</textarea>`); break; }
+            case 'aipxadd': {
+                const t = await promptText('加一条要求，比如「多写镜头和光影」「不要写 NSFW」', '', true);
+                if (t == null || !t.trim()) break;
+                const cfg = T.aiCfg(); (cfg.fn[el.dataset.k] ||= { extra: [] }).extra ||= [];
+                cfg.fn[el.dataset.k].extra.push({ id: M.uid('x'), n: '', t: t.trim(), on: true });
+                commit(); render(); break;
+            }
+            case 'aipxsw': { const x = T.aiCfg().fn[el.dataset.k]?.extra?.[Number(el.dataset.i)]; if (!x) break; x.on = x.on === false; commit(); render(); break; }
+            case 'aipxedit': {
+                const list = T.aiCfg().fn[el.dataset.k]?.extra, i = Number(el.dataset.i), x = list?.[i];
+                if (!x) break;
+                const t = await promptText('改这条要求（留空就删掉）', x.t, true);
+                if (t == null) break;
+                if (!t.trim()) list.splice(i, 1); else x.t = t.trim();
+                commit(); render(); break;
+            }
             case 'scenesave': {
                 const p = sceneSnapshot();
                 if (!p.scene) { toastr.info('固定提示词还是空的', '固定提示词'); break; }
@@ -7492,6 +7732,7 @@ function onInput(ev) {
 async function onChangeEv(ev) {
     const el = ev.target;
     const d = getData();
+    if (el.matches?.('[data-aipst]')) { T.aiCfg().active = 'tavern:' + el.value; commit(); render(); return; }
     if (el.dataset.castMemo !== undefined) {
         const st = ui.studio, list = studioCast();
         st.castMemo = el.checked;
@@ -7527,6 +7768,52 @@ async function onChangeEv(ev) {
         u.busy = '';
         if (!u.draft) { const h = C.findOutfit(u.owner, u.id); if (h?.owner) C.saveChar(h.owner); else commit({ silent: true }); }
         render();
+        return;
+    }
+    if (el.dataset.imgpose !== undefined) {
+        const f = el.files?.[0];
+        el.value = '';
+        if (!f || ui.poseBusy) return;
+        ui.poseBusy = true; render();
+        try {
+            const r = await T.imagePose(await shrinkDataUrl(await fileToDataUrl(f), 1024, 0.88));
+            ui.poseBusy = false; render();
+            showPose(r);
+        } catch (e) { ui.poseBusy = false; render(); toastr.error(e.message || String(e), '看不了图', { timeOut: 9000 }); }
+        return;
+    }
+    if (el.dataset.aipimport !== undefined) {
+        const f = el.files?.[0];
+        el.value = '';
+        if (!f) return;
+        try {
+            const j = JSON.parse(await f.text());
+            const cfg = T.aiCfg();
+            let ents, name;
+            if (j.app === 'zhiku-ai-preset') { ents = j.ents; name = j.name; }
+            else if (Array.isArray(j.prompts)) { ents = T.stToEntries(j); name = f.name.replace(/\.json$/i, ''); }
+            if (!Array.isArray(ents) || !ents.length || ents.some(e => !e || typeof e !== 'object')) throw new Error('不是智库或酒馆的预设文件');
+            ents = ents.map(e => ({ ...e, r: ['system', 'user', 'assistant'].includes(e.r) ? e.r : 'system', n: String(e.n || ''), t: String(e.t || '') }));
+            if (!ents.some(e => e.ctx)) ents.push({ id: 'ctx', n: '上下文', r: 'user', on: true, ctx: true });
+            const id = M.uid('ap');
+            cfg.list[id] = { id, name: String(name || '导入的预设').slice(0, 30), ents: ents.map(e => ({ ...e })) };
+            if (j.app === 'zhiku-ai-preset' && j.fn && typeof j.fn === 'object') for (const [k] of T.AI_FNS) { const v = j.fn[k]; if (Array.isArray(v?.extra)) { const target = (cfg.fn[k] ||= {}); target.extra ||= []; target.extra.push(...v.extra.filter(x => x && typeof x.t === 'string').map(x => ({ ...x, id: M.uid('x') }))); } }
+            cfg.active = id; commit(); render();
+            toastr.success('导入好了', 'AI 预设', { timeOut: 1500 });
+        } catch (e) { toastr.error(e.message || String(e), '导入不了'); }
+        return;
+    }
+    if (el.dataset.img2prompt !== undefined) {
+        const f = el.files?.[0];
+        el.value = '';
+        if (!f || ui.img2pBusy) return;
+        ui.img2pBusy = true; render();
+        try {
+            let r = await readImagePrompt(f).catch(() => null), from = 'meta';
+            if (!r?.positive) { from = 'ai'; r = await T.imageToPrompt(await shrinkDataUrl(await fileToDataUrl(f), 1024, 0.88)); }
+            ui.img2pBusy = false; render();
+            showImg2Prompt(r, from);
+        } catch (e) { ui.img2pBusy = false; render(); toastr.error(e.message || String(e), '看不了图', { timeOut: 9000 }); }
         return;
     }
     if (el.dataset.lookimg !== undefined) {
@@ -7868,6 +8155,161 @@ async function readImagePrompt(file) {
     return r;
 }
 
+/** 看图写出来的提示词：改一改，再选怎么填进生图页 */
+function showImg2Prompt(r, from) {
+    const st = ui.studio;
+    const hasArtist = M.parseArtistString(r.positive).members.length > 0;
+    const box = modal(`<h3 class="pc-h3">看图写出的提示词</h3>
+      <div class="pc-dim small">${from === 'meta' ? '这是 NovelAI 原图，直接读出了当时发的提示词' : '识图 AI 看图写的（不含画师和质量词），可以先改一改'}${r.zh ? '：' + esc(r.zh) : ''}</div>
+      <label class="pc-field pc-mt-s"><span>正面</span><textarea class="pc-textarea mono" data-i2p-pos>${esc(r.positive)}</textarea></label>
+      ${r.negative ? `<label class="pc-field pc-mt-s"><span>负面</span><textarea class="pc-textarea small mono" data-i2p-neg>${esc(r.negative)}</textarea></label>
+      <label class="pc-switch"><input type="checkbox" data-i2p-useneg checked><span></span>负面也换成这个</label>` : ''}
+      <div class="pc-actions wrap">
+        <button class="pc-btn dark" data-i2p="replace">换掉正面（保留现在的画师）</button>
+        <button class="pc-btn" data-i2p="append">接在正面后面</button>
+        ${hasArtist ? '<button class="pc-btn" data-i2p="all">连图里的画师一起用</button>' : ''}
+        <button class="pc-btn" data-i2p="copy">复制</button>
+        <button class="pc-btn" data-i2p="no">算了</button>
+      </div>`);
+    box.addEventListener('click', async ev => {
+        const act = ev.target.closest('[data-i2p]')?.dataset.i2p;
+        if (!act) return;
+        const pos = box.querySelector('[data-i2p-pos]').value.trim();
+        if (act === 'no') { box.closeModal(); return; }
+        if (act === 'copy') { try { await navigator.clipboard.writeText(pos); toastr.success('复制好了', '看图写提示词', { timeOut: 1200 }); } catch { toastr.info('复制不了，长按文本框自己复制', '看图写提示词'); } return; }
+        const keep = M.parseArtistString(st.pos || '').members.map(m => Math.abs(m.weight - 1) < 0.001 ? m.tag : `${M.fmtWeight(m.weight)}::${m.tag}::`).join(', ');
+        if (act === 'replace') st.pos = M.replaceArtists(M.stripArtists(pos), [keep, st.lastExtra].filter(Boolean).join(', '));
+        else if (act === 'append') st.pos = M.mergeTags(st.pos || '', M.stripArtists(pos));
+        else if (act === 'all') st.pos = pos;
+        const negBox = box.querySelector('[data-i2p-neg]');
+        if (negBox && box.querySelector('[data-i2p-useneg]')?.checked) st.neg = negBox.value.trim();
+        saveStudio();
+        box.closeModal();
+        ui.view = 'studio'; render();
+        toastr.success(act === 'all' ? '已填进正面（含画师）' : '已填进正面，画师串没动', '看图写提示词', { timeOut: 1800 });
+    });
+}
+/** 看图读出的姿势和构图：挑着用，带中文 */
+function showPose(r) {
+    const st = ui.studio;
+    const all = [...r.pose.map(p => ({ ...p, g: '姿势' })), ...r.composition.map(p => ({ ...p, g: '构图' }))];
+    const picked = new Set(all.map((_, i) => i));
+    const box = modal('<div data-pose></div>');
+    const draw = () => {
+        const grp = g => all.map((p, i) => [p, i]).filter(([p]) => p.g === g).map(([p, i]) => `<button class="pc-pair-pick ${picked.has(i) ? 'on' : ''}" data-pi="${i}"><span class="mono">${esc(p.en)}</span>${p.zh ? `<em>${esc(p.zh)}</em>` : ''}</button>`).join('') || '<span class="pc-dim small">没读出来</span>';
+        box.querySelector('[data-pose]').innerHTML = `<style>.pc-pair-pick{display:inline-flex;align-items:baseline;gap:6px;margin:0 6px 6px 0;padding:6px 11px;border-radius:999px;border:1.5px dashed var(--pc-dash);background:transparent;color:var(--pc-ink);font-family:var(--pc-font);font-size:13px;cursor:pointer}.pc-pair-pick em{font-style:normal;font-size:12px;color:var(--pc-ink-soft)}.pc-pair-pick.on{border-style:solid;border-color:var(--pc-ink);background:var(--pc-paper-2)}</style>
+          <h3 class="pc-h3">图里的姿势和构图</h3><div class="pc-dim small">点标签选上 / 取消，选上的才会用。</div>
+          <div class="pc-label">姿势</div><div>${grp('姿势')}</div>
+          <div class="pc-label">构图</div><div>${grp('构图')}</div>
+          <div class="pc-actions wrap">
+            <button class="pc-btn dark" data-pa="pos">接在正面后面</button>
+            <button class="pc-btn" data-pa="scene">放进固定提示词</button>
+            <button class="pc-btn" data-pa="copy">复制</button>
+            <button class="pc-btn" data-pa="no">算了</button></div>`;
+    };
+    box.addEventListener('click', async ev => {
+        const pi = ev.target.closest('[data-pi]');
+        if (pi) { const i = Number(pi.dataset.pi); picked.has(i) ? picked.delete(i) : picked.add(i); draw(); return; }
+        const a = ev.target.closest('[data-pa]')?.dataset.pa;
+        if (!a) return;
+        if (a === 'no') { box.closeModal(); return; }
+        const tags = all.filter((_, i) => picked.has(i)).map(p => p.en).join(', ');
+        if (!tags) { toastr.info('一个都没选', '姿势构图'); return; }
+        if (a === 'copy') { try { await navigator.clipboard.writeText(tags); toastr.success('复制好了', '姿势构图', { timeOut: 1200 }); } catch { toastr.info(tags, '复制不了，自己长按复制'); } return; }
+        if (a === 'pos') st.pos = M.mergeTags(st.pos || '', tags);
+        else { st.scene = [String(st.scene || '').trim(), tags].filter(Boolean).join(', '); st.sceneOn = true; }
+        saveStudio(); box.closeModal(); ui.view = 'studio'; render();
+        toastr.success(a === 'pos' ? '接在正面后面了' : '放进固定提示词了', '姿势构图', { timeOut: 1500 });
+    });
+    draw();
+}
+/** AI 预设页 */
+function viewAiPreset(d) {
+    const cfg = T.aiCfg(), act = cfg.active ?? 'tavern:';
+    const kind = act === 'plain' ? 'plain' : act.startsWith('tavern:') ? 'tavern' : 'own';
+    const curST = T.currentTavernPreset();
+    if (kind === 'tavern' && !ui.stPresets && !ui.stPresetsLoading) {
+        ui.stPresetsLoading = true;
+        T.tavernPresets().then(l => { ui.stPresets = l; }).catch(e => { ui.stPresets = []; ui.stPresetsErr = e.message; }).finally(() => { ui.stPresetsLoading = false; if (ui.view === 'aipreset') render(); });
+    }
+    const ents = T.entriesFor(act, ui.stPresets);
+    const mine = Object.values(cfg.list);
+    const ro = kind !== 'own';
+    const stName = act.slice(7) || curST;
+    const chip = (v, t) => `<button class="pc-pill ${act === v || (v === 'tavern:' && kind === 'tavern') ? 'on' : 'dashed'}" data-act="aipuse" data-v="${esc(v)}">${t}</button>`;
+    const entRow = (e, i) => {
+        const moveUp = !ro && i > 0, moveDown = !ro && i < ents.length - 1;
+        return `<div class="pc-aient ${e.ctx ? 'ctx' : ''} ${e.mark && !e.on ? 'skip' : ''} ${!e.on && !e.ctx && !e.mark ? 'off' : ''}">
+          <button class="pc-airole ${e.r}" data-act="aiprole" data-i="${i}" ${ro || e.ctx ? 'disabled' : ''}>${esc(e.r)}</button>
+          <div class="pc-grow"><b>${e.ctx ? '📌 ' : ''}${esc(e.n)}</b><small>${e.ctx ? '智库的指令 + 这次要处理的内容放在这里' : e.mark ? (e.on ? '酒馆自动填：' + esc(e.n) + (/worldInfo/.test(e.mark) ? '（世界书暂时带不了）' : '') : '角色卡、世界书这类，默认不发') : esc(String(e.t || '').slice(0, 80))}</small></div>
+          ${e.ctx ? '' : `<button class="pc-aisw ${e.on ? 'on' : ''}" data-act="aipsw" data-i="${i}" ${ro && !e.mark ? 'disabled' : ''} aria-label="开关"></button>`}
+          ${moveUp ? `<button class="pc-aiib" data-act="aipmove" data-i="${i}" data-d="-1" aria-label="上移">↑</button>` : ''}
+          ${moveDown ? `<button class="pc-aiib" data-act="aipmove" data-i="${i}" data-d="1" aria-label="下移">↓</button>` : ''}
+          ${e.ctx || e.mark ? '' : `<button class="pc-aiib" data-act="aipedit" data-i="${i}">${ro ? '看' : '✎'}</button>`}</div>`;
+    };
+    const fnRows = T.AI_FNS.map(([k, n, where]) => {
+        const f = cfg.fn[k] || { extra: [] }, extra = f.extra || [], seen = T.aiSeen[k];
+        const open = ui.aipOpen === k;
+        return `<div class="pc-aifn ${open ? 'open' : ''}"><button class="pc-aifn-h" data-act="aipfn" data-k="${k}"><span class="pc-grow"><b>${esc(n)}</b><small>${esc(where)}${extra.length ? ` · 加了 ${extra.length} 条要求` : ''}</small></span><span>${open ? '⌄' : '›'}</span></button>
+          ${open ? `<div class="pc-aient"><span class="pc-airole tag">内置</span><div class="pc-grow"><b>指令</b><small>${seen ? esc(seen.main.slice(0, 80)) : '这次打开酒馆后还没用过，用一次就能看到'}</small></div>${seen ? `<button class="pc-aiib" data-act="aipseen" data-k="${k}" data-w="main">看</button>` : ''}</div>
+            ${seen?.fmt ? `<div class="pc-aient"><span class="pc-airole tag">🔒</span><div class="pc-grow"><b>输出格式</b><small>插件要按这个读 AI 的回复，只能看</small></div><button class="pc-aiib" data-act="aipseen" data-k="${k}" data-w="fmt">看</button></div>` : ''}
+            ${extra.map((x, i) => `<div class="pc-aient ${x.on === false ? 'off' : ''}"><span class="pc-airole tag">我的</span><div class="pc-grow"><b>${esc(x.n || '要求 ' + (i + 1))}</b><small>${esc(x.t)}</small></div><button class="pc-aisw ${x.on !== false ? 'on' : ''}" data-act="aipxsw" data-k="${k}" data-i="${i}" aria-label="开关"></button><button class="pc-aiib" data-act="aipxedit" data-k="${k}" data-i="${i}">✎</button></div>`).join('')}
+            <button class="pc-castadd" data-act="aipxadd" data-k="${k}">＋ 加一条要求</button>
+            <div class="pc-dim small">内置指令里会自动填角色名这类东西，所以不能直接改；想让 AI 换个写法，加一条要求就行。</div>` : ''}</div>`;
+    }).join('');
+    return `<style>
+.pc-aient{display:flex;align-items:center;gap:7px;padding:8px 9px;border-radius:13px;background:var(--pc-paper-2);margin-top:6px}
+.pc-aient b{font-size:14px}
+.pc-aient small{display:block;font-size:11px;color:var(--pc-ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pc-aient.off b::after{content:" · 关着";font-size:11px;font-weight:400;color:var(--pc-danger)}
+.pc-aient.skip{background:transparent;border:1.5px dashed var(--pc-dash)}
+.pc-aient.ctx{background:var(--pc-ink);color:var(--pc-paper)}
+.pc-aient.ctx small{color:var(--pc-paper);opacity:.8}
+.pc-airole{flex:0 0 auto;min-width:64px;height:26px;border-radius:8px;border:1.5px solid var(--pc-ink);background:var(--pc-paper);color:var(--pc-ink);font:11px var(--pc-font-label);cursor:pointer;display:inline-grid;place-items:center;padding:0 6px}
+.pc-airole.user{background:rgba(201,138,62,.28)}.pc-airole.assistant{background:rgba(126,162,156,.35)}
+.pc-airole.tag{min-width:auto}
+.pc-airole[disabled]{cursor:default}
+.pc-aient.ctx .pc-airole{background:transparent;color:var(--pc-gold);border-color:var(--pc-gold)}
+.pc-aisw{flex:0 0 auto;width:40px;height:23px;border-radius:999px;background:rgba(58,42,34,.18);position:relative;cursor:pointer;border:0}
+.pc-aisw::after{content:"";position:absolute;top:3px;left:3px;width:17px;height:17px;border-radius:50%;background:var(--pc-gold);transition:left .15s}
+.pc-aisw.on{background:var(--pc-ink)}.pc-aisw.on::after{left:20px}
+.pc-aisw[disabled]{cursor:default}
+.pc-aiib{flex:0 0 auto;width:28px;height:28px;border-radius:8px;border:1.5px dashed var(--pc-dash);background:transparent;color:inherit;cursor:pointer;font-size:12px}
+.pc-aient.ctx .pc-aiib{border-color:rgba(244,239,228,.55)}
+.pc-castadd{width:100%;margin:9px 0 6px;min-height:42px;border:1.5px dashed var(--pc-dash);border-radius:14px;background:transparent;font-family:var(--pc-font);font-size:14px;color:var(--pc-ink);cursor:pointer}
+.pc-aifn{border-top:1.5px dashed var(--pc-dash);padding:6px 0}
+.pc-aifn:first-of-type{border-top:0}
+.pc-aifn-h{display:flex;align-items:center;gap:8px;width:100%;border:0;background:transparent;color:var(--pc-ink);font-family:var(--pc-font);text-align:left;padding:6px 2px;cursor:pointer}
+.pc-aifn-h b{display:block;font-size:15px}
+.pc-aifn-h small{display:block;font-size:11px;color:var(--pc-ink-soft)}
+</style>
+      <button class="pc-back" data-act="nav" data-view="settings">‹ 回设置</button>
+      <h2 class="pc-pagetitle">AI 预设</h2>
+      <section class="pc-card pc-pad">
+        <div class="pc-dim small">智库让 AI 干活时（看图、转标签、插图、读外貌、漫画……）按这里的预设发：预设里的条目照常发，智库的指令放在 📌「上下文」那一格。</div>
+        <div class="pc-chips wrap pc-mt-s">${chip('plain', '不套预设')}${chip('tavern:', '跟酒馆预设')}${mine.map(p => chip(p.id, esc(p.name))).join('')}<button class="pc-pill dashed" data-act="aipnew">＋ 新建</button></div>
+        ${kind === 'tavern' ? `<select class="pc-input pc-mt-s" data-aipst><option value="">酒馆现在用的${curST ? '（' + esc(curST) + '）' : ''}</option>${(ui.stPresets || []).map(p => `<option value="${esc(p.name)}" ${act === 'tavern:' + p.name ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
+          <div class="pc-hint">${ui.stPresetsLoading ? '正在读酒馆的预设…' : ui.stPresetsErr ? '读不到酒馆的预设列表：' + esc(ui.stPresetsErr) : '跟着酒馆的预设「' + esc(stName || '现在用的') + '」走：酒馆里改了这里跟着变，这里只能看（角色卡、世界书那几格能开关）。想自己调，点「复制一份改」。'}</div>` : ''}
+        ${kind === 'plain' ? '<div class="pc-hint">不套预设：只发智库自己的指令，跟以前一样。API 不需要破限时用。</div>' : ''}
+        ${kind === 'own' ? `<div class="pc-hint">智库自己的预设「${esc(cfg.list[act]?.name || '')}」：条目、角色（点左边切 system / user / assistant）、开关、顺序都能改。</div>` : ''}
+        <div class="pc-actions wrap">
+          ${kind === 'tavern' ? '<button class="pc-btn dark" data-act="aipcopy">复制一份改</button>' : ''}
+          <label class="pc-btn" style="cursor:pointer">导入文件<input type="file" accept=".json,application/json" data-aipimport hidden></label>
+          ${kind === 'own' ? '<button class="pc-btn" data-act="aipexport">导出</button><button class="pc-btn" data-act="aiprename">改名</button><button class="pc-linkdanger" data-act="aipdel">删掉这个预设</button>' : ''}
+        </div>
+        <div class="pc-hint">只对「翻译和 AI」里用「酒馆现在连接的 API」或「单独填」的聊天补全接口有效；酒馆连的是文本补全时，会把条目合成一段发。</div>
+      </section>
+      <section class="pc-card pc-pad pc-mt">
+        <h3 class="pc-h3" style="margin:0">条目</h3><div class="pc-dim small">从上往下按顺序发。</div>
+        ${ents ? ents.map(entRow).join('') : '<div class="pc-dim small pc-mt-s">正在读这个预设…</div>'}
+        ${kind === 'own' ? '<button class="pc-castadd" data-act="aipadd">＋ 加一条</button>' : ''}
+      </section>
+      <section class="pc-card pc-pad pc-mt">
+        <h3 class="pc-h3" style="margin:0">各个功能</h3><div class="pc-dim small">这些是放进 📌「上下文」的部分。每个功能都能加自己的要求，所有预设通用。</div>
+        ${fnRows}
+      </section>
+      <div style="height:24px"></div>`;
+}
 function openSharedUpload() {
     const d = getData();
     const box = modal(`<form data-share-form>
@@ -8609,6 +9051,31 @@ async function start() {
     UI.renderChip();
     UI.renderStub();
     cleanups.push(onChange(() => { UI.renderChip(); UI.renderStub(); }));
+    // 画师串绑定的模型：正文画师串换了就跟着换模型，换到没绑的串就换回原来的
+    let lastModelKey = null;
+    const modelName = v => (N.MODELS.find(m => m[0] === v) || [v, v])[1];
+    const syncModel = () => {
+        const d = getData(), s = N.settings();
+        const t = d.active ? __mod_model.resolveTicket(d, d.active) : null;
+        const want = t?.item?.model || '';
+        const key = (d.active ? d.active.type + ':' + d.active.id : '') + '|' + want;
+        if (key === lastModelKey) return;
+        const first = lastModelKey === null;
+        lastModelKey = key;
+        if (want) {
+            if (s.novelaimode === want) return;
+            if (!s.zkModelBefore) s.zkModelBefore = s.novelaimode;
+            s.novelaimode = want; N.save();
+            if (!first) toastr.info(`画师串「${t.item.name || t.item.tag || ''}」绑定了 ${modelName(want)}，已切过去`, '智库', { timeOut: 2500 });
+        } else if (s.zkModelBefore) {
+            const back = s.zkModelBefore;
+            delete s.zkModelBefore;
+            if (s.novelaimode !== back) { s.novelaimode = back; N.save(); if (!first) toastr.info('换回原来的模型 ' + modelName(back), '智库', { timeOut: 2500 }); }
+            else N.save();
+        }
+    };
+    syncModel();
+    cleanups.push(onChange(syncModel));
 
     const onChat = () => { selectedImages.reset(); return setTimeout(() => { globalThis.__zhikuComic?.renderAll({ chatChanged: true }); UI.renderChip(); UI.renderStub(); E.applyBindingOnChatChange(); addMesButtons(); }, 300); };
     DOC.addEventListener('click', onChatClick, true);
@@ -8619,7 +9086,7 @@ async function start() {
     // 正文自动插图
     const illustrationPlanner = createIllustrationPlanner({
         getContext: () => SillyTavern.getContext(), getData, settings: () => __mod_marker.settings(), roster: () => C.currentCast(),
-        askLLM: (...args) => __mod_translate.askLLM(...args), pickJson: text => __mod_translate.pickJson(text),
+        askLLM: (s, u, o) => __mod_translate.askLLM(s, u, { ...o, fn: 'ill' }), pickJson: text => __mod_translate.pickJson(text),
         warn: message => toastr.warning(message, '智库 · 自动插图', {timeOut:6000}),
         onRequest: request => { illustrationLastRequest = request; },
         afterSave: async (id, selection = {}) => { addMesButtons(); return __mod_marker.process(id, selection.manual ? {manual:true,tokenIndices:selection.tokenIndices} : {}); },
@@ -8635,7 +9102,7 @@ async function start() {
     const comic = createComicController({
         document: DOC, getContext: () => SillyTavern.getContext(), getData, commit: () => __mod_store.commit({ silent: true }), model: __mod_model,
         generatePage: req => N.generate({ ...req, comic: true }), storeImage: pcStoreImage, resolveUrl: u => pcLocal.url(u), dropImage: pcDropImage,
-        recordImage: shot => pcRecordImage(shot), askLLM: (...a) => __mod_translate.askLLM(...a),
+        recordImage: shot => pcRecordImage(shot), askLLM: (s, u, o) => __mod_translate.askLLM(s, u, { ...o, fn: 'comic' }),
         castText: () => __mod_chars.currentCast().filter(x => x.on || (x.char.appearance || []).length).map(x => `${x.char.name}：${__mod_chars.fixedTags(x.char) || '（还没写外貌，按正文描写画）'}`).join('\n'),
         notify: m => toastr.info(m, '智库 · 漫画', { timeOut: 1500 }), notifyError: m => toastr.error(m, '智库 · 漫画', { timeOut: 9000 }), naiMode: () => N.settings().naiMode, modal: UI.modal, esc: UI.esc,
     });

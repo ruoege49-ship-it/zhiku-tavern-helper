@@ -143,14 +143,14 @@ export function comicRequest(parsed, { stylePos = '', styleNeg = '', extraNeg = 
     return { positive, negative, chars, width: w, height: h };
 }
 /** 叠在图上的对白：每格的字放在这一格（按竖着平分估算）底部，整页旁白放最上面 */
-export function captionsHtml(parsed, esc) {
-    if (!parsed?.ok) return '';
+export function captionsHtml(parsed, esc, size = 's') {
+    if (!parsed?.ok || size === 'hide') return '';
     const n = Math.max(1, parsed.panelTexts.length);
     const box = (t, style, cls = '') => `<div class="pc-comic-cap ${cls}" style="${style}">${t.map(x => esc(x).replace(/\n+/g, '<br>')).join('<br>')}</div>`;
     const out = [];
     if (parsed.pageTexts.length) out.push(box(parsed.pageTexts, 'top:8px', 'top'));
     parsed.panelTexts.forEach((t, i) => { if (t.length) out.push(box(t, `top:calc(${((i + 1) / n * 100).toFixed(2)}% - ${i === n - 1 ? 44 : 8}px)`)); }); // 最后一格让开左下角的页码
-    return out.length ? `<div class="pc-comic-caps">${out.join('')}</div>` : '';
+    return out.length ? `<div class="pc-comic-caps sz-${size}">${out.join('')}</div>` : '';
 }
 
 /** 「让 AI 重写本页」的请求 */
@@ -181,7 +181,7 @@ export function storyText(mes) {
         .replace(/\n{3,}/g, '\n\n').trim();
 }
 /** 「把这一楼画成漫画」的请求：读这一楼的正文，改编成几页漫画分镜 */
-export function adaptRequest(story, { pages = 0, cast = '', before = '', color = 'color', extra = '' } = {}) {
+export function adaptRequest(story, { pages = 0, panels = '', cast = '', before = '', color = 'color', extra = '' } = {}) {
     const system = '你是漫画分镜导演，把小说 / 角色扮演的正文改编成日式漫画页，给 NovelAI V5 出图用。'
         + '每一页先写一组 <comic_plan>（这一页讲什么、几格、每格的构图和对白），紧跟着写一组 <image>…</image>。只输出这些块，不要任何解释。'
         + '<image> 用分段文本协议：第一行 @page，下面写这一页的整体：分级（rating:general 或 rating:sensitive）、实际人数词（如 1boy, 1girl, 2boys）、comic page、画格数量与布局、留白、光影、色调。'
@@ -191,7 +191,7 @@ export function adaptRequest(story, { pages = 0, cast = '', before = '', color =
         + '\n\n格式示例：\n<comic_plan>第 1 页：两格。P1 远景交代咖啡馆和雨；P2 近景他看向窗外。</comic_plan>\n<image>\n@page\nrating:general, 1boy, comic page, 2 panels, vertical layout, rainy night, warm indoor light\n@panel P1\ntop half, wide shot, cafe interior, rain on window\n@panel P2\nbottom half, close-up\n@character C1\nboy, black hair, grey eyes, white shirt, black vest, sitting, looking outside, melancholic\nText: 「又下雨了。」\n</image>';
     const user = (cast ? `<characters>\n${cast}\n</characters>\n\n` : '')
         + (before ? `<previous readonly="true">\n${before}\n</previous>\n\n` : '')
-        + `<story>\n${story}\n</story>\n\n把 <story> 改编成${pages ? ` ${pages} 页` : ' 1–4 页（按剧情多少自己定，一页 2–5 格）'}${color === 'mono' ? '黑白网点' : '彩色'}漫画。只画 <story> 里发生的事。`
+        + `<story>\n${story}\n</story>\n\n把 <story> 改编成${pages ? ` ${pages} 页` : '若干页（按剧情多少自己定：短的 1–2 页，长的可以 5–8 页，剧情每个转折都要有画面，不要压缩成几格）'}${color === 'mono' ? '黑白网点' : '彩色'}漫画，${panels ? `每页 ${panels} 格` : '每页 2–5 格'}。只画 <story> 里发生的事${pages ? `，${pages} 页要把整段剧情从头画到尾，平均分配` : ''}。`
         + (String(extra || '').trim() ? `\n额外要求：${String(extra).trim()}` : '');
     return { system, user };
 }
@@ -231,9 +231,14 @@ const CSS = `
 .pc-comic-page{position:relative;margin:0;border-radius:14px;overflow:hidden;border:1.5px solid var(--pc-paper,#f4efe4);background:var(--pc-paper-2,#ebe4d2);-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}
 .pc-comic-page img{display:block;width:100%;height:auto;cursor:pointer;-webkit-user-drag:none}
 .pc-comic-caps{position:absolute;inset:0;pointer-events:none}
-.pc-comic-cap{position:absolute;left:50%;transform:translate(-50%,-100%);width:max-content;max-width:86%;background:rgba(255,255,255,.93);color:#16120f;border:1.5px solid #16120f;border-radius:12px;padding:3px 11px;font:600 13px/1.5 "Noto Serif SC","Songti SC",serif;text-align:center;box-shadow:0 2px 0 rgba(0,0,0,.25);word-break:break-word}
+.pc-comic-cap{position:absolute;left:50%;transform:translate(-50%,-100%);width:max-content;max-width:80%;background:rgba(255,255,255,.84);color:#16120f;border:1px solid rgba(22,18,15,.7);border-radius:10px;padding:2px 8px;font:600 11px/1.45 "Noto Serif SC","Songti SC",serif;text-align:center;word-break:break-word}
+.pc-comic-caps.sz-m .pc-comic-cap{font-size:13px;padding:3px 10px;max-width:86%}
+.pc-comic-caps.sz-l .pc-comic-cap{font-size:15px;padding:4px 12px;max-width:90%}
 .pc-comic-cap.top{transform:translate(-50%,0);background:#16120f;color:#f4efe4}
-.pc-cb-art .pc-comic-cap{font-size:11px;padding:2px 8px}
+.pc-cb-art .pc-comic-cap{font-size:10px;padding:1px 7px}
+.pc-comic.nocap .pc-comic-caps{display:none}
+.pc-comic-fold{display:flex;gap:8px;align-items:center;margin-top:6px}
+.pc-comic-fold button{border:1px dashed currentColor;background:transparent;color:inherit;border-radius:999px;padding:4px 14px;font-size:13px;cursor:pointer}
 .pc-comic-acts{position:absolute;left:0;right:0;top:0;display:none;gap:8px;justify-content:center;padding:10px;background:linear-gradient(rgba(20,18,16,.55),transparent)}
 .pc-comic-page.acts .pc-comic-acts{display:flex}
 .pc-comic-acts button{border:1.5px solid #f4efe4;background:rgba(20,18,16,.65);color:#f4efe4;border-radius:999px;padding:5px 14px;font-size:13px;cursor:pointer}
@@ -316,6 +321,7 @@ export function createComicController(deps) {
     const running = new Map(); // `${id}:${key}` -> 'wait' | 'run'
     const errors = new Map();
     const panels = new Set();
+    const readers = new Set();
     let stopped = false, chatSeq = 0;
 
     const opts = () => getData().options;
@@ -373,7 +379,7 @@ export function createComicController(deps) {
     }
     function checkpoint(msg) {
         const body = msg.mes, swipe = msg.swipe_id, oldSwipe = msg.swipes?.[swipe], hadExtra = !!msg.extra;
-        const fields = ['zhikuComic', 'zhikuComicSrc'];
+        const fields = ['zhikuComic', 'zhikuComicSrc', 'zhikuComicFold'];
         const saved = fields.map(k => msg.extra?.[k] ? { ...msg.extra[k] } : undefined);
         return () => {
             msg.mes = body;
@@ -448,7 +454,7 @@ export function createComicController(deps) {
         const tag = `<span class="pc-comic-tag">第 ${b.page} / ${b.total} 页</span>`;
         if (v) {
             const ver = r.versions.length > 1 ? `<span class="pc-comic-ver"><button data-cv="-1" aria-label="上一版">‹</button>${(r.cur ?? 0) + 1}/${r.versions.length}<button data-cv="1" aria-label="下一版">›</button></span>` : '';
-            const caps = v.textMode === 'overlay' ? captionsHtml(v.captions || parseComicPage(b.inner), esc) : '';
+            const caps = v.textMode === 'overlay' ? captionsHtml(v.captions || parseComicPage(b.inner), esc, opts().comicCapSize || 's') : '';
             const acts = `<div class="pc-comic-acts"><button data-cgen>重画这一页</button><button data-cwork>编辑本页</button></div>`;
             const st = running.get(job);
             const busy = st ? `<div class="pc-comic-busy"><span>${st === 'wait' ? '排队中…' : '重画中…'}</span></div>` : '';
@@ -486,10 +492,16 @@ export function createComicController(deps) {
         }
         if (!blocks.length || (own && !enabled() && !blocks.some(b => rec(msg, b.key)?.versions?.length))) return;
         const box = doc.createElement('div');
-        box.className = 'pc-comic';
+        box.className = 'pc-comic' + (capsHidden ? ' nocap' : '');
         box.dataset.mes = String(id);
+        if (msg.extra?.zhikuComicFold?.[swipeKey(msg)]) {
+            box.innerHTML = `<div class="pc-comic-fold"><button data-cunfold="${id}">📖 漫画 · ${blocks.length} 页（点开）</button></div>`;
+            const text = el.querySelector('.mes_text');
+            (text ? text.after(box) : el.appendChild(box));
+            return;
+        }
         const fail = failure(id);
-        box.innerHTML = (fail ? `<div class="pc-comic-fail"><b>重新改编失败</b><br>${esc(fail)}<br><button data-cadapt="${id}">再试一次</button><button data-cremove="${id}">不画了</button></div>` : '') + blocks.map(b => pageHtml(id, msg, b)).join('') + (own ? '' : `<div class="pc-comic-redo"><button data-cadapt="${id}">${isAdapting(id) ? esc(adapting.get(id).text) : '重新改编这一楼'}</button><button data-cremove="${id}">收起漫画</button></div>`);
+        box.innerHTML = (fail ? `<div class="pc-comic-fail"><b>重新改编失败</b><br>${esc(fail)}<br><button data-cadapt="${id}">再试一次</button><button data-cremove="${id}">不画了</button></div>` : '') + blocks.map(b => pageHtml(id, msg, b)).join('') + `<div class="pc-comic-redo">${own ? '' : `<button data-cadapt="${id}">${isAdapting(id) ? esc(adapting.get(id).text) : '重新改编这一楼'}</button>`}<button data-ccap>${capsHidden ? '显示对白' : '隐藏对白'}</button><button data-cfold="${id}">收起</button>${own ? '' : `<button data-cremove="${id}">删掉漫画</button>`}</div>`;
         const text = el.querySelector('.mes_text');
         (text ? text.after(box) : el.appendChild(box));
         hydrate(box);
@@ -501,7 +513,8 @@ export function createComicController(deps) {
     function renderAll({ chatChanged = false } = {}) {
         if (chatChanged) { chatSeq++; errors.clear(); failed.clear(); adapting.clear(); doc.querySelectorAll('.pc-comic').forEach(n => n.remove()); cancelPress({type:'cancel'}); for (const close of [...panels]) close(); }
         const chat = getContext().chat || [];
-        for (let i = 0; i < chat.length; i++) if (chat[i]?.mes?.includes('<image') || chat[i]?.extra?.zhikuComicSrc || isAdapting(i) || failed.has(i)) render(i);
+        for (let i = 0; i < chat.length; i++) if (chat[i]?.mes?.includes('<image') || chat[i]?.extra?.zhikuComicSrc || chat[i]?.extra?.zhikuComicFold || isAdapting(i) || failed.has(i)) render(i);
+        for (const refresh of readers) refresh();
     }
 
     // ── 点击、双击、长按 ──
@@ -516,11 +529,13 @@ export function createComicController(deps) {
     let lastTap = null, press = null, suppressClick = false;
     function onClick(ev) {
         if (suppressClick) { suppressClick = false; ev.preventDefault(); ev.stopPropagation(); return; }
-        const ad = ev.target?.closest?.('[data-cadapt],[data-cremove]');
+        const ad = ev.target?.closest?.('[data-cadapt],[data-cremove],[data-cfold],[data-cunfold],[data-ccap]');
         if (ad) {
             ev.stopPropagation();
             if (ad.dataset.cadapt) { if (!isAdapting(Number(ad.dataset.cadapt))) void adapt(Number(ad.dataset.cadapt), { redo: true }); }
-            else void unadapt(Number(ad.dataset.cremove));
+            else if (ad.dataset.cremove) { if (win.confirm('删掉这一楼的漫画？画好的图也会一起删掉。只想先不看，点「收起」就行。')) void unadapt(Number(ad.dataset.cremove)); }
+            else if (ad.dataset.cfold || ad.dataset.cunfold) void setFold(Number(ad.dataset.cfold || ad.dataset.cunfold), !!ad.dataset.cfold);
+            else if (ad.hasAttribute('data-ccap')) { capsHidden = !capsHidden; renderAll(); }
             return;
         }
         const t = targetOf(ev);
@@ -679,10 +694,16 @@ export function createComicController(deps) {
               <div class="pc-label">对白怎么出现</div>
               ${seg('comicText', [['overlay', '插件叠字'], ['draw', 'NAI 画进图'], ['none', '不要对白']], 'overlay')}
               <div class="pc-hint">NAI 画中文常常乱码，「插件叠字」让 NAI 只画画面，对白由浏览器显示，位置按分格数量竖向估算；下载的仍是未叠字原图。</div>
+              <div class="pc-label">叠字大小</div>
+              ${seg('comicCapSize', [['s', '小'], ['m', '中'], ['l', '大'], ['hide', '不显示']], 's')}
+              <div class="pc-hint">挡图的话调小，或者在楼层里点「隐藏对白」临时收起。想少点对白，在下面「给 AI 的改编要求」里写「对白少一点」。</div>
               <div class="pc-label">页面尺寸（跨页自动横过来）</div>
               ${seg('comicSize', [['832x1216', '竖'], ['1216x832', '横'], ['1024x1024', '方']], '832x1216')}
               <div class="pc-label">「画成漫画」每楼画几页</div>
-              ${seg('comicPages', [[0, '自动'], [1, '1'], [2, '2'], [3, '3'], [4, '4']], 0)}
+              ${seg('comicPages', [[0, '自动'], [2, '2'], [3, '3'], [4, '4'], [6, '6'], [8, '8']], 0)}
+              <div class="pc-label">每页几格</div>
+              ${seg('comicPanels', [['', '自动'], ['1–2', '1–2'], ['3–4', '3–4'], ['5–6', '5–6']], '')}
+              <div class="pc-hint">「自动」时 AI 按剧情长短分：短的 1–2 页，长的 5–8 页。页数多、每页格数少，剧情切得越细。</div>
               <label class="pc-field pc-mt-s"><span>给 AI 的改编要求（可不填）</span><textarea class="pc-textarea small" data-cstr="comicExtra" placeholder="比如：多用特写和留白；对白少一点；每页最多 3 格；不要画 user 的脸">${esc(o.comicExtra || '')}</textarea></label>
               <label class="pc-field pc-mt-s"><span>漫画负面（加在画风负面后面）</span><textarea class="pc-textarea small mono" data-cstr="comicNeg">${esc(neg)}</textarea></label>
               <div class="pc-actions wrap" style="margin-top:6px"><button class="pc-pill dashed tiny" data-cnegreset>恢复默认负面</button></div>
@@ -691,7 +712,7 @@ export function createComicController(deps) {
         };
         root.addEventListener('click', ev => {
             const b = ev.target.closest('[data-cs]');
-            if (b) { const v = b.dataset.v; opts()[b.dataset.cs] = /^\d+$/.test(v) && b.dataset.cs === 'comicPages' ? Number(v) : v; commit(); draw(); return; }
+            if (b) { const v = b.dataset.v; opts()[b.dataset.cs] = /^\d+$/.test(v) && b.dataset.cs === 'comicPages' ? Number(v) : v; commit(); draw(); if (b.dataset.cs === 'comicCapSize') renderAll(); return; }
             if (ev.target.closest('[data-cnegreset]')) { delete opts().comicNeg; commit(); draw(); return; }
             if (ev.target.closest('[data-cx]')) { box?.closeModal(); renderAll(); }
         });
@@ -722,8 +743,9 @@ export function createComicController(deps) {
         try {
             const prevMsg = (c.chat || []).slice(0, id).reverse().find(m => m && !m.is_system && m.extra?.zhikuComicSrc);
             const before = prevMsg ? comicBlocks(srcOf(prevMsg)).slice(-1).map(b => b.inner).join('') : '';
-            const { system, user } = adaptRequest(story.slice(0, 12000), { pages: pages || Number(opts().comicPages) || 0, cast: deps.castText?.() || '', before, color: opts().comicColor === 'mono' ? 'mono' : 'color', extra: opts().comicExtra || '' });
-            const out = parseAdapt(await askLLM(system, user, { maxTokens: 8000 }));
+            const { system, user } = adaptRequest(story.slice(0, 12000), { pages: pages || Number(opts().comicPages) || 0, panels: opts().comicPanels || '', cast: deps.castText?.() || '', before, color: opts().comicColor === 'mono' ? 'mono' : 'color', extra: opts().comicExtra || '' });
+            const want = pages || Number(opts().comicPages) || 6;
+            const out = parseAdapt(await askLLM(system, user, { maxTokens: Math.min(16000, 3000 + 1800 * want) }));
             if (!snap.current()) return;
             const restore = checkpoint(msg), removed = [];
             setSrc(msg, out);
@@ -744,6 +766,21 @@ export function createComicController(deps) {
         } finally { if (adapting.get(id) === task) adapting.delete(id); render(id); }
         await process(id, { manual: true });
     }
+    let capsHidden = false; // 这次打开酒馆里先不看对白
+    async function setFold(id, on) {
+        const snap = pageSnapshot(id);
+        if (!snap) return;
+        const { msg } = snap, key = swipeKey(msg);
+        const previous = msg.extra?.zhikuComicFold?.[key];
+        const folds = ((msg.extra ||= {}).zhikuComicFold ||= {});
+        if (on) folds[key] = true; else delete folds[key];
+        try { await saveChat(snap.c); }
+        catch (e) {
+            if (previous === undefined) delete folds[key]; else folds[key] = previous;
+            (deps.notifyError || notify)('收起状态保存失败：' + (e?.message || e));
+        }
+        if (snap.current()) render(id);
+    }
     async function unadapt(id) {
         if (failed.delete(id)) { render(id); return; }
         const snap = pageSnapshot(id);
@@ -752,6 +789,7 @@ export function createComicController(deps) {
         if (!msg.extra?.zhikuComicSrc?.[swipeKey(msg)]) return;
         const restore = checkpoint(msg), removed = [];
         delete msg.extra.zhikuComicSrc[swipeKey(msg)];
+        if (msg.extra.zhikuComicFold) delete msg.extra.zhikuComicFold[swipeKey(msg)];
         const retained = new Set(Object.values(msg.extra.zhikuComicSrc).flatMap(text => comicBlocks(text).map(b => b.key)));
         for (const b of comicBlocks(source)) if (!retained.has(b.key)) {
             removed.push(...(rec(msg, b.key)?.versions || []));
@@ -769,7 +807,7 @@ export function createComicController(deps) {
         const pages = [];
         chat.forEach((msg, id) => {
             if (!msg || msg.is_user) return;
-            for (const b of comicBlocks(srcOf(msg))) { const v = curVer(rec(msg, b.key)); if (v) pages.push({ id, page: b.page, total: b.total, url: v.url, name: msg.name || '', caps: v.textMode === 'overlay' ? captionsHtml(v.captions || parseComicPage(b.inner), esc) : '' }); }
+            for (const b of comicBlocks(srcOf(msg))) { const v = curVer(rec(msg, b.key)); if (v) pages.push({ id, captionSource: v.textMode === 'overlay' ? (v.captions || parseComicPage(b.inner)) : null, page: b.page, total: b.total, url: v.url, name: msg.name || '', caps: v.textMode === 'overlay' ? captionsHtml(v.captions || parseComicPage(b.inner), esc, opts().comicCapSize || 's') : '' }); }
         });
         const urls = new Map();
         const url = async p => { if (!urls.has(p.url)) urls.set(p.url, await resolveUrl(p.url)); return urls.get(p.url); };
@@ -876,7 +914,12 @@ export function createComicController(deps) {
             at = Math.max(0, Math.min(pages.length - 1, at + n));
             if (mode === 'flow') layoutFlow(); else { stage.querySelector(`[data-k="${at}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }); info(); }
         }
-        const close = () => { book.remove(); doc.removeEventListener('keydown', key); panels.delete(close); };
+        const refresh = () => {
+            for (const p of pages) p.caps = p.captionSource ? captionsHtml(p.captionSource, esc, opts().comicCapSize || 's') : '';
+            build();
+        };
+        readers.add(refresh);
+        const close = () => { readers.delete(refresh); book.remove(); doc.removeEventListener('keydown', key); panels.delete(close); };
         panels.add(close);
         const toc = () => {
             const first = new Map(); pages.forEach((p, n) => { if (!first.has(p.id)) first.set(p.id, { ...p, n }); });

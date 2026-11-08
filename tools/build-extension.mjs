@@ -11,8 +11,8 @@ process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.30';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.30');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.34';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.34');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -827,6 +827,500 @@ function viewComic(d) {
 }
 const VIEWS = { comic: viewComic, cast: viewCast,`);
 patch("    render.scrollKey = scrollKey;", "    render.scrollKey = scrollKey;\n    if (ui.view === 'comic') { const cv = root.querySelector('#pc-comic-view'); if (cv) globalThis.__zhikuComic?.openSettings(cv); }");
+// 生图页：看图写提示词（NovelAI 原图直接读出提示词，普通图交给识图 AI）
+patch(`return { zhForTags, extractCast, hasChinese,`,`/** 看图写成 NovelAI 标签（不写画师和质量词） */
+async function imageToPrompt(imageDataUrl) {
+    const sys = \`你看图，把这张图写成 NovelAI 能直接用的英文标签（Danbooru 风格，逗号隔开）。按顺序写：人数（1girl、2boys、no humans 等）→ 每个人的外貌、衣服、动作、表情、视线 → 构图和镜头（cowboy shot、from above 等）→ 背景和场景 → 光影和色调 → 画面风格特征（watercolor、thick painting 等）。不要写画师名，不要写质量词，看不见的不要编。
+只输出 JSON：{"tags": "标签1, 标签2, ...", "zh": "一句话中文描述"}\`;
+    const j = pickJson(await askVision(sys, '把这张图写成提示词。', imageDataUrl, { maxTokens: 1500 }));
+    const tags = (Array.isArray(j.tags) ? j.tags.join(', ') : String(j.tags || '')).trim();
+    if (!tags) throw new Error('AI 没写出标签，换个能识图的模型试试');
+    return { positive: tags, negative: '', zh: String(j.zh || '').trim() };
+}
+return { imageToPrompt, zhForTags, extractCast, hasChinese,`);
+patch(`<span class="pc-label" style="margin:0">正面提示词</span><span class="pc-dim small">画师串就是这一整段</span></div>`,`<span class="pc-label" style="margin:0">正面提示词</span><label class="pc-pill dashed tiny" style="cursor:pointer">\${ui.img2pBusy ? '<span class="pc-busy">看图中</span>' : '看图写提示词'}<input type="file" accept="image/*" data-img2prompt hidden \${ui.img2pBusy ? 'disabled' : ''}></label></div>`);
+patch(`    if (el.dataset.lookimg !== undefined) {`,`    if (el.dataset.img2prompt !== undefined) {
+        const f = el.files?.[0];
+        el.value = '';
+        if (!f || ui.img2pBusy) return;
+        ui.img2pBusy = true; render();
+        try {
+            let r = await readImagePrompt(f).catch(() => null), from = 'meta';
+            if (!r?.positive) { from = 'ai'; r = await T.imageToPrompt(await shrinkDataUrl(await fileToDataUrl(f), 1024, 0.88)); }
+            ui.img2pBusy = false; render();
+            showImg2Prompt(r, from);
+        } catch (e) { ui.img2pBusy = false; render(); toastr.error(e.message || String(e), '看不了图', { timeOut: 9000 }); }
+        return;
+    }
+    if (el.dataset.lookimg !== undefined) {`);
+patch(`function openSharedUpload() {`,`/** 看图写出来的提示词：改一改，再选怎么填进生图页 */
+function showImg2Prompt(r, from) {
+    const st = ui.studio;
+    const hasArtist = M.parseArtistString(r.positive).members.length > 0;
+    const box = modal(\`<h3 class="pc-h3">看图写出的提示词</h3>
+      <div class="pc-dim small">\${from === 'meta' ? '这是 NovelAI 原图，直接读出了当时发的提示词' : '识图 AI 看图写的（不含画师和质量词），可以先改一改'}\${r.zh ? '：' + esc(r.zh) : ''}</div>
+      <label class="pc-field pc-mt-s"><span>正面</span><textarea class="pc-textarea mono" data-i2p-pos>\${esc(r.positive)}</textarea></label>
+      \${r.negative ? \`<label class="pc-field pc-mt-s"><span>负面</span><textarea class="pc-textarea small mono" data-i2p-neg>\${esc(r.negative)}</textarea></label>
+      <label class="pc-switch"><input type="checkbox" data-i2p-useneg checked><span></span>负面也换成这个</label>\` : ''}
+      <div class="pc-actions wrap">
+        <button class="pc-btn dark" data-i2p="replace">换掉正面（保留现在的画师）</button>
+        <button class="pc-btn" data-i2p="append">接在正面后面</button>
+        \${hasArtist ? '<button class="pc-btn" data-i2p="all">连图里的画师一起用</button>' : ''}
+        <button class="pc-btn" data-i2p="copy">复制</button>
+        <button class="pc-btn" data-i2p="no">算了</button>
+      </div>\`);
+    box.addEventListener('click', async ev => {
+        const act = ev.target.closest('[data-i2p]')?.dataset.i2p;
+        if (!act) return;
+        const pos = box.querySelector('[data-i2p-pos]').value.trim();
+        if (act === 'no') { box.closeModal(); return; }
+        if (act === 'copy') { try { await navigator.clipboard.writeText(pos); toastr.success('复制好了', '看图写提示词', { timeOut: 1200 }); } catch { toastr.info('复制不了，长按文本框自己复制', '看图写提示词'); } return; }
+        const keep = M.parseArtistString(st.pos || '').members.map(m => Math.abs(m.weight - 1) < 0.001 ? m.tag : \`\${M.fmtWeight(m.weight)}::\${m.tag}::\`).join(', ');
+        if (act === 'replace') st.pos = M.replaceArtists(M.stripArtists(pos), [keep, st.lastExtra].filter(Boolean).join(', '));
+        else if (act === 'append') st.pos = M.mergeTags(st.pos || '', M.stripArtists(pos));
+        else if (act === 'all') st.pos = pos;
+        const negBox = box.querySelector('[data-i2p-neg]');
+        if (negBox && box.querySelector('[data-i2p-useneg]')?.checked) st.neg = negBox.value.trim();
+        saveStudio();
+        box.closeModal();
+        ui.view = 'studio'; render();
+        toastr.success(act === 'all' ? '已填进正面（含画师）' : '已填进正面，画师串没动', '看图写提示词', { timeOut: 1800 });
+    });
+}
+function openSharedUpload() {`);
+// ═════ AI 预设：智库让 AI 干活时，按酒馆预设那种结构发；智库的指令放在「上下文」那一格 ═════
+patch(`        history: [],      // 历史生图：[{ id, url, thumb, raw, sent, from, at }]`,`        history: [],      // 历史生图：[{ id, url, thumb, raw, sent, from, at }]
+        aiPresets: { active: 'tavern:', list: {}, fn: {}, markOn: {} }, // AI 预设：active = plain / tavern:预设名（空 = 酒馆现在用的）/ 自己的预设 id`);
+patch(`    d.history = Array.isArray(d.history) ? d.history : [];`,`    d.history = Array.isArray(d.history) ? d.history : [];
+    if (!d.aiPresets || typeof d.aiPresets !== 'object') d.aiPresets = { active: 'tavern:', list: {}, fn: {}, markOn: {} };
+    d.aiPresets.list ||= {}; d.aiPresets.fn ||= {}; d.aiPresets.markOn ||= {};
+    if (typeof d.aiPresets.active !== 'string') d.aiPresets.active = 'tavern:';`);
+patch(`async function askLLM(system, user, { maxTokens = 800 } = {}) {
+    const api = currentApi();
+    if (api.st) {
+        const ctx = SillyTavern.getContext();
+        if (typeof ctx.generateRaw !== 'function') throw new Error('这个版本的酒馆不支持，请到设置里改用「单独填」');
+        const out = String(await ctx.generateRaw({ prompt: user, systemPrompt: system, responseLength: maxTokens }) ?? '');`,`/** 各个让 AI 干活的功能：[键, 名字, 在哪用] */
+const AI_FNS = [['img', '看图写提示词', '生图页「看图写提示词」'], ['pose', '读姿势构图', '生图页「看图读姿势构图」'], ['tr', '中文转标签', '固定提示词、正面、角色页里写的中文'], ['scene', '聊天生图写画面', '双击段落 / 聊天里生图'], ['ill', '正文插图', '「写完再请求」读剧情插图（指令在「正文转生图提示词」里改）'], ['look', '读角色外貌', '从角色卡、人设、图片、世界书读'], ['outfit', '设计 / 读衣服', 'AI 设计、从剧情读、看图读'], ['comic', '漫画改编', '「画成漫画」「重新改编」'], ['zh', '标签翻中文', '角色页「译成中文」']];
+const aiSeen = {}; // 这次打开酒馆后各功能实际用过的指令，给设置页看
+function aiCfg() {
+    const d = __mod_store.getData();
+    const c = d.aiPresets ||= { active: 'tavern:', list: {}, fn: {}, markOn: {} };
+    c.list ||= {}; c.fn ||= {}; c.markOn ||= {};
+    return c;
+}
+/** 指令拆成「主指令」和「输出格式」：输出格式插件要靠它读回复，不让改 */
+function splitFormat(sys) {
+    const s = String(sys || ''), i = s.search(/只输出\\s*JSON|<image> 用分段文本协议/);
+    return i > 0 ? [s.slice(0, i).trim(), s.slice(i).trim()] : [s.trim(), ''];
+}
+/** 功能指令 + 自己加的要求 */
+function fnSystem(fn, sys) {
+    if (!fn) return sys;
+    const [main, fmt] = splitFormat(sys);
+    aiSeen[fn] = { main, fmt };
+    const extra = (aiCfg().fn[fn]?.extra || []).filter(e => e.on !== false && String(e.t || '').trim());
+    return [main, extra.length ? '额外要求：\\n' + extra.map(e => '- ' + e.t.trim()).join('\\n') : '', fmt].filter(Boolean).join('\\n\\n');
+}
+const ST_MARKERS = { chatHistory: '上下文', worldInfoBefore: '世界书（前）', worldInfoAfter: '世界书（后）', charDescription: '角色卡描述', charPersonality: '角色性格', scenario: '场景', personaDescription: '人设描述', dialogueExamples: '对话示例' };
+const MARK_MACRO = { charDescription: '{{description}}', charPersonality: '{{personality}}', scenario: '{{scenario}}', personaDescription: '{{persona}}', dialogueExamples: '{{mesExamples}}' };
+/** 酒馆的对话补全预设 → 条目 */
+function stToEntries(p) {
+    const prompts = Array.isArray(p?.prompts) ? p.prompts : [];
+    const orders = Array.isArray(p?.prompt_order) ? p.prompt_order : [];
+    const ord = (orders.find(o => String(o.character_id) === '100001') || orders.at(-1))?.order || prompts.map(x => ({ identifier: x.identifier, enabled: true }));
+    const out = [];
+    for (const o of ord) {
+        const pr = prompts.find(x => x.identifier === o.identifier);
+        if (!pr) continue;
+        if (pr.identifier === 'chatHistory') { out.push({ id: 'ctx', n: '上下文', r: 'user', on: true, ctx: true }); continue; }
+        if (ST_MARKERS[pr.identifier] || pr.marker) { out.push({ id: pr.identifier, n: ST_MARKERS[pr.identifier] || pr.name || pr.identifier, r: pr.role || 'system', on: false, mark: pr.identifier }); continue; }
+        out.push({ id: pr.identifier, n: pr.name || pr.identifier, r: pr.role || 'system', on: o.enabled !== false, t: String(pr.content || '') });
+    }
+    if (!out.some(e => e.ctx)) out.push({ id: 'ctx', n: '上下文', r: 'user', on: true, ctx: true });
+    return out;
+}
+let stPresetCache = null;
+/** 酒馆里所有对话补全预设：[{ name, data }] */
+async function tavernPresets(force = false) {
+    if (stPresetCache && !force) return stPresetCache;
+    const res = await fetch('/api/settings/get', { method: 'POST', headers: getRequestHeaders(), body: '{}' });
+    if (!res.ok) throw new Error('读不到酒馆的预设（' + res.status + '）');
+    const j = await res.json();
+    const names = j.openai_setting_names || [], list = j.openai_settings || [];
+    stPresetCache = names.map((name, i) => { try { return { name, data: typeof list[i] === 'string' ? JSON.parse(list[i]) : list[i] }; } catch { return null; } }).filter(Boolean);
+    return stPresetCache;
+}
+const currentTavernPreset = () => SillyTavern.getContext().chatCompletionSettings?.preset_settings_openai || '';
+/** 某个预设现在的条目；酒馆的预设还没读到时返回 null */
+function entriesFor(active, stList = stPresetCache) {
+    const c = aiCfg();
+    if (active === 'plain') return [{ id: 'ctx', n: '上下文', r: 'user', on: true, ctx: true }];
+    if (active.startsWith('tavern:')) {
+        const name = active.slice(7);
+        const p = !name || name === currentTavernPreset() ? SillyTavern.getContext().chatCompletionSettings : stList?.find(x => x.name === name)?.data;
+        return p ? stToEntries(p).map(e => e.mark ? { ...e, on: !!c.markOn[e.mark] } : e) : null;
+    }
+    return c.list[active]?.ents || null;
+}
+function markText(id) {
+    const ctx = SillyTavern.getContext();
+    return MARK_MACRO[id] && ctx.substituteParams ? ctx.substituteParams(MARK_MACRO[id]) : '';
+}
+/** 按选中的预设拼出要发的消息；智库的指令和内容放在「上下文」那一格 */
+async function aiMessages(fn, system, userContent) {
+    const core = [{ role: 'system', content: fnSystem(fn, system) }, { role: 'user', content: userContent }];
+    const c = aiCfg(), act = c.active ?? 'tavern:';
+    if (!fn || act === 'plain') return core;
+    let ents = null;
+    try {
+        if (act.startsWith('tavern:') && act.slice(7) && act.slice(7) !== currentTavernPreset()) await tavernPresets();
+        ents = entriesFor(act);
+    } catch (e) { console.warn('[智库] 读酒馆预设失败，这次不套预设', e); }
+    if (!ents?.length) return core;
+    const ctx = SillyTavern.getContext(), sp = s => (ctx.substituteParams ? ctx.substituteParams(s) : s);
+    const out = [];
+    for (const e of ents) {
+        if (e.ctx) { out.push(...core); continue; }
+        if (!e.on) continue;
+        const text = e.mark ? markText(e.mark) : sp(String(e.t || ''));
+        if (text.trim()) out.push({ role: ['system', 'user', 'assistant'].includes(e.r) ? e.r : 'system', content: text });
+    }
+    if (!out.includes(core[0])) out.push(...core);
+    return out;
+}
+async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {
+    const api = currentApi();
+    const messages = await aiMessages(fn, system, user);
+    let res;
+    if (api.st) {
+        const ctx = SillyTavern.getContext();
+        if (typeof ctx.generateRaw !== 'function') throw new Error('这个版本的酒馆不支持，请到设置里改用「单独填」');
+        // ST 1.14.0 generateRaw accepts ordered text messages and keeps backend settings.
+        const out = String(await ctx.generateRaw({ prompt: messages, responseLength: maxTokens, trimNames: false }) ?? '');`);
+patch(`    if (!api.url) throw new Error('单独填的 AI 没填地址，到设置里填');
+    if (!api.model) throw new Error('单独填的 AI 没选模型');
+    const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
+    let res;
+    if (api.bypass) {`,`    if (!res && !api.url) throw new Error('单独填的 AI 没填地址，到设置里填');
+    if (!res && !api.model) throw new Error('单独填的 AI 没选模型');
+    if (res) { /* 上面已经照预设发给酒馆了 */ }
+    else if (api.bypass) {`);
+patch(`async function askVision(system, text, imageDataUrl, { maxTokens = 800 } = {}) {
+    const api = currentApi();
+    const messages = [
+        { role: 'system', content: system },
+        { role: 'user', content: [{ type: 'text', text }, { type: 'image_url', image_url: { url: imageDataUrl } }] },
+    ];`,`async function askVision(system, text, imageDataUrl, { maxTokens = 800, fn = '' } = {}) {
+    const api = currentApi();
+    const messages = await aiMessages(fn, system, [{ type: 'text', text }, { type: 'image_url', image_url: { url: imageDataUrl } }]);`);
+patch('body: JSON.stringify({ model: api.model, messages, temperature: 0.3, stream: false }),', 'body: JSON.stringify({ model: api.model, messages, temperature: 0.3, stream: false, max_tokens: maxTokens }),');
+// 每个调用点标上是哪个功能
+patch("    return cleanOutput(await askLLM(expand ? EXPAND : SYSTEM, text, { maxTokens: 600 }));", "    return cleanOutput(await askLLM(expand ? EXPAND : SYSTEM, text, { maxTokens: 600, fn: 'tr' }));");
+patch("只挑「${name}」的）：\\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000 });", "只挑「${name}」的）：\\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000, fn: 'look' });");
+patch("    const j = await askShrinking(sys, limit => `卡名：${cardName}\\n设定：\\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000 });", "    const j = await askShrinking(sys, limit => `卡名：${cardName}\\n设定：\\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000, fn: 'look' });");
+patch("zh.join('\\n'), { maxTokens: Math.min(2400, 300 + zh.length * 80) }));", "zh.join('\\n'), { maxTokens: Math.min(2400, 300 + zh.length * 80), fn: 'tr' }));");
+patch("    const j = pickJson(await askLLM(sys, chatText.slice(-6000), { maxTokens: 900 }));", "    const j = pickJson(await askLLM(sys, chatText.slice(-6000), { maxTokens: 900, fn: 'scene' }));");
+patch("    const j = pickJson(await askLLM(sys, user, { maxTokens: 600 }));", "    const j = pickJson(await askLLM(sys, user, { maxTokens: 600, fn: 'outfit' }));");
+patch("    const j = pickJson(await askLLM(sys, chatText.slice(-6000), { maxTokens: 500 }));", "    const j = pickJson(await askLLM(sys, chatText.slice(-6000), { maxTokens: 500, fn: 'outfit' }));");
+patch("    const j = pickJson(await askLLM(sys, chatText.slice(-6000) || '（没有剧情）', { maxTokens: 1500 }));", "    const j = pickJson(await askLLM(sys, chatText.slice(-6000) || '（没有剧情）', { maxTokens: 1500, fn: 'outfit' }));");
+patch("    const j = pickJson(await askVision(sys, '提取这张图里的衣服。', imageDataUrl, { maxTokens: 700 }));", "    const j = pickJson(await askVision(sys, '提取这张图里的衣服。', imageDataUrl, { maxTokens: 700, fn: 'outfit' }));");
+patch("    const j = pickJson(await askVision(sys, '提取这张图里人物的长相。', imageDataUrl, { maxTokens: 700 }));", "    const j = pickJson(await askVision(sys, '提取这张图里人物的长相。', imageDataUrl, { maxTokens: 700, fn: 'look' }));");
+patch("    const j = pickJson(await askLLM(sys, user, { maxTokens: 900 }));", "    const j = pickJson(await askLLM(sys, user, { maxTokens: 900, fn: 'outfit' }));");
+patch("part.join('\\n'), { maxTokens: Math.min(3000, 200 + part.length * 40) }));", "part.join('\\n'), { maxTokens: Math.min(3000, 200 + part.length * 40), fn: 'zh' }));");
+patch("    const j = pickJson(await askVision(sys, '把这张图写成提示词。', imageDataUrl, { maxTokens: 1500 }));", "    const j = pickJson(await askVision(sys, '把这张图写成提示词。', imageDataUrl, { maxTokens: 1500, fn: 'img' }));");
+patch("        askLLM: (...args) => __mod_translate.askLLM(...args), pickJson:", "        askLLM: (s, u, o) => __mod_translate.askLLM(s, u, { ...o, fn: 'ill' }), pickJson:");
+patch("recordImage: shot => pcRecordImage(shot), askLLM: (...a) => __mod_translate.askLLM(...a),", "recordImage: shot => pcRecordImage(shot), askLLM: (s, u, o) => __mod_translate.askLLM(s, u, { ...o, fn: 'comic' }),");
+// 看图读姿势构图
+patch(`return { imageToPrompt, zhForTags,`,`/** 看图只读姿势和构图（带中文） */
+async function imagePose(imageDataUrl) {
+    const sys = \`你看图，只写人物的姿势和画面构图，写成 NovelAI 标签。
+姿势：身体姿势（standing、sitting、leaning forward、lying on side 等）、手和手臂的动作、腿的动作、头的朝向和视线方向；多人时写互动和相对位置（hug、holding hands、back-to-back 等）；表情最多写一两个。
+构图：取景范围（full body、cowboy shot、upper body、portrait、close-up 等）、镜头角度（from above、from below、from side、from behind、dutch angle 等）、人物在画面里的位置、透视和景深。
+不写长相、衣服、背景、画风、画师。看不清的不要编。
+\${PAIRS}
+只输出 JSON：{"pose": [...], "composition": [...]}\`;
+    const j = pickJson(await askVision(sys, '读这张图的姿势和构图。', imageDataUrl, { maxTokens: 1200, fn: 'pose' }));
+    const pose = normPairs(j.pose), composition = normPairs(j.composition);
+    if (!pose.length && !composition.length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
+    return { pose, composition };
+}
+return { AI_FNS, aiSeen, aiCfg, splitFormat, stToEntries, tavernPresets, entriesFor, currentTavernPreset, imagePose, imageToPrompt, zhForTags,`);
+// 生图页：看图读姿势构图（带中文）
+patch(`<label class="pc-pill dashed tiny" style="cursor:pointer">\${ui.img2pBusy ? '<span class="pc-busy">看图中</span>' : '看图写提示词'}<input type="file" accept="image/*" data-img2prompt hidden \${ui.img2pBusy ? 'disabled' : ''}></label></div>`,`<span class="pc-chips" style="margin:0;flex-wrap:wrap;justify-content:flex-end"><label class="pc-pill dashed tiny" style="cursor:pointer">\${ui.img2pBusy ? '<span class="pc-busy">看图中</span>' : '看图写提示词'}<input type="file" accept="image/*" data-img2prompt hidden \${ui.img2pBusy ? 'disabled' : ''}></label><label class="pc-pill dashed tiny" style="cursor:pointer">\${ui.poseBusy ? '<span class="pc-busy">读姿势中</span>' : '看图读姿势构图'}<input type="file" accept="image/*" data-imgpose hidden \${ui.poseBusy ? 'disabled' : ''}></label></span></div>`);
+patch(`    if (el.dataset.img2prompt !== undefined) {`,`    if (el.dataset.imgpose !== undefined) {
+        const f = el.files?.[0];
+        el.value = '';
+        if (!f || ui.poseBusy) return;
+        ui.poseBusy = true; render();
+        try {
+            const r = await T.imagePose(await shrinkDataUrl(await fileToDataUrl(f), 1024, 0.88));
+            ui.poseBusy = false; render();
+            showPose(r);
+        } catch (e) { ui.poseBusy = false; render(); toastr.error(e.message || String(e), '看不了图', { timeOut: 9000 }); }
+        return;
+    }
+    if (el.dataset.aipimport !== undefined) {
+        const f = el.files?.[0];
+        el.value = '';
+        if (!f) return;
+        try {
+            const j = JSON.parse(await f.text());
+            const cfg = T.aiCfg();
+            let ents, name;
+            if (j.app === 'zhiku-ai-preset') { ents = j.ents; name = j.name; }
+            else if (Array.isArray(j.prompts)) { ents = T.stToEntries(j); name = f.name.replace(/\\.json$/i, ''); }
+            if (!Array.isArray(ents) || !ents.length || ents.some(e => !e || typeof e !== 'object')) throw new Error('不是智库或酒馆的预设文件');
+            ents = ents.map(e => ({ ...e, r: ['system', 'user', 'assistant'].includes(e.r) ? e.r : 'system', n: String(e.n || ''), t: String(e.t || '') }));
+            if (!ents.some(e => e.ctx)) ents.push({ id: 'ctx', n: '上下文', r: 'user', on: true, ctx: true });
+            const id = M.uid('ap');
+            cfg.list[id] = { id, name: String(name || '导入的预设').slice(0, 30), ents: ents.map(e => ({ ...e })) };
+            if (j.app === 'zhiku-ai-preset' && j.fn && typeof j.fn === 'object') for (const [k] of T.AI_FNS) { const v = j.fn[k]; if (Array.isArray(v?.extra)) { const target = (cfg.fn[k] ||= {}); target.extra ||= []; target.extra.push(...v.extra.filter(x => x && typeof x.t === 'string').map(x => ({ ...x, id: M.uid('x') }))); } }
+            cfg.active = id; commit(); render();
+            toastr.success('导入好了', 'AI 预设', { timeOut: 1500 });
+        } catch (e) { toastr.error(e.message || String(e), '导入不了'); }
+        return;
+    }
+    if (el.dataset.img2prompt !== undefined) {`);
+patch(`function openSharedUpload() {`,`/** 看图读出的姿势和构图：挑着用，带中文 */
+function showPose(r) {
+    const st = ui.studio;
+    const all = [...r.pose.map(p => ({ ...p, g: '姿势' })), ...r.composition.map(p => ({ ...p, g: '构图' }))];
+    const picked = new Set(all.map((_, i) => i));
+    const box = modal('<div data-pose></div>');
+    const draw = () => {
+        const grp = g => all.map((p, i) => [p, i]).filter(([p]) => p.g === g).map(([p, i]) => \`<button class="pc-pair-pick \${picked.has(i) ? 'on' : ''}" data-pi="\${i}"><span class="mono">\${esc(p.en)}</span>\${p.zh ? \`<em>\${esc(p.zh)}</em>\` : ''}</button>\`).join('') || '<span class="pc-dim small">没读出来</span>';
+        box.querySelector('[data-pose]').innerHTML = \`<style>.pc-pair-pick{display:inline-flex;align-items:baseline;gap:6px;margin:0 6px 6px 0;padding:6px 11px;border-radius:999px;border:1.5px dashed var(--pc-dash);background:transparent;color:var(--pc-ink);font-family:var(--pc-font);font-size:13px;cursor:pointer}.pc-pair-pick em{font-style:normal;font-size:12px;color:var(--pc-ink-soft)}.pc-pair-pick.on{border-style:solid;border-color:var(--pc-ink);background:var(--pc-paper-2)}</style>
+          <h3 class="pc-h3">图里的姿势和构图</h3><div class="pc-dim small">点标签选上 / 取消，选上的才会用。</div>
+          <div class="pc-label">姿势</div><div>\${grp('姿势')}</div>
+          <div class="pc-label">构图</div><div>\${grp('构图')}</div>
+          <div class="pc-actions wrap">
+            <button class="pc-btn dark" data-pa="pos">接在正面后面</button>
+            <button class="pc-btn" data-pa="scene">放进固定提示词</button>
+            <button class="pc-btn" data-pa="copy">复制</button>
+            <button class="pc-btn" data-pa="no">算了</button></div>\`;
+    };
+    box.addEventListener('click', async ev => {
+        const pi = ev.target.closest('[data-pi]');
+        if (pi) { const i = Number(pi.dataset.pi); picked.has(i) ? picked.delete(i) : picked.add(i); draw(); return; }
+        const a = ev.target.closest('[data-pa]')?.dataset.pa;
+        if (!a) return;
+        if (a === 'no') { box.closeModal(); return; }
+        const tags = all.filter((_, i) => picked.has(i)).map(p => p.en).join(', ');
+        if (!tags) { toastr.info('一个都没选', '姿势构图'); return; }
+        if (a === 'copy') { try { await navigator.clipboard.writeText(tags); toastr.success('复制好了', '姿势构图', { timeOut: 1200 }); } catch { toastr.info(tags, '复制不了，自己长按复制'); } return; }
+        if (a === 'pos') st.pos = M.mergeTags(st.pos || '', tags);
+        else { st.scene = [String(st.scene || '').trim(), tags].filter(Boolean).join(', '); st.sceneOn = true; }
+        saveStudio(); box.closeModal(); ui.view = 'studio'; render();
+        toastr.success(a === 'pos' ? '接在正面后面了' : '放进固定提示词了', '姿势构图', { timeOut: 1500 });
+    });
+    draw();
+}
+/** AI 预设页 */
+function viewAiPreset(d) {
+    const cfg = T.aiCfg(), act = cfg.active ?? 'tavern:';
+    const kind = act === 'plain' ? 'plain' : act.startsWith('tavern:') ? 'tavern' : 'own';
+    const curST = T.currentTavernPreset();
+    if (kind === 'tavern' && !ui.stPresets && !ui.stPresetsLoading) {
+        ui.stPresetsLoading = true;
+        T.tavernPresets().then(l => { ui.stPresets = l; }).catch(e => { ui.stPresets = []; ui.stPresetsErr = e.message; }).finally(() => { ui.stPresetsLoading = false; if (ui.view === 'aipreset') render(); });
+    }
+    const ents = T.entriesFor(act, ui.stPresets);
+    const mine = Object.values(cfg.list);
+    const ro = kind !== 'own';
+    const stName = act.slice(7) || curST;
+    const chip = (v, t) => \`<button class="pc-pill \${act === v || (v === 'tavern:' && kind === 'tavern') ? 'on' : 'dashed'}" data-act="aipuse" data-v="\${esc(v)}">\${t}</button>\`;
+    const entRow = (e, i) => {
+        const moveUp = !ro && i > 0, moveDown = !ro && i < ents.length - 1;
+        return \`<div class="pc-aient \${e.ctx ? 'ctx' : ''} \${e.mark && !e.on ? 'skip' : ''} \${!e.on && !e.ctx && !e.mark ? 'off' : ''}">
+          <button class="pc-airole \${e.r}" data-act="aiprole" data-i="\${i}" \${ro || e.ctx ? 'disabled' : ''}>\${esc(e.r)}</button>
+          <div class="pc-grow"><b>\${e.ctx ? '📌 ' : ''}\${esc(e.n)}</b><small>\${e.ctx ? '智库的指令 + 这次要处理的内容放在这里' : e.mark ? (e.on ? '酒馆自动填：' + esc(e.n) + (/worldInfo/.test(e.mark) ? '（世界书暂时带不了）' : '') : '角色卡、世界书这类，默认不发') : esc(String(e.t || '').slice(0, 80))}</small></div>
+          \${e.ctx ? '' : \`<button class="pc-aisw \${e.on ? 'on' : ''}" data-act="aipsw" data-i="\${i}" \${ro && !e.mark ? 'disabled' : ''} aria-label="开关"></button>\`}
+          \${moveUp ? \`<button class="pc-aiib" data-act="aipmove" data-i="\${i}" data-d="-1" aria-label="上移">↑</button>\` : ''}
+          \${moveDown ? \`<button class="pc-aiib" data-act="aipmove" data-i="\${i}" data-d="1" aria-label="下移">↓</button>\` : ''}
+          \${e.ctx || e.mark ? '' : \`<button class="pc-aiib" data-act="aipedit" data-i="\${i}">\${ro ? '看' : '✎'}</button>\`}</div>\`;
+    };
+    const fnRows = T.AI_FNS.map(([k, n, where]) => {
+        const f = cfg.fn[k] || { extra: [] }, extra = f.extra || [], seen = T.aiSeen[k];
+        const open = ui.aipOpen === k;
+        return \`<div class="pc-aifn \${open ? 'open' : ''}"><button class="pc-aifn-h" data-act="aipfn" data-k="\${k}"><span class="pc-grow"><b>\${esc(n)}</b><small>\${esc(where)}\${extra.length ? \` · 加了 \${extra.length} 条要求\` : ''}</small></span><span>\${open ? '⌄' : '›'}</span></button>
+          \${open ? \`<div class="pc-aient"><span class="pc-airole tag">内置</span><div class="pc-grow"><b>指令</b><small>\${seen ? esc(seen.main.slice(0, 80)) : '这次打开酒馆后还没用过，用一次就能看到'}</small></div>\${seen ? \`<button class="pc-aiib" data-act="aipseen" data-k="\${k}" data-w="main">看</button>\` : ''}</div>
+            \${seen?.fmt ? \`<div class="pc-aient"><span class="pc-airole tag">🔒</span><div class="pc-grow"><b>输出格式</b><small>插件要按这个读 AI 的回复，只能看</small></div><button class="pc-aiib" data-act="aipseen" data-k="\${k}" data-w="fmt">看</button></div>\` : ''}
+            \${extra.map((x, i) => \`<div class="pc-aient \${x.on === false ? 'off' : ''}"><span class="pc-airole tag">我的</span><div class="pc-grow"><b>\${esc(x.n || '要求 ' + (i + 1))}</b><small>\${esc(x.t)}</small></div><button class="pc-aisw \${x.on !== false ? 'on' : ''}" data-act="aipxsw" data-k="\${k}" data-i="\${i}" aria-label="开关"></button><button class="pc-aiib" data-act="aipxedit" data-k="\${k}" data-i="\${i}">✎</button></div>\`).join('')}
+            <button class="pc-castadd" data-act="aipxadd" data-k="\${k}">＋ 加一条要求</button>
+            <div class="pc-dim small">内置指令里会自动填角色名这类东西，所以不能直接改；想让 AI 换个写法，加一条要求就行。</div>\` : ''}</div>\`;
+    }).join('');
+    return \`<style>
+.pc-aient{display:flex;align-items:center;gap:7px;padding:8px 9px;border-radius:13px;background:var(--pc-paper-2);margin-top:6px}
+.pc-aient b{font-size:14px}
+.pc-aient small{display:block;font-size:11px;color:var(--pc-ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pc-aient.off b::after{content:" · 关着";font-size:11px;font-weight:400;color:var(--pc-danger)}
+.pc-aient.skip{background:transparent;border:1.5px dashed var(--pc-dash)}
+.pc-aient.ctx{background:var(--pc-ink);color:var(--pc-paper)}
+.pc-aient.ctx small{color:var(--pc-paper);opacity:.8}
+.pc-airole{flex:0 0 auto;min-width:64px;height:26px;border-radius:8px;border:1.5px solid var(--pc-ink);background:var(--pc-paper);color:var(--pc-ink);font:11px var(--pc-font-label);cursor:pointer;display:inline-grid;place-items:center;padding:0 6px}
+.pc-airole.user{background:rgba(201,138,62,.28)}.pc-airole.assistant{background:rgba(126,162,156,.35)}
+.pc-airole.tag{min-width:auto}
+.pc-airole[disabled]{cursor:default}
+.pc-aient.ctx .pc-airole{background:transparent;color:var(--pc-gold);border-color:var(--pc-gold)}
+.pc-aisw{flex:0 0 auto;width:40px;height:23px;border-radius:999px;background:rgba(58,42,34,.18);position:relative;cursor:pointer;border:0}
+.pc-aisw::after{content:"";position:absolute;top:3px;left:3px;width:17px;height:17px;border-radius:50%;background:var(--pc-gold);transition:left .15s}
+.pc-aisw.on{background:var(--pc-ink)}.pc-aisw.on::after{left:20px}
+.pc-aisw[disabled]{cursor:default}
+.pc-aiib{flex:0 0 auto;width:28px;height:28px;border-radius:8px;border:1.5px dashed var(--pc-dash);background:transparent;color:inherit;cursor:pointer;font-size:12px}
+.pc-aient.ctx .pc-aiib{border-color:rgba(244,239,228,.55)}
+.pc-castadd{width:100%;margin:9px 0 6px;min-height:42px;border:1.5px dashed var(--pc-dash);border-radius:14px;background:transparent;font-family:var(--pc-font);font-size:14px;color:var(--pc-ink);cursor:pointer}
+.pc-aifn{border-top:1.5px dashed var(--pc-dash);padding:6px 0}
+.pc-aifn:first-of-type{border-top:0}
+.pc-aifn-h{display:flex;align-items:center;gap:8px;width:100%;border:0;background:transparent;color:var(--pc-ink);font-family:var(--pc-font);text-align:left;padding:6px 2px;cursor:pointer}
+.pc-aifn-h b{display:block;font-size:15px}
+.pc-aifn-h small{display:block;font-size:11px;color:var(--pc-ink-soft)}
+</style>
+      <button class="pc-back" data-act="nav" data-view="settings">‹ 回设置</button>
+      <h2 class="pc-pagetitle">AI 预设</h2>
+      <section class="pc-card pc-pad">
+        <div class="pc-dim small">智库让 AI 干活时（看图、转标签、插图、读外貌、漫画……）按这里的预设发：预设里的条目照常发，智库的指令放在 📌「上下文」那一格。</div>
+        <div class="pc-chips wrap pc-mt-s">\${chip('plain', '不套预设')}\${chip('tavern:', '跟酒馆预设')}\${mine.map(p => chip(p.id, esc(p.name))).join('')}<button class="pc-pill dashed" data-act="aipnew">＋ 新建</button></div>
+        \${kind === 'tavern' ? \`<select class="pc-input pc-mt-s" data-aipst><option value="">酒馆现在用的\${curST ? '（' + esc(curST) + '）' : ''}</option>\${(ui.stPresets || []).map(p => \`<option value="\${esc(p.name)}" \${act === 'tavern:' + p.name ? 'selected' : ''}>\${esc(p.name)}</option>\`).join('')}</select>
+          <div class="pc-hint">\${ui.stPresetsLoading ? '正在读酒馆的预设…' : ui.stPresetsErr ? '读不到酒馆的预设列表：' + esc(ui.stPresetsErr) : '跟着酒馆的预设「' + esc(stName || '现在用的') + '」走：酒馆里改了这里跟着变，这里只能看（角色卡、世界书那几格能开关）。想自己调，点「复制一份改」。'}</div>\` : ''}
+        \${kind === 'plain' ? '<div class="pc-hint">不套预设：只发智库自己的指令，跟以前一样。API 不需要破限时用。</div>' : ''}
+        \${kind === 'own' ? \`<div class="pc-hint">智库自己的预设「\${esc(cfg.list[act]?.name || '')}」：条目、角色（点左边切 system / user / assistant）、开关、顺序都能改。</div>\` : ''}
+        <div class="pc-actions wrap">
+          \${kind === 'tavern' ? '<button class="pc-btn dark" data-act="aipcopy">复制一份改</button>' : ''}
+          <label class="pc-btn" style="cursor:pointer">导入文件<input type="file" accept=".json,application/json" data-aipimport hidden></label>
+          \${kind === 'own' ? '<button class="pc-btn" data-act="aipexport">导出</button><button class="pc-btn" data-act="aiprename">改名</button><button class="pc-linkdanger" data-act="aipdel">删掉这个预设</button>' : ''}
+        </div>
+        <div class="pc-hint">只对「翻译和 AI」里用「酒馆现在连接的 API」或「单独填」的聊天补全接口有效；酒馆连的是文本补全时，会把条目合成一段发。</div>
+      </section>
+      <section class="pc-card pc-pad pc-mt">
+        <h3 class="pc-h3" style="margin:0">条目</h3><div class="pc-dim small">从上往下按顺序发。</div>
+        \${ents ? ents.map(entRow).join('') : '<div class="pc-dim small pc-mt-s">正在读这个预设…</div>'}
+        \${kind === 'own' ? '<button class="pc-castadd" data-act="aipadd">＋ 加一条</button>' : ''}
+      </section>
+      <section class="pc-card pc-pad pc-mt">
+        <h3 class="pc-h3" style="margin:0">各个功能</h3><div class="pc-dim small">这些是放进 📌「上下文」的部分。每个功能都能加自己的要求，所有预设通用。</div>
+        \${fnRows}
+      </section>
+      <div style="height:24px"></div>\`;
+}
+function openSharedUpload() {`);
+patch("const VIEWS = { comic: viewComic,", "const VIEWS = { aipreset: viewAiPreset, comic: viewComic,");
+patch(`            case 'castopen': openCastPicker(); break;`,`            case 'castopen': openCastPicker(); break;
+            case 'aipuse': { const cfg = T.aiCfg(); cfg.active = el.dataset.v; commit(); render(); break; }
+            case 'aipnew': {
+                const name = await promptText('新预设的名字', '我的预设');
+                if (name == null) break;
+                const cfg = T.aiCfg(), id = M.uid('ap');
+                cfg.list[id] = { id, name: name.trim() || '我的预设', ents: [{ id: M.uid('e'), n: '主指令', r: 'system', on: true, t: '' }, { id: 'ctx', n: '上下文', r: 'user', on: true, ctx: true }] };
+                cfg.active = id; commit(); render(); break;
+            }
+            case 'aipcopy': {
+                const cfg = T.aiCfg(), act = cfg.active;
+                const ents = T.entriesFor(act, ui.stPresets);
+                if (!ents) { toastr.info('预设还没读出来，等一下再点', 'AI 预设'); break; }
+                const id = M.uid('ap');
+                cfg.list[id] = { id, name: (act.slice(7) || T.currentTavernPreset() || '酒馆预设') + ' · 副本', ents: ents.map(e => ({ ...e, id: e.ctx ? 'ctx' : M.uid('e') })) };
+                cfg.active = id; commit(); render(); toastr.success('复制好了，现在可以改了', 'AI 预设', { timeOut: 1500 }); break;
+            }
+            case 'aiprename': { const p = T.aiCfg().list[T.aiCfg().active]; if (!p) break; const n = await promptText('改名', p.name); if (n == null) break; p.name = n.trim() || p.name; commit(); render(); break; }
+            case 'aipdel': {
+                const cfg = T.aiCfg(), p = cfg.list[cfg.active];
+                if (!p || !(await confirmBox(\`删掉预设「\${p.name}」？\`, { ok: '删除', cancel: '算了' }))) break;
+                delete cfg.list[p.id]; cfg.active = 'tavern:'; commit(); render(); break;
+            }
+            case 'aipexport': {
+                const cfg = T.aiCfg(), p = cfg.list[cfg.active];
+                if (!p) break;
+                const blob = new Blob([JSON.stringify({ app: 'zhiku-ai-preset', version: 1, name: p.name, ents: p.ents, fn: cfg.fn }, null, 2)], { type: 'application/json' });
+                const a = DOC.createElement('a'); a.href = URL.createObjectURL(blob); a.download = \`zhiku_AI预设_\${p.name}.json\`; DOC.body.appendChild(a); a.click(); a.remove();
+                break;
+            }
+            case 'aipadd': {
+                const p = T.aiCfg().list[T.aiCfg().active]; if (!p) break;
+                const t = await promptText('这一条的内容（之后点左边可以切 system / user / assistant）', '', true);
+                if (t == null || !t.trim()) break;
+                p.ents.splice(p.ents.findIndex(e => e.ctx), 0, { id: M.uid('e'), n: '条目 ' + p.ents.length, r: 'system', on: true, t: t.trim() });
+                commit(); render(); break;
+            }
+            case 'aiprole': { const p = T.aiCfg().list[T.aiCfg().active]; const e = p?.ents[Number(el.dataset.i)]; if (!e || e.ctx) break; const R = ['system', 'user', 'assistant']; e.r = R[(R.indexOf(e.r) + 1) % 3]; commit(); render(); break; }
+            case 'aipsw': {
+                const cfg = T.aiCfg(), i = Number(el.dataset.i);
+                const own = cfg.list[cfg.active];
+                if (own) { const e = own.ents[i]; if (e && !e.ctx) e.on = !e.on; }
+                else { const e = T.entriesFor(cfg.active, ui.stPresets)?.[i]; if (e?.mark) cfg.markOn[e.mark] = !cfg.markOn[e.mark]; }
+                commit(); render(); break;
+            }
+            case 'aipmove': {
+                const p = T.aiCfg().list[T.aiCfg().active]; if (!p) break;
+                const i = Number(el.dataset.i), j = i + Number(el.dataset.d);
+                if (j < 0 || j >= p.ents.length) break;
+                [p.ents[i], p.ents[j]] = [p.ents[j], p.ents[i]]; commit(); render(); break;
+            }
+            case 'aipedit': {
+                const cfg = T.aiCfg(), own = cfg.list[cfg.active], i = Number(el.dataset.i);
+                const e = own ? own.ents[i] : T.entriesFor(cfg.active, ui.stPresets)?.[i];
+                if (!e) break;
+                if (!own) { modal(\`<h3 class="pc-h3">\${esc(e.n)}</h3><div class="pc-dim small">\${esc(e.r)} · 跟着酒馆的预设，这里只能看</div><textarea class="pc-textarea mono" readonly style="min-height:240px">\${esc(e.t || '')}</textarea>\`); break; }
+                const name = await promptText('名字', e.n);
+                if (name == null) break;
+                const t = await promptText(\`「\${name.trim() || e.n}」的内容（留空就删掉这一条）\`, e.t || '', true);
+                if (t == null) break;
+                if (!t.trim() && await confirmBox('内容空了，删掉这一条？', { ok: '删除', cancel: '留着' })) own.ents.splice(i, 1);
+                else { e.n = name.trim() || e.n; e.t = t; }
+                commit(); render(); break;
+            }
+            case 'aipfn': ui.aipOpen = ui.aipOpen === el.dataset.k ? '' : el.dataset.k; render(); break;
+            case 'aipseen': { const s = T.aiSeen[el.dataset.k]; if (!s) break; modal(\`<h3 class="pc-h3">\${el.dataset.w === 'fmt' ? '输出格式（只能看）' : '内置指令'}</h3><textarea class="pc-textarea mono" readonly style="min-height:260px">\${esc(el.dataset.w === 'fmt' ? s.fmt : s.main)}</textarea>\`); break; }
+            case 'aipxadd': {
+                const t = await promptText('加一条要求，比如「多写镜头和光影」「不要写 NSFW」', '', true);
+                if (t == null || !t.trim()) break;
+                const cfg = T.aiCfg(); (cfg.fn[el.dataset.k] ||= { extra: [] }).extra ||= [];
+                cfg.fn[el.dataset.k].extra.push({ id: M.uid('x'), n: '', t: t.trim(), on: true });
+                commit(); render(); break;
+            }
+            case 'aipxsw': { const x = T.aiCfg().fn[el.dataset.k]?.extra?.[Number(el.dataset.i)]; if (!x) break; x.on = x.on === false; commit(); render(); break; }
+            case 'aipxedit': {
+                const list = T.aiCfg().fn[el.dataset.k]?.extra, i = Number(el.dataset.i), x = list?.[i];
+                if (!x) break;
+                const t = await promptText('改这条要求（留空就删掉）', x.t, true);
+                if (t == null) break;
+                if (!t.trim()) list.splice(i, 1); else x.t = t.trim();
+                commit(); render(); break;
+            }`);
+patch(`    if (el.dataset.castMemo !== undefined) {`,`    if (el.matches?.('[data-aipst]')) { T.aiCfg().active = 'tavern:' + el.value; commit(); render(); return; }
+    if (el.dataset.castMemo !== undefined) {`);
+// 入口：设置 → 翻译和 AI
+patch(`      <div class="pc-dim small">翻译、补全细节、读角色外貌、聊天生图都用这个。点一下就切换，可以存好几个。</div>`,`      <div class="pc-dim small">翻译、补全细节、读角色外貌、聊天生图都用这个。点一下就切换，可以存好几个。</div>
+      <div class="pc-actions wrap" style="margin-top:6px"><button class="pc-btn dark" data-act="nav" data-view="aipreset">AI 预设（发送结构）· \${(() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })()}</button></div>`);
+// 画师串绑定模型：切到这串时自动换模型，切到没绑的串时换回原来的
+patch(`      <label class="pc-field pc-mt-s"><span>负面（选这串时一起换上，可不填）</span><textarea class="pc-textarea small mono" data-bind-group="\${g.id}" data-field="neg" placeholder="比如 1girl, text">\${esc(g.neg || '')}</textarea></label>`,`      <label class="pc-field pc-mt-s"><span>负面（选这串时一起换上，可不填）</span><textarea class="pc-textarea small mono" data-bind-group="\${g.id}" data-field="neg" placeholder="比如 1girl, text">\${esc(g.neg || '')}</textarea></label>
+      <label class="pc-field pc-mt-s"><span>绑定模型（这串当正文画师串时自动换成这个模型）</span><select class="pc-input" data-bind-group="\${g.id}" data-field="model"><option value="">不绑，跟设置走</option>\${N.MODELS.map(([v, t]) => \`<option value="\${v}" \${g.model === v ? 'selected' : ''}>\${esc(t)}</option>\`).join('')}</select></label>`);
+patch(`    cleanups.push(onChange(() => { UI.renderChip(); UI.renderStub(); }));`,`    cleanups.push(onChange(() => { UI.renderChip(); UI.renderStub(); }));
+    // 画师串绑定的模型：正文画师串换了就跟着换模型，换到没绑的串就换回原来的
+    let lastModelKey = null;
+    const modelName = v => (N.MODELS.find(m => m[0] === v) || [v, v])[1];
+    const syncModel = () => {
+        const d = getData(), s = N.settings();
+        const t = d.active ? __mod_model.resolveTicket(d, d.active) : null;
+        const want = t?.item?.model || '';
+        const key = (d.active ? d.active.type + ':' + d.active.id : '') + '|' + want;
+        if (key === lastModelKey) return;
+        const first = lastModelKey === null;
+        lastModelKey = key;
+        if (want) {
+            if (s.novelaimode === want) return;
+            if (!s.zkModelBefore) s.zkModelBefore = s.novelaimode;
+            s.novelaimode = want; N.save();
+            if (!first) toastr.info(\`画师串「\${t.item.name || t.item.tag || ''}」绑定了 \${modelName(want)}，已切过去\`, '智库', { timeOut: 2500 });
+        } else if (s.zkModelBefore) {
+            const back = s.zkModelBefore;
+            delete s.zkModelBefore;
+            if (s.novelaimode !== back) { s.novelaimode = back; N.save(); if (!first) toastr.info('换回原来的模型 ' + modelName(back), '智库', { timeOut: 2500 }); }
+            else N.save();
+        }
+    };
+    syncModel();
+    cleanups.push(onChange(syncModel));`);
 // 下载成功提醒：智库里所有下载（看大图、生图结果、历史生图、漫画、导出数据）
 patch(`download.download='image.png';`,`download.download='zhiku_'+Date.now()+'.png';`);
 patch(`function updateStudioPreview() {`,`/** 点了智库的下载链接后提示一下；连着下好几张的合成一条 */
@@ -920,9 +1414,9 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',prefix+s+'\n}\n');
 fs.copyFileSync('src/index.js',dir+'/index.js');
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.30',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.30',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.34',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.34',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.8.30 built; storage keys and shared upload preserved.');
+console.log('Extension 0.8.34 built; storage keys and shared upload preserved.');
