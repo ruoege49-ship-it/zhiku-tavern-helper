@@ -1472,7 +1472,7 @@ globalThis.__zhikuDl = onDownloadClick;
 DOC.addEventListener('click', onDownloadClick, true);
 function updateStudioPreview() {`);
 // 氛围编码 402：说清楚是 Anlas 不够（Opus 也要扣）
-patch(`    if (!r.ok) throw Object.assign(new Error(explain(r.status, new TextDecoder().decode(buf)) + (settings().naiMode === 'site'`,`    if (!r.ok) throw Object.assign(new Error((r.status === 402 ? '账号 Anlas 不够了：氛围每张图第一次用要先编码，NovelAI 每张扣约 2 点 Anlas，Opus 也要扣（编码过的会存下来，之后不再扣）。去官网看看 Anlas 余额，或者导入官网导出的 .naiv4vibe 文件' : explain(r.status, new TextDecoder().decode(buf))) + (settings().naiMode === 'site'`);
+patch(`    if (!r.ok) throw Object.assign(new Error(explain(r.status, new TextDecoder().decode(buf)) + (settings().naiMode === 'site'`,`    if (!r.ok) throw Object.assign(new Error((r.status === 402 ? '账号 Anlas 不够了：氛围每张图第一次用要先编码，NovelAI 每张扣约 2 点 Anlas，Opus 也要扣（编码会按模型保存，复用已保存的编码不再扣编码费）。去官网看看 Anlas 余额，或者导入官网导出的 .naiv4vibe 文件' : explain(r.status, new TextDecoder().decode(buf))) + (settings().naiMode === 'site'`);
 // 0.8.36：设置里单独的 AI 预设、下载和水印、先存后改名、一键上传到共享
 patch(`    const ai = setFold('ai', '翻译和 AI',`,`    const ai0 = setFold('ai', '翻译和 AI',`);
 patch(`    const tpl = setFold('tpl', '例图提示词',`,`    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), \`

@@ -144,8 +144,9 @@ function parseComicPage(inner) {
 function panelBoxes(data) {
     const panels = data?.panels || [], n = panels.length;
     if (!n) return [];
-    const words = p => String(p.description || '').toLowerCase();
-    const rowOf = t => /\b(top|upper)\b/.test(t) ? 0 : /\b(bottom|lower)\b/.test(t) ? 2 : /\b(middle|center|centre)\b(?![- ]?(left|right))/.test(t) ? 1 : null;
+    // 位置取开头的布局说明，避免对白或镜头描述里的 left/right 被当成分格。
+    const words = p => String(p.description || '').toLowerCase().trim().match(/^(?:top|upper|bottom|lower|middle|center|centre|left|right)\b[^,\n]*/)?.[0] || '';
+    const rowOf = t => /\b(top|upper)\b/.test(t) ? 0 : /\b(bottom|lower)\b/.test(t) ? 2 : /\b(middle|center|centre)\b/.test(t) ? 1 : null;
     const colOf = t => /\bleft\b/.test(t) ? 0 : /\bright\b/.test(t) ? 2 : null;
     const info = panels.map(p => { const t = words(p); return { row: rowOf(t), col: colOf(t) }; });
     let rows = [];
@@ -193,9 +194,9 @@ function captionsHtml(parsed, esc, size = 's') {
     parsed.panelTexts.forEach((t, i) => {
         if (!t.map(capLine).some(Boolean)) return;
         const b = boxes?.[i] || { x: 0, y: i / n, w: 1, h: 1 / n };
-        const bottom = b.y + b.h > 0.99, right = b.x + b.w > 0.99;
-        // 字放在这一格底部、横向居中，宽度不超过这一格；最右下那格让开页码
-        out.push(box(t, `left:${((b.x + b.w / 2) * 100).toFixed(2)}%;top:calc(${((b.y + b.h) * 100).toFixed(2)}% - ${bottom && right ? 40 : 6}px);max-width:calc(${(b.w * 100).toFixed(2)}% - 10px)`));
+        const bottom = b.y + b.h > 0.99;
+        // 字放在这一格底部、横向居中，宽度不超过这一格；底行让开左侧页码和右侧版本按钮
+        out.push(box(t, `left:${((b.x + b.w / 2) * 100).toFixed(2)}%;top:calc(${((b.y + b.h) * 100).toFixed(2)}% - ${bottom ? 40 : 6}px);max-width:calc(${(b.w * 100).toFixed(2)}% - 10px)`));
     });
     return out.length ? `<div class="pc-comic-caps sz-${size}">${out.join('')}</div>` : '';
 }
@@ -749,7 +750,7 @@ function createComicController(deps) {
               ${seg('comicColor', [['color', '彩色'], ['mono', '黑白网点']], 'color')}
               <div class="pc-label">对白怎么出现</div>
               ${seg('comicText', [['overlay', '插件叠字'], ['draw', 'NAI 画进图'], ['none', '不要对白']], 'overlay')}
-              <div class="pc-hint">NAI 画中文常常乱码，「插件叠字」让 NAI 只画画面，对白由浏览器显示，位置按分格数量竖向估算；下载的仍是未叠字原图。</div>
+              <div class="pc-hint">NAI 画中文常常乱码，「插件叠字」让 NAI 只画画面，对白由浏览器显示，位置按每格开头的位置描述或 2x2 布局估算，未标位置时按顺序排列；下载的仍是未叠字原图。</div>
               <div class="pc-label">叠字大小</div>
               ${seg('comicCapSize', [['s', '小'], ['m', '中'], ['l', '大'], ['hide', '不显示']], 's')}
               <div class="pc-hint">挡图的话调小，或者在楼层里点「隐藏对白」临时收起。想少点对白，在下面「给 AI 的改编要求」里写「对白少一点」。</div>
@@ -2830,7 +2831,7 @@ async function encodeVibeRequest(imageB64, infoExtracted = 1, model = settings()
     let r = await send();
     if (r.status >= 500) { await new Promise(ok => setTimeout(ok, 2000)); r = await send(); }
     const buf = new Uint8Array(await r.arrayBuffer());
-    if (!r.ok) throw Object.assign(new Error((r.status === 402 ? '账号 Anlas 不够了：氛围每张图第一次用要先编码，NovelAI 每张扣约 2 点 Anlas，Opus 也要扣（编码过的会存下来，之后不再扣）。去官网看看 Anlas 余额，或者导入官网导出的 .naiv4vibe 文件' : explain(r.status, new TextDecoder().decode(buf))) + (settings().naiMode === 'site' ? '。第三方站点可能不支持氛围' : '')),{status:r.status,retryAfter:r.headers?.get('Retry-After')});
+    if (!r.ok) throw Object.assign(new Error((r.status === 402 ? '账号 Anlas 不够了：氛围每张图第一次用要先编码，NovelAI 每张扣约 2 点 Anlas，Opus 也要扣（编码会按模型保存，复用已保存的编码不再扣编码费）。去官网看看 Anlas 余额，或者导入官网导出的 .naiv4vibe 文件' : explain(r.status, new TextDecoder().decode(buf))) + (settings().naiMode === 'site' ? '。第三方站点可能不支持氛围' : '')),{status:r.status,retryAfter:r.headers?.get('Retry-After')});
     if (buf.length < 100) throw new Error('编码结果不对，可能 key 或站点有问题');
     return toB64(buf);
 }
