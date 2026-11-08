@@ -4,20 +4,31 @@ export function imageCharacterNames(character) {
         .map(s => String(s || '').trim()).filter(Boolean);
 }
 
+/** 解析 $…$ 里的角色标记。认不出的写法不再报错：JSON 里没有 name 的（比如别的插件的服装标记）返回 null，整段忽略；其他写法整段当角色名字 */
 export function parseCharacterToken(value) {
     const text = String(value || '').trim();
+    if (!text) return null;
     if (text.startsWith('{')) {
         let data;
-        try { data = JSON.parse(text); } catch { throw new Error('角色标记 JSON 格式不完整，请编辑这张图的提示词'); }
-        if (typeof data.name !== 'string' || !data.name.trim() || typeof data.angle !== 'string') {
-            throw new Error('角色标记需要 name 和 angle；服装标记请先换成英文服装标签');
-        }
-        return { name: data.name.trim(), angle: data.angle.trim(), nsfw: [data.upperBody, data.lowerBody].some(v => String(v).toLowerCase() === 'nsfw') };
+        try { data = JSON.parse(text); } catch { return null; }
+        if (!data || typeof data.name !== 'string' || !data.name.trim()) return null;
+        return { name: data.name.trim(), angle: typeof data.angle === 'string' ? data.angle.trim() : '', nsfw: [data.upperBody, data.lowerBody].some(v => String(v).toLowerCase() === 'nsfw') };
     }
     const match = text.match(/^(.+?)-(?:sfw|nsfw)-(?:upperbody|lowerbody)(?:-(?:sfw|nsfw)-(?:lowerbody|fullbody))?$/i);
-    if (!match) throw new Error('角色标记请使用 $名字-sfw-upperbody$ 或带 name、angle 的 JSON');
+    if (!match) return { name: text, angle: '', nsfw: false };
     const angle = match[1].match(/(?:[,，\s-]+)(from (?:front|behind|side))$/i);
     return { name: (angle ? match[1].slice(0, angle.index) : match[1]).trim(), angle: angle?.[1] || '', nsfw: /-nsfw-/i.test(text.slice(match[1].length)) };
+}
+
+/** 去掉认不出的 $…$ 和落单的 $，剩下的都是能用的角色标记 */
+export function dropBadCharacterTokens(text) {
+    const src = String(text || '');
+    let out = '', last = 0;
+    for (const m of src.matchAll(/\$([^$]*)\$/g)) {
+        out += src.slice(last, m.index).replace(/\$/g, '') + (parseCharacterToken(m[1]) ? m[0] : '');
+        last = m.index + m[0].length;
+    }
+    return out + src.slice(last).replace(/\$/g, '');
 }
 
 export function resolveImageCharacters(prompt, roster) {
@@ -34,10 +45,10 @@ export function resolveImageCharacters(prompt, roster) {
     const picks = [], cast = [], unknown = [];
     let nsfw = false;
     function parsePart(text, uc = '', center = null) {
+        text = dropBadCharacterTokens(text);
         const tokens = [...text.matchAll(/\$([^$]+)\$/g)];
         if (/(?:^|[,;\s])nsfw(?:$|[,;\s])/i.test(text.replace(/\$[^$]+\$/g, ''))) nsfw = true;
         // Reject broken placeholders before paying for a request.
-        if (text.replace(/\$[^$]+\$/g, '').includes('$')) throw new Error('角色标记缺少配对的 $，请编辑这张图的提示词');
         if (!tokens.length) return clean(text);
         for (let i = 0; i < tokens.length; i++) {
             const token = parseCharacterToken(tokens[i][1]);
@@ -100,7 +111,7 @@ export function imageCastInstruction(names) {
 export function cleanImageTags(value) {
     const tokens = [];
     const text = String(value || '').replace(/\$([^$]+)\$/g, (raw, body) => {
-        parseCharacterToken(body);
+        if (!parseCharacterToken(body)) return '';
         tokens.push(raw);
         return `ZKROLEPLACEHOLDER${tokens.length - 1}END`;
     });
