@@ -167,6 +167,44 @@ function parseRewrite(text) {
     const plan = /<comic_plan\b[^>]*>([\s\S]*?)<\/comic_plan>/i.exec(t);
     return { image, plan: plan ? plan[1].trim() : '' };
 }
+/** 正文 → 给 AI 读的干净文字（去掉思考、标签、旧的生图标记） */
+function storyText(mes) {
+    return String(mes || '')
+        .replace(/<(thinking|think|comic_plan|image|details|style|script)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
+        .replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '')
+        .replace(/\n{3,}/g, '\n\n').trim();
+}
+/** 「把这一楼画成漫画」的请求：读这一楼的正文，改编成几页漫画分镜 */
+function adaptRequest(story, { pages = 0, cast = '', before = '' } = {}) {
+    const system = '你是漫画分镜导演，把小说 / 角色扮演的正文改编成日式漫画页，给 NovelAI V5 出图用。'
+        + '每一页先写一组 <comic_plan>（这一页讲什么、几格、每格的构图和对白），紧跟着写一组 <image>…</image>。只输出这些块，不要任何解释。'
+        + '<image> 用分段文本协议：第一行 @page，下面写这一页的整体：分级（rating:general 或 rating:sensitive）、实际人数词（如 1boy, 1girl, 2boys）、comic page、画格数量与布局、留白、光影、色调。'
+        + '然后每一格写 @panel P1、@panel P2…，下面写这一格的位置大小、镜头、环境；格内每个看得见的人物写 @character C1、C2…，下面写 boy / girl / other（不带数字）、完整外貌衣着、动作表情；可选 @negative 写这个人物不要的东西。'
+        + '要画进图里的对白、旁白、拟声，写在对应段落末尾单独一行「Text: 」后面，用正文的语言，一格不超过两句。'
+        + '标签用英文 NovelAI / Danbooru 标签，逗号隔开；不要写画师名和画风（画风另外加）。人物外貌照下面给的角色资料写，前后页保持一致。'
+        + '\n\n格式示例：\n<comic_plan>第 1 页：两格。P1 远景交代咖啡馆和雨；P2 近景他看向窗外。</comic_plan>\n<image>\n@page\nrating:general, 1boy, comic page, 2 panels, vertical layout, rainy night, warm indoor light\n@panel P1\ntop half, wide shot, cafe interior, rain on window\n@panel P2\nbottom half, close-up\n@character C1\nboy, black hair, grey eyes, white shirt, black vest, sitting, looking outside, melancholic\nText: 「又下雨了。」\n</image>';
+    const user = (cast ? `<characters>\n${cast}\n</characters>\n\n` : '')
+        + (before ? `<previous readonly="true">\n${before}\n</previous>\n\n` : '')
+        + `<story>\n${story}\n</story>\n\n把 <story> 改编成${pages ? ` ${pages} 页` : ' 1–4 页（按剧情多少自己定，一页 2–5 格）'}漫画。只画 <story> 里发生的事。`;
+    return { system, user };
+}
+/** AI 改编出来的几页：只留能用的 <comic_plan> + <image> */
+function parseAdapt(text) {
+    const t = String(text || '');
+    const out = [];
+    let last = 0;
+    for (const m of t.matchAll(COMIC_BLOCK)) {
+        const inner = m[1].trim();
+        if (parseComicPage(inner).ok) {
+            const plan = [...t.slice(last, m.index).matchAll(PLAN_BLOCK)].at(-1);
+            out.push((plan ? `<comic_plan>\n${plan[1].trim()}\n</comic_plan>\n` : '') + `<image>\n${inner}\n</image>`);
+        }
+        last = m.index + m[0].length;
+    }
+    if (!out.length) throw new Error('AI 没有按格式写出漫画页（缺少 <image>@page …</image>）');
+    return out.join('\n\n');
+}
+
 /** 把消息里的第 page 页换成新写的 */
 function replacePage(message, page, { image, plan }) {
     const blocks = comicBlocks(message);
@@ -180,6 +218,8 @@ function replacePage(message, page, { image, plan }) {
 // ───────────── 楼层里的显示与操作 ─────────────
 
 const CSS = `
+.pc-comic-redo{display:flex;gap:8px;justify-content:flex-end;margin-top:6px}
+.pc-comic-redo button{border:1px dashed currentColor;background:transparent;color:inherit;opacity:.75;border-radius:999px;padding:3px 12px;font-size:12px;cursor:pointer}
 .pc-comic{display:flex;flex-direction:column;gap:10px;margin:10px 0 4px}
 .pc-comic-page{position:relative;margin:0;border-radius:14px;overflow:hidden;border:1.5px solid var(--pc-paper,#f4efe4);background:var(--pc-paper-2,#ebe4d2);-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}
 .pc-comic-page img{display:block;width:100%;height:auto;cursor:pointer;-webkit-user-drag:none}
@@ -254,6 +294,19 @@ function createComicController(deps) {
     const enabled = () => !!opts().comicOn;
     const chatKey = c => String(c.getCurrentChatId?.() ?? c.chatId ?? '') + '|' + String(c.characterId ?? '') + '|' + String(c.groupId ?? '');
     const store = msg => (msg.extra ||= {}, msg.extra.zhikuComic ||= {});
+    // 漫画页的来源：回复里自己写了 <image>@page 就用正文；没写的话，用「画成漫画」让 AI 改编出来、存在这楼 extra 里的（按 swipe 分开）
+    const swipeKey = msg => String(msg.swipe_id ?? 0);
+    const srcOf = msg => !msg ? '' : comicBlocks(msg.mes).length ? msg.mes : (msg.extra?.zhikuComicSrc?.[swipeKey(msg)] || '');
+    function setSrc(msg, text) {
+        if (comicBlocks(msg.mes).length) {
+            msg.mes = text;
+            if (msg.swipes && Number.isInteger(msg.swipe_id)) msg.swipes[msg.swipe_id] = msg.mes;
+            return 'mes';
+        }
+        ((msg.extra ||= {}).zhikuComicSrc ||= {})[swipeKey(msg)] = text;
+        return 'extra';
+    }
+    const adapting = new Map(); // id -> 状态文字
     const rec = (msg, key) => msg?.extra?.zhikuComic?.[key] || null;
     const curVer = r => r?.versions?.[Math.min(r.cur ?? r.versions.length - 1, r.versions.length - 1)] || null;
     const size = () => String(opts().comicSize || '832x1216').split('x').map(Number);
@@ -272,9 +325,20 @@ function createComicController(deps) {
     async function saveChat(c = getContext()) { await (c.saveChatConditional || c.saveChat)?.call(c); }
     function pageSnapshot(id, block) {
         const c = getContext(), msg = c.chat?.[id], seq = chatSeq;
-        if (stopped || !msg || !comicBlocks(msg.mes).some(b => b.key === block.key)) return null;
-        const source = msg.mes, swipe = msg.swipe_id, chat = chatKey(c);
-        return { c, msg, source, swipe, chat, seq, current: () => !stopped && seq === chatSeq && chatKey(getContext()) === chat && getContext().chat?.[id] === msg && msg.mes === source && msg.swipe_id === swipe };
+        if (stopped || !msg || (block && !comicBlocks(srcOf(msg)).some(b => b.key === block.key))) return null;
+        const source = srcOf(msg), body = msg.mes, native = !!comicBlocks(body).length, swipe = msg.swipe_id, chat = chatKey(c);
+        return { c, msg, source, body, swipe, current: (next = source) => !stopped && seq === chatSeq && chatKey(getContext()) === chat && getContext().chat?.[id] === msg && msg.mes === (native ? next : body) && srcOf(msg) === next && msg.swipe_id === swipe };
+    }
+    function checkpoint(msg) {
+        const body = msg.mes, swipe = msg.swipe_id, oldSwipe = msg.swipes?.[swipe], hadExtra = !!msg.extra;
+        const fields = ['zhikuComic', 'zhikuComicSrc'];
+        const saved = fields.map(k => msg.extra?.[k] ? { ...msg.extra[k] } : undefined);
+        return () => {
+            msg.mes = body;
+            if (msg.swipes && Number.isInteger(swipe)) msg.swipes[swipe] = oldSwipe;
+            fields.forEach((k, i) => { if (saved[i]) (msg.extra ||= {})[k] = saved[i]; else if (msg.extra) delete msg.extra[k]; });
+            if (!hadExtra && msg.extra && !Object.keys(msg.extra).length) delete msg.extra;
+        };
     }
     const discard = url => { if (url) Promise.resolve().then(() => dropImage?.(url)).catch(() => {}); };
 
@@ -325,7 +389,7 @@ function createComicController(deps) {
         if (stopped || (!manual && (!enabled() || opts().comicAuto === false))) return;
         const msg = getContext().chat?.[id];
         if (!msg || msg.is_user || msg.is_system) return;
-        const blocks = comicBlocks(msg.mes);
+        const blocks = comicBlocks(srcOf(msg));
         if (!blocks.length) return;
         render(id);
         const snap = pageSnapshot(id, blocks[0]);
@@ -352,12 +416,22 @@ function createComicController(deps) {
         const msg = getContext().chat?.[id];
         el?.querySelector(':scope .pc-comic')?.remove();
         if (!el || !msg || msg.is_user) return;
-        const blocks = comicBlocks(msg.mes);
-        if (!blocks.length || (!enabled() && !blocks.some(b => rec(msg, b.key)?.versions?.length))) return;
+        const blocks = comicBlocks(srcOf(msg));
+        const own = comicBlocks(msg.mes).length > 0;
+        if (adapting.has(id) && !blocks.length) {
+            const box = doc.createElement('div');
+            box.className = 'pc-comic';
+            box.dataset.mes = String(id);
+            box.innerHTML = `<div class="pc-comic-wait"><div>${esc(adapting.get(id))}</div></div>`;
+            const text = el.querySelector('.mes_text');
+            (text ? text.after(box) : el.appendChild(box));
+            return;
+        }
+        if (!blocks.length || (own && !enabled() && !blocks.some(b => rec(msg, b.key)?.versions?.length))) return;
         const box = doc.createElement('div');
         box.className = 'pc-comic';
         box.dataset.mes = String(id);
-        box.innerHTML = blocks.map(b => pageHtml(id, msg, b)).join('');
+        box.innerHTML = blocks.map(b => pageHtml(id, msg, b)).join('') + (own ? '' : `<div class="pc-comic-redo"><button data-cadapt="${id}">${adapting.has(id) ? esc(adapting.get(id)) : '重新改编这一楼'}</button><button data-cremove="${id}">收起漫画</button></div>`);
         const text = el.querySelector('.mes_text');
         (text ? text.after(box) : el.appendChild(box));
         hydrate(box);
@@ -369,7 +443,7 @@ function createComicController(deps) {
     function renderAll({ chatChanged = false } = {}) {
         if (chatChanged) { chatSeq++; errors.clear(); cancelPress({type:'cancel'}); for (const close of [...panels]) close(); }
         const chat = getContext().chat || [];
-        for (let i = 0; i < chat.length; i++) if (chat[i]?.mes?.includes('<image')) render(i);
+        for (let i = 0; i < chat.length; i++) if (chat[i]?.mes?.includes('<image') || chat[i]?.extra?.zhikuComicSrc || adapting.has(i)) render(i);
     }
 
     // ── 点击、双击、长按 ──
@@ -378,12 +452,19 @@ function createComicController(deps) {
         if (!page) return null;
         const id = Number(page.closest('.pc-comic').dataset.mes);
         const msg = getContext().chat?.[id];
-        const block = msg && comicBlocks(msg.mes).find(b => b.key === page.dataset.ckey);
+        const block = msg && comicBlocks(srcOf(msg)).find(b => b.key === page.dataset.ckey);
         return block ? { page, id, msg, block } : null;
     };
     let lastTap = null, press = null, suppressClick = false;
     function onClick(ev) {
         if (suppressClick) { suppressClick = false; ev.preventDefault(); ev.stopPropagation(); return; }
+        const ad = ev.target?.closest?.('[data-cadapt],[data-cremove]');
+        if (ad) {
+            ev.stopPropagation();
+            if (ad.dataset.cadapt) { if (!adapting.has(Number(ad.dataset.cadapt))) void adapt(Number(ad.dataset.cadapt), { redo: true }); }
+            else void unadapt(Number(ad.dataset.cremove));
+            return;
+        }
         const t = targetOf(ev);
         if (!t) return;
         const cv = ev.target.closest('[data-cv]');
@@ -425,7 +506,7 @@ function createComicController(deps) {
     // ── 本页工作台 ──
     function openWorkbench(id, key) {
         const msg = getContext().chat?.[id];
-        const block = msg && comicBlocks(msg.mes).find(b => b.key === key);
+        const block = msg && comicBlocks(srcOf(msg)).find(b => b.key === key);
         if (!block) return;
         const snap = pageSnapshot(id, block);
         if (!snap) return;
@@ -481,7 +562,7 @@ function createComicController(deps) {
             if (act === 'ai') {
                 t.disabled = true; say('AI 正在重写这一页…');
                 try {
-                    const { system, user } = rewriteRequest(msg.mes, block.page, box.querySelector('[data-w-req]').value);
+                    const { system, user } = rewriteRequest(srcOf(msg), block.page, box.querySelector('[data-w-req]').value);
                     const out = parseRewrite(await askLLM(system, user, { maxTokens: 6000 }));
                     if (!snap.current()) throw new Error('聊天或原文已变化，本次改写未写入');
                     box.closeModal();
@@ -493,24 +574,67 @@ function createComicController(deps) {
     /** 把新写的一页换进这楼的正文，旧版本跟着搬过去，然后出图 */
     async function applyNewPage(id, block, page, snap = pageSnapshot(id, block)) {
         if (!snap?.current()) return;
-        const { c, msg, source, swipe, chat, seq } = snap;
-        const hadExtra = !!msg.extra, oldStore = msg.extra?.zhikuComic, old = rec(msg, block.key), oldSwipe = msg.swipes?.[swipe];
-        msg.mes = replacePage(source, block.page, page);
-        const nb = comicBlocks(msg.mes)[block.page - 1];
-        if (old && nb && nb.key !== block.key) { msg.extra.zhikuComic = { ...oldStore, [nb.key]: old }; delete msg.extra.zhikuComic[block.key]; }
-        if (msg.swipes && Number.isInteger(swipe)) msg.swipes[swipe] = msg.mes;
+        const { c, msg, source } = snap, restore = checkpoint(msg), old = rec(msg, block.key);
+        const next = replacePage(source, block.page, page), where = setSrc(msg, next);
+        const nb = comicBlocks(next)[block.page - 1];
+        if (old && nb && nb.key !== block.key) { store(msg)[nb.key] = old; delete store(msg)[block.key]; }
         try { await saveChat(c); }
-        catch (e) {
-            msg.mes = source;
-            if (msg.swipes && Number.isInteger(swipe)) msg.swipes[swipe] = oldSwipe;
-            if (oldStore) msg.extra.zhikuComic = oldStore;
-            else if (msg.extra) { delete msg.extra.zhikuComic; if (!hadExtra && !Object.keys(msg.extra).length) delete msg.extra; }
-            notify('漫画改写保存失败：' + e.message); return;
-        }
-        if (stopped || getContext().chat?.[id] !== msg || chatKey(getContext()) !== chat || seq !== chatSeq || msg.mes !== replacePage(source, block.page, page) || msg.swipe_id !== swipe) return;
-        c.updateMessageBlock?.(id, msg);
+        catch (e) { restore(); notify('漫画改写保存失败：' + e.message); return; }
+        if (!snap.current(next)) return;
+        if (where === 'mes') c.updateMessageBlock?.(id, msg);
         render(id);
         if (nb) await generateOne(id, nb);
+    }
+
+    // ── 把一楼画成漫画：AI 读正文写分镜，存进这楼，再一页页出图 ──
+    async function adapt(id, { pages = 0, redo = false } = {}) {
+        const snap = pageSnapshot(id);
+        if (!snap) return;
+        const { c, msg, source } = snap;
+        if (msg.is_system) return;
+        if (msg.is_user) { notify('只能把角色的回复画成漫画'); return; }
+        if (comicBlocks(msg.mes).length || (source && !redo)) { await process(id, { manual: true }); return; }
+        if (adapting.has(id)) return;
+        const story = storyText(msg.mes);
+        if (!story) { notify('这一楼没有正文'); return; }
+        adapting.set(id, 'AI 正在把这一楼改编成漫画分镜…'); render(id);
+        try {
+            const prevMsg = (c.chat || []).slice(0, id).reverse().find(m => m && !m.is_system && m.extra?.zhikuComicSrc);
+            const before = prevMsg ? comicBlocks(srcOf(prevMsg)).slice(-1).map(b => b.inner).join('') : '';
+            const { system, user } = adaptRequest(story.slice(0, 12000), { pages, cast: deps.castText?.() || '', before });
+            const out = parseAdapt(await askLLM(system, user, { maxTokens: 12000 }));
+            if (!snap.current()) return;
+            const restore = checkpoint(msg), removed = [];
+            setSrc(msg, out);
+            const retained = new Set(Object.values(msg.extra.zhikuComicSrc).flatMap(text => comicBlocks(text).map(b => b.key)));
+            for (const b of comicBlocks(source)) if (!retained.has(b.key)) {
+                removed.push(...(rec(msg, b.key)?.versions || []));
+                delete store(msg)[b.key];
+            }
+            try { await saveChat(c); } catch (e) { restore(); throw e; }
+            removed.forEach(v => discard(v.url));
+            if (!snap.current(out)) return;
+        } catch (e) {
+            notify('没改编成：' + (e?.message || e));
+            return;
+        } finally { adapting.delete(id); render(id); }
+        await process(id, { manual: true });
+    }
+    async function unadapt(id) {
+        const snap = pageSnapshot(id);
+        if (!snap || adapting.has(id)) return;
+        const { c, msg, source } = snap;
+        if (!msg.extra?.zhikuComicSrc?.[swipeKey(msg)]) return;
+        const restore = checkpoint(msg), removed = [];
+        delete msg.extra.zhikuComicSrc[swipeKey(msg)];
+        const retained = new Set(Object.values(msg.extra.zhikuComicSrc).flatMap(text => comicBlocks(text).map(b => b.key)));
+        for (const b of comicBlocks(source)) if (!retained.has(b.key)) {
+            removed.push(...(rec(msg, b.key)?.versions || []));
+            delete store(msg)[b.key];
+        }
+        try { await saveChat(c); }
+        catch (e) { restore(); notify('漫画保存失败：' + e.message); render(id); return; }
+        removed.forEach(v => discard(v.url)); render(id);
     }
 
     // ── 漫画书：翻书（摊开两页）/ 卡片堆 / 上下滑 ──
@@ -519,8 +643,8 @@ function createComicController(deps) {
         const chat = getContext().chat || [];
         const pages = [];
         chat.forEach((msg, id) => {
-            if (!msg || msg.is_user || !msg.mes?.includes('<image')) return;
-            for (const b of comicBlocks(msg.mes)) { const v = curVer(rec(msg, b.key)); if (v) pages.push({ id, page: b.page, total: b.total, url: v.url, name: msg.name || '' }); }
+            if (!msg || msg.is_user) return;
+            for (const b of comicBlocks(srcOf(msg))) { const v = curVer(rec(msg, b.key)); if (v) pages.push({ id, page: b.page, total: b.total, url: v.url, name: msg.name || '' }); }
         });
         const urls = new Map();
         const url = async p => { if (!urls.has(p.url)) urls.set(p.url, await resolveUrl(p.url)); return urls.get(p.url); };
@@ -618,7 +742,7 @@ function createComicController(deps) {
         }
         function build() {
             book.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
-            if (!pages.length) { stage.innerHTML = '<div class="empty">这个聊天里还没有漫画页<br>开着智库「漫画模式」聊天，回复里的漫画页会自动画出来</div>'; book.querySelector('footer').hidden = true; info(); return; }
+            if (!pages.length) { stage.innerHTML = '<div class="empty">这个聊天里还没有漫画页<br>点楼层按钮里的 📖「画成漫画」，把那一楼改编成漫画；<br>或者配合漫画台预设聊天，回复里的漫画页会自动画出来</div>'; book.querySelector('footer').hidden = true; info(); return; }
             mode === 'book' ? buildBook() : mode === 'scroll' ? buildScroll() : buildFlow();
         }
         function go(n) {
@@ -691,7 +815,7 @@ function createComicController(deps) {
     }
 
     return {
-        process, render, renderAll, openBook, generateOne,
+        process, render, renderAll, openBook, generateOne, adapt, unadapt,
         stop() {
             stopped = true;
             cancelPress({type:'stop'});
@@ -1239,7 +1363,7 @@ function imageInsertionPoint(text, sentence) {
     return last.start + last.text.trimEnd().length;
 }
 
-// 智库 · 原生扩展版 v0.8.20（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.23（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1257,7 +1381,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.20';
+globalThis.__PC_VERSION = '0.8.23';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -1390,7 +1514,7 @@ function normalizeData(raw) {
         }
     }
     // 以前误把 absurdres 之类当成了画师（还加了 artist:）：组里的放回普通词；单独的没例图就删，有例图的留着让人自己删
-    const fake = a => a && (NOT_ARTIST.test(a.tag.replace(/^artist:/i, '').trim()) || /[<>]/.test(a.tag));
+    const fake = a => a && (NOT_ARTIST.test(a.tag.replace(/^artist:/i, '').trim()) || /^(?:(?:ultra|very|highly|extremely|hyper)[ _-]?)?detailed$|^(?:illustration|anime(?: style)?|best|quality)$/i.test(a.tag.replace(/^artist:/i, '').trim()) || /[<>]/.test(a.tag));
     for (const g of Object.values(d.groups)) {
         const bad = g.members.filter(m => fake(d.artists[m.artistId]));
         if (!bad.length) continue;
@@ -1404,6 +1528,13 @@ function normalizeData(raw) {
     }
     d.recent = Array.isArray(d.recent) ? d.recent : [];
     d.history = Array.isArray(d.history) ? d.history : [];
+    // 一位画师都没有、也没有例图的画师串（批量时把画风词误当成一串）删掉
+    for (const g of Object.values(d.groups)) {
+        if (g.members.length || g.images.length) continue;
+        delete d.groups[g.id];
+        if (d.active?.type === 'group' && d.active.id === g.id) d.active = null;
+    }
+    d.recent = d.recent.filter(r => r.type !== 'group' || d.groups[r.id]);
     return d;
 }
 
@@ -1533,7 +1664,7 @@ function batchUnit(parts) {
     const text = parts.map(x => x.trim()).filter(Boolean).join(', ');
     if (!text) return null;
     const p = parseArtistString(text);
-    if (!p.members.length && !p.extra) return null;
+    if (!p.members.length) return null; // 一位画师都没有（只有 year 2025、detailed 这类词）的不算画师串
     if (p.members.length === 1 && !p.extra && Math.abs(p.members[0].weight - 1) < 0.001) return { tag: p.members[0].tag, weight: 1, key: artistKey(p.members[0].tag) };
     return { text, members: p.members, key: text.toLowerCase() };
 }
@@ -2228,6 +2359,14 @@ function netError(e) {
 function generate(opts){return __naiGate.run(()=>generateRequest(opts)).catch(e=>{throw netError(e);});}
 async function generateRequest(opts) {
     const s = settings();
+    if (!opts.comic && s.naiMode === 'site' && String(s.naiSiteSimple) === 'true') {
+        const cs = opts.chars || [];
+        opts = {
+            ...opts, chars: [], director: null,
+            positive: cs.length ? [opts.positive, ...cs.map(c => c.prompt)].filter(Boolean).join(', ') : opts.positive,
+            negative: cs.length ? [opts.negative, ...cs.map(c => c.uc)].filter(Boolean).join(', ') : opts.negative,
+        };
+    }
     const model = opts.comic ? 'nai-diffusion-5-full' : s.novelaimode;
     if (opts.comic && s.naiMode === 'tavern') throw new Error('漫画要用自己的 NovelAI key：酒馆通道画不了分人物和画进图里的文字。到智库「设置 → NovelAI」改成自己填 key');
     const params = buildParameters(opts);
@@ -2237,6 +2376,7 @@ async function generateRequest(opts) {
         chars: (opts.chars || []).map(c => c.prompt),
         seed: params.seed,
         model,
+        director: params.director_reference_images_cached?.length || 0,
     };
     if (s.naiMode === 'tavern') {
         const body = {
@@ -2455,7 +2595,7 @@ function parseVibeFile(json) {
 
 function charRefSupported() {
     const s = settings();
-    return s.naiMode !== 'tavern' && s.novelaimode.includes('4-5');
+    return s.naiMode !== 'tavern' && s.novelaimode.includes('4-5') && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');
 }
 
 // ───────────── 局部重绘 ─────────────
@@ -2613,7 +2753,7 @@ async function run(opts) {
         if (!opts.noVibe && !opts.director && opts.refs === undefined) opts.refs = await vibeRefs();
         const r = await N.generate(opts);
         const vg = getData().vibeGroups?.[getData().vibeActive];
-        runtime.lastSent = { ...r.sent, vibes: opts.refs?.images?.length ? { name: vg?.name || '', n: opts.refs.images.length } : null, director: opts.director?.length || 0 };
+        runtime.lastSent = { ...r.sent, vibes: opts.refs?.images?.length ? { name: vg?.name || '', n: opts.refs.images.length } : null, director: r.sent.director ?? (opts.director?.length || 0) };
         return r.image;
     } finally {
         runtime.busy--;
@@ -3440,7 +3580,7 @@ const snap = v => { const g = [0.1, 0.3, 0.5, 0.7, 0.9]; v = Number(v); return N
 /** 能不能分角色（酒馆转发和 V3 不行） */
 function canSplit() {
     const s = N.settings();
-    return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3';
+    return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3' && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');
 }
 
 /**
@@ -3671,7 +3811,34 @@ function deleteOutfit(ownerKey, id) {
     commit();
 }
 
-return { namesOf, castIn, markerPrompt, avatarUrl, stCards, stPersonas, currentPersonaKey, getChar, saveChar, descOf, descOfFull, sideKicks, addSideKick, deleteChar, chatId, currentCast, removeFromCast, setCastOn, tagText, currentOutfit, fixedTags, canSplit, buildChatPrompt, previewCast, generateForMessage, insertImage, parsePairs, freeChars, saveCharacterPost, outfitFromPost, characterPayload, importZhihuijiCharacters, copyLook, wardrobe, findOutfit, giveOutfit, deleteOutfit };
+/** 生图页选的入画角色 → 提示词。cast：[{ key, pos: 'L'|'C'|'R', outfit?: 衣服 id，'' = 不穿固定衣服 }] */
+const CAST_X = { L: 0.3, C: 0.5, R: 0.7 };
+function studioCastPick(e) {
+    const ch = getChar(e.key);
+    if (!ch) return null;
+    const out = e.outfit === '' ? null : (ch.outfits.find(o => o.id === e.outfit) || currentOutfit(ch));
+    return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', tags: [tagText(ch.appearance), tagText(out?.tags)].filter(Boolean).join(', '), x: CAST_X[e.pos] ?? 0.5 };
+}
+function studioCastPrompt({ pos = '', neg = '', scene = '' }, cast) {
+    const picks = (cast || []).map(studioCastPick).filter(Boolean);
+    if (!picks.length) return { ...E.composeStudio({ pos, neg, scene }), chars: [], picks };
+    const chars = picks.map(p => p.char);
+    const hasCount = /\b(?:\d+(?:boys?|girls?|others?)|no humans)\b/i.test(pos);
+    const negAll = [neg, ...chars.map(c => c.negative)].filter(Boolean).join(', ');
+    if (picks.length === 1 || !canSplit()) {
+        const lead = picks.length === 1 ? 'solo' : (hasCount ? '' : countTags(chars));
+        return { ...E.composeStudio({ pos: M.mergeTags(pos, lead, ...picks.map(p => p.tags)), neg: negAll, scene }), chars: [], picks };
+    }
+    const r = E.composeStudio({ pos: M.mergeTags(hasCount ? '' : countTags(chars), pos), neg, scene });
+    return { ...r, chars: picks.map(p => ({ prompt: soloize(p.tags), uc: p.char.negative || '', center: { x: p.x, y: 0.5 } })), picks };
+}
+/** 入画角色绑的长相参考组 */
+function studioCastRefs(picks) {
+    const d = getData();
+    return [...new Set((picks || []).map(p => p.char.charRef).filter(id => id && d.charRefGroups?.[id]))];
+}
+
+return { studioCastPrompt, studioCastRefs, namesOf, castIn, markerPrompt, avatarUrl, stCards, stPersonas, currentPersonaKey, getChar, saveChar, descOf, descOfFull, sideKicks, addSideKick, deleteChar, chatId, currentCast, removeFromCast, setCastOn, tagText, currentOutfit, fixedTags, canSplit, buildChatPrompt, previewCast, generateForMessage, insertImage, parsePairs, freeChars, saveCharacterPost, outfitFromPost, characterPayload, importZhihuijiCharacters, copyLook, wardrobe, findOutfit, giveOutfit, deleteOutfit };
 })();
 
 // ───── ui.js ─────
@@ -3839,7 +4006,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
     }
     function preview(id,msg,token,index,record){
         const {box,dismiss}=dialog(),img=doc.createElement('img'),download=doc.createElement('a'),edit=doc.createElement('button'),remove=doc.createElement('button');
-        showUrl(record.url,u=>{img.src=u;download.href=u;});download.download='image.png';download.textContent='下载';edit.type=remove.type='button';edit.textContent='编辑 / 重新生成';remove.textContent='删除当前图片';
+        showUrl(record.url,u=>{img.src=u;download.href=u;});download.download='zhiku_'+Date.now()+'.png';download.textContent='下载';edit.type=remove.type='button';edit.textContent='编辑 / 重新生成';remove.textContent='删除当前图片';
         edit.onclick=()=>{dismiss();editPrompt(id,msg,token,index);};
         remove.onclick=async()=>{try{await deleteResult(id,msg,token);dismiss();}catch(e){notify(e.message,'error');}};
         box.append(img,download,edit,remove);
@@ -4246,12 +4413,17 @@ function loadStudio() {
     st.sceneEn = saved.sceneEn || '';
     st.sceneSrc = saved.sceneSrc || '';
     st.sceneExpand = !!saved.sceneExpand;
+    st.cast = Array.isArray(saved.cast) ? saved.cast : [];
+    st.castByChat = saved.castByChat && typeof saved.castByChat === 'object' ? saved.castByChat : {};
+    st.castMemo = saved.castMemo !== false;
+    st.scenes = Array.isArray(saved.scenes) ? saved.scenes : [];
+    st.recentScenes = Array.isArray(saved.recentScenes) ? saved.recentScenes : [];
     st.loaded = true;
 }
 function saveStudio() {
     const d = getData();
     const st = ui.studio;
-    d.studio = { sourceRef: st.sourceRef || null, pos: st.pos, neg: st.neg, lastExtra: st.lastExtra, lastNeg: st.lastNeg || '', scene: st.scene || '', sceneOn: st.sceneOn !== false, sceneEn: st.sceneEn || '', sceneSrc: st.sceneSrc || '', sceneExpand: !!st.sceneExpand };
+    d.studio = { sourceRef: st.sourceRef || null, pos: st.pos, neg: st.neg, lastExtra: st.lastExtra, lastNeg: st.lastNeg || '', scene: st.scene || '', sceneOn: st.sceneOn !== false, sceneEn: st.sceneEn || '', sceneSrc: st.sceneSrc || '', sceneExpand: !!st.sceneExpand, cast: st.cast || [], castByChat: st.castByChat || {}, castMemo: st.castMemo !== false, scenes: st.scenes || [], recentScenes: st.recentScenes || [] };
     commit({ silent: true });
 }
 function studioSource() {
@@ -4320,11 +4492,170 @@ async function translateScene() {
         saveStudio();
     } finally { st.sceneBusy = false; }
 }
+const CAST_POS = { L: '左', C: '中', R: '右' };
+const castMemoOn = () => ui.studio.castMemo !== false;
+/** 生图页现在选的入画角色（开着「记住」时按聊天分开存） */
+function studioCast() {
+    const st = ui.studio;
+    st.cast ||= []; st.castByChat ||= {};
+    const list = castMemoOn() ? st.castByChat[C.chatId()] || [] : st.cast;
+    return list.filter(e => C.getChar(e.key));
+}
+function setStudioCast(list) {
+    const st = ui.studio;
+    if (castMemoOn()) st.castByChat[C.chatId()] = list; else st.cast = list;
+    saveStudio();
+}
+function castAv(c, cls = 'pc-castav') {
+    const u = c.kind === 'side' ? '' : C.avatarUrl(c);
+    const letter = esc(String(c.name || '?').slice(0, 1));
+    return u ? `<img class="${cls}" src="${esc(u)}" alt="" onerror="this.outerHTML='<span class=&quot;${cls}&quot;>${letter}</span>'">` : `<span class="${cls}">${letter}</span>`;
+}
+const CAST_CSS = `<style>
+.pc-castmode{font-size:12px;color:var(--pc-ink-soft);background:var(--pc-paper);border-radius:12px;padding:9px 11px;line-height:1.6}
+.pc-castmode b{color:var(--pc-ink)}
+.pc-castrow{background:var(--pc-paper);border-radius:16px;padding:10px 12px;margin-top:8px}
+.pc-castrow-top{display:flex;align-items:center;gap:9px}
+.pc-castrow-top>b{flex:1;min-width:0;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pc-castav{flex:0 0 auto;width:30px;height:30px;border-radius:9px;object-fit:cover;background:var(--pc-gold);color:#fbf8f0;display:inline-grid;place-items:center;font-family:var(--pc-font-name);font-weight:700;font-size:14px}
+.pc-castseg{display:inline-flex !important;padding:2px;border-radius:10px;background:transparent;border:1.5px solid var(--pc-ink)}
+.pc-castseg button{min-height:26px !important;padding:0 9px;border-radius:7px !important;font-size:12px !important}
+.pc-castseg button.on{background:var(--pc-ink) !important;color:var(--pc-paper) !important}
+.pc-casttags{font-size:11.5px;line-height:1.55;color:var(--pc-ink-soft);margin-top:6px;word-break:break-word}
+.pc-castadd{width:100%;margin:9px 0 6px;min-height:42px;border:1.5px dashed var(--pc-dash);border-radius:14px;background:transparent;font-family:var(--pc-font);font-size:14px;color:var(--pc-ink);cursor:pointer}
+.pc-castsec{font-size:11px;letter-spacing:.3em;color:var(--pc-ink-soft);margin:10px 0 4px}
+.pc-castgrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.pc-castpick{position:relative;min-width:0;border:1.5px dashed var(--pc-dash);border-radius:16px;background:transparent;padding:9px 4px 7px;text-align:center;cursor:pointer;font-family:var(--pc-font);color:var(--pc-ink);display:flex;flex-direction:column;align-items:center;gap:2px}
+.pc-castpick.on{border:1.5px solid var(--pc-ink);background:var(--pc-paper-2)}
+.pc-castpick .pc-castbig{width:46px;height:46px;border-radius:14px;object-fit:cover;background:var(--pc-gold);color:#fbf8f0;display:grid;place-items:center;font-family:var(--pc-font-name);font-weight:700;font-size:18px;margin-bottom:3px}
+.pc-castpick b{max-width:100%;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pc-castpick small{font-size:10px;letter-spacing:.08em;color:var(--pc-ink-soft)}
+.pc-castpick small.warn{color:#a8582c}.pc-castpick small.ref{color:#5f7a52}
+.pc-castnum{position:absolute;top:-7px;right:-5px;width:22px;height:22px;border-radius:7px;background:var(--pc-ink);color:var(--pc-paper);font-size:12px;display:grid;place-items:center;transform:rotate(6deg)}
+</style>`;
+function castFold() {
+    const d = getData();
+    const list = studioCast().map(e => ({ e, c: C.getChar(e.key) }));
+    const n = list.length, split = C.canSplit();
+    const mode = n === 0 ? '<b>不选人：</b>就按上面的提示词画，跟以前一样。'
+        : n === 1 ? '<b>单人：</b>把这个人的外貌、衣服接在提示词后面（加 solo）。'
+        : split ? `<b>${n} 人：</b>每个人的外貌单独发给 NAI（分角色），发色瞳色不会串到别人身上；人数词自动补上。`
+        : `<b>${n} 人：</b>现在的模型或通道（V3 / 酒馆里的 key）不能分角色，几个人的外貌会按顺序接在一起，容易串色。`;
+    const rows = list.map(({ e, c }) => {
+        const look = C.tagText(c.appearance);
+        const ref = c.charRef && d.charRefGroups?.[c.charRef];
+        const fitOn = id => e.outfit === undefined ? C.currentOutfit(c)?.id === id : e.outfit === id;
+        const k = esc(e.key);
+        return `<div class="pc-castrow"><div class="pc-castrow-top">${castAv(c)}<b>${esc(c.name)}</b>
+            ${n > 1 && split ? `<span class="pc-seg pc-castseg">${['L', 'C', 'R'].map(v => `<button class="${(e.pos || 'C') === v ? 'on' : ''}" data-act="castpos" data-key="${k}" data-v="${v}">${CAST_POS[v]}</button>`).join('')}</span>` : ''}
+            <button class="pc-x" data-act="castrm" data-key="${k}" aria-label="不画${esc(c.name)}">×</button></div>
+          <div class="pc-casttags mono">${look ? esc(look) : '这个角色还没写外貌：去「角色」页写一下，或者在提示词里自己写'}</div>
+          ${c.outfits.length ? `<div class="pc-chips wrap">${c.outfits.map(o => `<button class="pc-pill tiny ${fitOn(o.id) ? 'on' : 'dashed'}" data-act="castfit" data-key="${k}" data-id="${esc(o.id)}">${esc(o.name)}</button>`).join('')}<button class="pc-pill tiny ${e.outfit === '' ? 'on' : 'dashed'}" data-act="castfit" data-key="${k}" data-id="">不穿固定衣服</button></div>` : ''}
+          ${ref ? `<div class="pc-dim small" style="margin-top:6px">带上长相参考「${esc(ref.name)}」${N.charRefSupported() ? '' : '（现在的模型用不了，这次不带）'}</div>` : ''}</div>`;
+    }).join('');
+    return CAST_CSS + fold('cast', '入画角色', n ? list.map(x => x.c.name).join('、') : '不画指定的人', `
+      <div class="pc-castmode">${mode}</div>${rows}
+      <button class="pc-castadd" data-act="castopen">＋ 从角色库里选人</button>
+      <label class="pc-switch"><input type="checkbox" data-cast-memo ${castMemoOn() ? 'checked' : ''}><span></span>记住这次聊天选的人<small>下次打开同一个聊天，自动选好</small></label>`);
+}
+function openCastPicker() {
+    const d = getData();
+    DOC.querySelector('.pc-sheet-backdrop')?.remove();
+    const back = DOC.createElement('div');
+    back.className = 'pc-sheet-backdrop fresh'; setTimeout(() => back.classList.remove('fresh'), 400);
+    const openedAt = Date.now();
+    pcMount(back);
+    const here = C.currentCast().map(x => x.char);
+    const hereKeys = new Set(here.map(c => c.key));
+    const others = Object.values(d.characters || {}).filter(c => c?.key && !hereKeys.has(c.key));
+    const KIND = { user: 'USER', char: 'CHAR', side: '配角', free: '自建' };
+    const card = c => {
+        const i = studioCast().findIndex(e => e.key === c.key);
+        const ref = c.charRef && d.charRefGroups?.[c.charRef];
+        const look = (c.appearance || []).length;
+        return `<button class="pc-castpick ${i >= 0 ? 'on' : ''}" data-key="${esc(c.key)}">${i >= 0 ? `<span class="pc-castnum">${i + 1}</span>` : ''}${castAv(c, 'pc-castbig')}<b>${esc(c.name)}</b><small class="${look ? '' : 'warn'}">${look ? KIND[c.kind] || '角色' : '没写外貌'}</small>${ref ? '<small class="ref">参考图</small>' : ''}</button>`;
+    };
+    const close = () => { back.remove(); render(); };
+    const draw = () => {
+        back.innerHTML = CAST_CSS + `<section class="pc-sheet" role="dialog" aria-label="选入画角色"><div class="pc-sheet-grip" aria-hidden="true"></div>
+          <div class="pc-row-between"><h3 class="pc-h3" style="margin:0">选入画角色</h3><button class="pc-icon-btn" data-c="close" aria-label="关闭">${ICON.close}</button></div>
+          <div class="pc-dim small">点头像选上 / 取消，数字是入画顺序。可以只选一个人，也可以选几个人。</div>
+          <div class="pc-castsec">这次聊天</div><div class="pc-castgrid">${here.map(card).join('') || '<div class="pc-dim small">这次聊天里没有角色</div>'}</div>
+          ${others.length ? `<div class="pc-castsec">角色库里的其他人</div><div class="pc-castgrid">${others.map(card).join('')}</div>` : ''}
+          <button class="pc-btn dark big pc-mt" data-c="close">好了</button></section>`;
+    };
+    back.addEventListener('click', ev => {
+        if (ev.target === back) { if (Date.now() - openedAt > 400) close(); return; }
+        if (ev.target.closest('[data-c="close"]')) { close(); return; }
+        const b = ev.target.closest('.pc-castpick');
+        if (!b) return;
+        const list = studioCast().slice();
+        const i = list.findIndex(e => e.key === b.dataset.key);
+        if (i >= 0) list.splice(i, 1);
+        else {
+            const used = new Set(list.map(e => e.pos));
+            list.push({ key: b.dataset.key, pos: ['L', 'R', 'C'].find(p => !used.has(p)) || 'C' });
+        }
+        setStudioCast(list);
+        draw();
+    });
+    draw();
+}
+/** 现在的固定提示词 */
+function sceneSnapshot() {
+    const st = ui.studio;
+    return { scene: String(st.scene || '').trim(), sceneEn: st.sceneEn || '', sceneSrc: st.sceneSrc || '', at: Date.now() };
+}
+const sceneSig = p => String(p.scene || '').toLowerCase().replace(/[\s，,]+/g, ',');
+const sceneName = text => String(text || '').split(/[,，\n]/).map(s => s.trim()).filter(s => s && !/quality|masterpiece|highres|absurdres|detailed/i.test(s)).slice(0, 3).join(', ').slice(0, 24);
+function rememberScene() {
+    const st = ui.studio, p = sceneSnapshot();
+    if (st.sceneOn === false || !p.scene) return;
+    const sig = sceneSig(p);
+    if ((st.scenes || []).some(x => sceneSig(x) === sig)) return; // 已经存下的就不再记
+    st.recentScenes = [p, ...(st.recentScenes || []).filter(x => sceneSig(x) !== sig)].slice(0, 20);
+    saveStudio();
+}
+function applyScene(p) {
+    const st = ui.studio;
+    st.scene = p.scene || ''; st.sceneEn = p.sceneEn || ''; st.sceneSrc = p.sceneSrc || '';
+    st.sceneOn = true;
+    saveStudio();
+}
+function sceneRow(p, i, kind) {
+    const cur = sceneSig(p) === sceneSig(sceneSnapshot());
+    const title = kind === 'saved' ? p.name || '没起名' : new Date(p.at).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+    return `<div class="pc-promptrow ${cur ? 'cur' : ''}">
+      <div class="pc-grow"><b>${esc(title)}${cur ? ' <em>在用</em>' : ''}</b><small class="mono">${esc(p.scene)}</small></div>
+      <div class="pc-promptacts">${cur ? '' : `<button class="pc-pill tiny on" data-act="sceneuse" data-kind="${kind}" data-i="${i}">换上</button>`}
+        ${kind === 'recent' ? `<button class="pc-pill tiny dashed" data-act="scenekeep" data-i="${i}">存下</button>` : `<button class="pc-pill tiny dashed" data-act="scenerename" data-i="${i}">改名</button>`}
+        <button class="pc-x" data-act="scenedel" data-kind="${kind}" data-i="${i}" aria-label="删掉">×</button></div></div>`;
+}
+function sceneLibrary() {
+    const st = ui.studio;
+    const saved = st.scenes || [], recent = st.recentScenes || [];
+    return `<style>
+.pc-promptrow{display:flex;gap:8px;align-items:flex-start;background:var(--pc-paper-2);border-radius:14px;padding:9px 10px;margin-top:7px}
+.pc-promptrow.cur{box-shadow:inset 0 0 0 1.5px var(--pc-ink)}
+.pc-promptrow b{display:block;font-size:14px}
+.pc-promptrow b em{font-style:normal;font-size:11px;font-weight:400;color:var(--pc-ink-soft);margin-left:4px}
+.pc-promptrow small{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:11.5px;line-height:1.5;color:var(--pc-ink-soft);word-break:break-word}
+.pc-promptacts{display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end;align-items:center;max-width:132px}
+.pc-promptsec{font-size:11px;letter-spacing:.3em;color:var(--pc-ink-soft);margin:12px 0 0}
+.pc-recent-scenes>summary{cursor:pointer;font-size:12px;color:var(--pc-ink-soft);margin-top:12px;list-style:none}
+.pc-recent-scenes>summary::-webkit-details-marker{display:none}
+</style>
+      <div class="pc-actions wrap" style="margin-top:8px"><button class="pc-pill dashed" data-act="scenesave">＋ 存下这段</button></div>
+      ${saved.length ? '<div class="pc-promptsec">存下的固定提示词</div>' + saved.map((p, i) => sceneRow(p, i, 'saved')).join('') : ''}
+      ${recent.length ? `<details class="pc-recent-scenes" ${ui.studio.open.recentScenes ? 'open' : ''} data-fold="recentScenes"><summary>最近用过 ${recent.length} 条（生成时自动记）▸</summary>${recent.map((p, i) => sceneRow(p, i, 'recent')).join('')}<div class="pc-actions" style="margin-top:6px"><button class="pc-pill tiny dashed" data-act="sceneclear">清空最近</button></div></details>` : ''}`;
+}
 function studioParts() { return { pos: ui.studio.pos, neg: ui.studio.neg, scene: sceneTags() }; }
 function previewHtml(s) {
-    const c = E.composeStudio(studioParts(), s);
+    const cast = studioCast();
+    const c = cast.length ? C.studioCastPrompt(studioParts(), cast) : E.composeStudio(studioParts(), s);
+    const charLines = (c.chars || []).map((x, i) => `<br><b>角色${i + 1}（${CAST_POS[c.picks[i].pos]}）</b>：${esc(x.prompt)}`).join('');
     const wait = ui.studio.sceneOn !== false && String(ui.studio.scene || '').trim() && !sceneReady();
-    return { pos: esc(c.positive) + (wait ? '<br><i class="pc-dim">＋ 固定提示词（有中文，生成时先转成标签，放在质量词前面）</i>' : ''), neg: esc(c.negative), aqt: c.aqt, ucp: c.ucp };
+    return { pos: esc(c.positive) + charLines + (wait ? '<br><i class="pc-dim">＋ 固定提示词（有中文，生成时先转成标签，放在质量词前面）</i>' : ''), neg: esc(c.negative), aqt: c.aqt, ucp: c.ucp };
 }
 
 function ucpOptions(s) {
@@ -4480,6 +4811,7 @@ function viewStudio(d) {
       <div id="pc-pos-ban">${banWarn(d, st.pos)}${lintHtml(st.pos)}</div>
       <label class="pc-label" for="pc-neg">负面提示词</label>
       <textarea id="pc-neg" class="pc-textarea small mono" data-bind="studio.neg" placeholder="不想出现的东西，比如 1girl, text">${esc(st.neg)}</textarea>
+      <div class="pc-mt-s">${castFold()}</div>
       <div class="pc-row-between" style="margin-top:10px">
         <div class="pc-chips" style="margin:0">${sizeBtn(832, 1216, '竖')}${sizeBtn(1216, 832, '横')}${sizeBtn(1024, 1024, '方')}</div>
         <label class="pc-cfg">CFG <input type="number" step="0.1" data-st="nai3Scale" value="${esc(s.nai3Scale)}"></label>
@@ -4508,6 +4840,7 @@ function viewStudio(d) {
     ${fold('scene', '固定提示词', st.sceneOn === false ? '不发送' : !String(st.scene || '').trim() ? '跟着发送 · 还没写' : !sceneReady() ? '跟着发送 · 生成时转成标签' : `跟着发送 · ${M.tokenize(sceneTags()).length} 个词`, `
       <label class="pc-switch"><input type="checkbox" data-scene-on ${st.sceneOn !== false ? 'checked' : ''}><span></span>每次生成都带上<small>接在正面提示词后面、质量词前面一起发。不改你的正面提示词，也不进画师串。</small></label>
       <textarea id="pc-scene" class="pc-textarea small" data-bind="studio.scene" placeholder="中文英文都行。比如：坐在窗边喝咖啡，外面下雨 / 1boy, sitting, window, rain">${esc(st.scene || '')}</textarea>
+      ${sceneLibrary()}
       <div id="pc-scene-ai" ${sceneZh() ? '' : 'hidden'}>
         <div class="pc-dim small pc-mt-s" id="pc-scene-state">${sceneStateText()}</div>
         <div class="pc-row-between pc-mt-s"><span class="pc-dim small">用哪个 AI 转</span></div>${apiChips(true)}
@@ -6203,7 +6536,8 @@ function viewSettings(d) {
       ${n.naiMode === 'tavern' ? '<div class="pc-hint">用酒馆「API 连接」里 NovelAI 那一栏填好的 key。走这条路时不能分角色、不能用氛围和角色参考、不能局部重绘。</div>' : ''}
       ${n.naiMode === 'site' ? `
       <label class="pc-field"><span>站点地址</span><input data-st="naiSite" value="${esc(n.naiSite)}" placeholder="https://…"></label>
-      <label class="pc-field"><span>站点给的 key</span><input data-st="naiSiteKey" type="password" value="${esc(n.naiSiteKey)}"></label>` : ''}
+      <label class="pc-field"><span>站点给的 key</span><input data-st="naiSiteKey" type="password" value="${esc(n.naiSiteKey)}"></label>
+      <label class="pc-switch"><input type="checkbox" data-st-check="naiSiteSimple" ${String(n.naiSiteSimple) === 'true' ? 'checked' : ''}><span></span>中转站兼容模式<small>生图页正常、聊天里出图却是满屏噪点 / 乱码图时打开：几个人的外貌合成一段发，不带长相参考图（有些中转站不支持分角色和角色参考）。漫画不受影响。</small></label>` : ''}
       <div class="pc-row-between pc-mt-s"><button class="pc-btn dark" data-act="naitest">测试</button><span class="${ui.naiTest?.ok && !ui.naiTest?.warn ? '' : 'pc-warn-text'}">${ui.naiTest ? (ui.naiTest.warn ? '! ' : ui.naiTest.ok ? '✓ ' : '✗ ') + esc(ui.naiTest.text) : ''}</span></div>
       <label class="pc-field"><span>模型</span><select data-st="novelaimode">${N.MODELS.map(([v, t]) => `<option value="${v}" ${v === n.novelaimode ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
       <details class="pc-details"><summary>更多生图参数</summary>${paramFields(n, { withSize: true })}
@@ -6574,6 +6908,57 @@ async function onClick(ev, outside = false) {
                 break;
             }
             case 'generate': await doGenerate(); break;
+            case 'castopen': openCastPicker(); break;
+            case 'scenesave': {
+                const p = sceneSnapshot();
+                if (!p.scene) { toastr.info('固定提示词还是空的', '固定提示词'); break; }
+                if ((ui.studio.scenes || []).some(x => sceneSig(x) === sceneSig(p))) { toastr.info('这段已经存过了', '固定提示词'); break; }
+                const name = await promptText('给这段固定提示词起个名字', sceneName(p.scene));
+                if (name == null) break;
+                ui.studio.scenes = [{ ...p, name: name.trim() || '没起名' }, ...(ui.studio.scenes || [])];
+                ui.studio.recentScenes = (ui.studio.recentScenes || []).filter(x => sceneSig(x) !== sceneSig(p));
+                saveStudio(); toastr.success('存好了', '固定提示词', { timeOut: 1500 }); render(); break;
+            }
+            case 'sceneuse': {
+                const p = (el.dataset.kind === 'saved' ? ui.studio.scenes : ui.studio.recentScenes)?.[Number(el.dataset.i)];
+                if (!p) break;
+                const cur = sceneSnapshot();
+                // 现在这段没存过，换掉前先记进「最近用过」，免得丢
+                if (cur.scene && ![...(ui.studio.scenes || []), ...(ui.studio.recentScenes || [])].some(x => sceneSig(x) === sceneSig(cur))) ui.studio.recentScenes = [cur, ...(ui.studio.recentScenes || [])].slice(0, 20);
+                applyScene(p);
+                toastr.info(`固定提示词换成了${p.name ? '「' + p.name + '」' : '这一段'}`, '固定提示词', { timeOut: 1800 }); render(); break;
+            }
+            case 'scenekeep': {
+                const list = ui.studio.recentScenes || [];
+                const p = list[Number(el.dataset.i)];
+                if (!p) break;
+                const name = await promptText('给这段固定提示词起个名字', sceneName(p.scene));
+                if (name == null) break;
+                ui.studio.scenes = [{ ...p, name: name.trim() || '没起名' }, ...(ui.studio.scenes || [])];
+                ui.studio.recentScenes = list.filter(x => x !== p);
+                saveStudio(); render(); break;
+            }
+            case 'scenerename': {
+                const p = ui.studio.scenes?.[Number(el.dataset.i)];
+                if (!p) break;
+                const name = await promptText('改名', p.name || '');
+                if (name == null) break;
+                p.name = name.trim() || p.name; saveStudio(); render(); break;
+            }
+            case 'scenedel': {
+                const key = el.dataset.kind === 'saved' ? 'scenes' : 'recentScenes';
+                const list = (ui.studio[key] || []).slice();
+                const [gone] = list.splice(Number(el.dataset.i), 1);
+                if (el.dataset.kind === 'saved' && gone && !(await confirmBox(`删掉「${gone.name || '没起名'}」？现在框里的固定提示词不受影响。`, { ok: '删除', cancel: '算了' }))) break;
+                ui.studio[key] = list; saveStudio(); render(); break;
+            }
+            case 'sceneclear': {
+                if (!(await confirmBox('清空最近用过的固定提示词？存下的不受影响。', { ok: '清空', cancel: '算了' }))) break;
+                ui.studio.recentScenes = []; saveStudio(); render(); break;
+            }
+            case 'castrm': setStudioCast(studioCast().filter(e => e.key !== el.dataset.key)); render(); break;
+            case 'castpos': setStudioCast(studioCast().map(e => e.key === el.dataset.key ? { ...e, pos: el.dataset.v } : e)); render(); break;
+            case 'castfit': setStudioCast(studioCast().map(e => e.key === el.dataset.key ? { ...e, outfit: el.dataset.id } : e)); render(); break;
             case 'scenetrans': {
                 if (!String(ui.studio.scene || '').trim()) { toastr.info('先写一点固定提示词', '固定提示词'); break; }
                 try { await translateScene(); } catch (e) { toastr.error('转换失败：' + e.message, '固定提示词'); }
@@ -6841,6 +7226,24 @@ async function onClick(ev, outside = false) {
     }
 }
 
+/** 点了智库的下载链接后提示一下；连着下好几张的合成一条 */
+let dlCount = 0, dlTimer = null, dlLast = '';
+function onDownloadClick(ev) {
+    const a = ev.target?.closest?.('a[download]');
+    if (!a || !a.getAttribute('href')) return;
+    const name = a.getAttribute('download') || '';
+    if (!/^(zhiku|piaoce|漫画|画师库)/.test(name)) return;
+    dlCount++; dlLast = name;
+    clearTimeout(dlTimer);
+    dlTimer = setTimeout(() => {
+        const json = /\.json$/i.test(dlLast);
+        toastr.success(dlCount > 1 ? `已发起 ${dlCount} 项下载，请在浏览器的「下载」里查看` : `${json ? '数据' : '图片'}已发起下载：${dlLast}`, '智库', { timeOut: 2500 });
+        dlCount = 0;
+    }, 700);
+}
+if (globalThis.__zhikuDl) DOC.removeEventListener('click', globalThis.__zhikuDl, true);
+globalThis.__zhikuDl = onDownloadClick;
+DOC.addEventListener('click', onDownloadClick, true);
 function updateStudioPreview() {
     const pv = previewHtml(settingsST() || {});
     const a = root?.querySelector('#pc-pv-pos'), b = root?.querySelector('#pc-pv-neg');
@@ -6893,6 +7296,12 @@ function onInput(ev) {
 async function onChangeEv(ev) {
     const el = ev.target;
     const d = getData();
+    if (el.dataset.castMemo !== undefined) {
+        const st = ui.studio, list = studioCast();
+        st.castMemo = el.checked;
+        if (el.checked) st.castByChat[C.chatId()] = list; else st.cast = list;
+        saveStudio(); render(); return;
+    }
     if (el.dataset.sceneOn !== undefined) { ui.studio.sceneOn = el.checked; saveStudio(); render(); return; }
     if (el.dataset.bindCheck === 'studio.sceneExpand') { ui.studio.sceneExpand = el.checked; saveStudio(); }
     if (el.dataset.bindGroup || el.dataset.bindArtist) { commit(); return; }
@@ -7048,7 +7457,7 @@ async function onChangeEv(ev) {
 async function doGenerate() {
     const st = ui.studio;
     if (!N.isReady()) { toastr.warning('先到设置里填 NovelAI key', '生成图片'); ui.view = 'settings'; render(); return; }
-    if (!st.pos.trim()) { toastr.warning('正面提示词是空的', '生成图片'); return; }
+    if (!st.pos.trim() && !studioCast().length) { toastr.warning('正面提示词是空的', '生成图片'); return; }
     if (T.hasChinese(st.pos.replace(/（[^（）]*）/g, ''))) {
         if (!(await confirmBox('正面提示词里有中文，NovelAI 看不懂中文。还是要生成吗？（中文描述可以写进下面的「固定提示词」，会自动转成标签）', { ok: '照样生成', cancel: '先不' }))) return;
     }
@@ -7059,8 +7468,14 @@ async function doGenerate() {
     saveStudio();
     st.busy = true; render();
     try {
-        st.result = await E.generate(studioParts());
+        const cast = studioCast();
+        if (cast.length) {
+            const p = C.studioCastPrompt(studioParts(), cast);
+            const ids = C.studioCastRefs(p.picks);
+            st.result = await E.generateFull({ ...studioParts(), positive: p.positive, negative: p.negative, chars: p.chars, director: ids.length ? await E.charRefs(ids) : null });
+        } else st.result = await E.generate(studioParts());
         st.sent = E.runtime.lastSent;
+        rememberScene();
         // 存起来（默认本地浏览器），记到历史生图里；关掉智库、刷新页面后也能找回来
         const shot = { dataUrl: st.result, raw: st.pos, sent: st.sent, from: 'studio' };
         pcStoreImage(shot.dataUrl, 'studio_' + Date.now()).then(r => pcRecordImage({ ...shot, url: r.url })).catch(e => console.warn('[智库] 历史生图没存上', e));
@@ -7824,6 +8239,11 @@ function addMesButtons() {
     DOC.querySelectorAll('#chat .mes').forEach(mes => {
         const box = mes.querySelector('.extraMesButtons') || mes.querySelector('.mes_buttons');
         if (!box || box.querySelector('.pc-mes-gen')) return;
+        const cm = DOC.createElement('div');
+        cm.className = 'mes_button pc-mes-comic fa-solid fa-book-open interactable';
+        cm.title = '智库：把这一楼画成漫画';
+        cm.tabIndex = 0;
+        box.prepend(cm);
         const o = DOC.createElement('div');
         o.className = 'mes_button pc-mes-outfit fa-solid fa-shirt interactable';
         o.title = '智库：按这一楼的剧情设计服装';
@@ -7845,6 +8265,15 @@ function onChatClick(ev) {
         ev.stopPropagation();
         const id = Number(o.closest('.mes')?.getAttribute('mesid'));
         if (Number.isFinite(id)) UI.openOutfitDesigner({ mesId: id });
+        return;
+    }
+    const cm = ev.target.closest?.('.pc-mes-comic');
+    if (cm) {
+        ev.stopPropagation();
+        const id = Number(cm.closest('.mes')?.getAttribute('mesid'));
+        if (!Number.isFinite(id)) return;
+        if (!N.isReady()) { toastr.warning('先到智库设置里填 NovelAI key', '智库 · 漫画'); return; }
+        void globalThis.__zhikuComic?.adapt(id);
         return;
     }
     const b = ev.target.closest?.('.pc-mes-gen');
@@ -7987,7 +8416,7 @@ async function start() {
 
     const onChat = () => { selectedImages.reset(); return setTimeout(() => { globalThis.__zhikuComic?.renderAll({ chatChanged: true }); UI.renderChip(); UI.renderStub(); E.applyBindingOnChatChange(); addMesButtons(); }, 300); };
     DOC.addEventListener('click', onChatClick, true);
-    cleanups.push(() => { DOC.removeEventListener('click', onChatClick, true); DOC.querySelectorAll('.pc-mes-gen, .pc-mes-outfit').forEach(n => n.remove()); });
+    cleanups.push(() => { DOC.removeEventListener('click', onChatClick, true); DOC.querySelectorAll('.pc-mes-gen, .pc-mes-outfit, .pc-mes-comic').forEach(n => n.remove()); });
     const onRendered = id => { setTimeout(addMesButtons, 50); };
     const onUserRendered = id => { onRendered(id); };
     const onEdited = id => { onRendered(id); };
@@ -8011,6 +8440,7 @@ async function start() {
         document: DOC, getContext: () => SillyTavern.getContext(), getData, commit: () => __mod_store.commit({ silent: true }), model: __mod_model,
         generatePage: req => N.generate({ ...req, comic: true }), storeImage: pcStoreImage, resolveUrl: u => pcLocal.url(u), dropImage: pcDropImage,
         recordImage: shot => pcRecordImage(shot), askLLM: (...a) => __mod_translate.askLLM(...a),
+        castText: () => __mod_chars.currentCast().filter(x => x.on || (x.char.appearance || []).length).map(x => `${x.char.name}：${__mod_chars.fixedTags(x.char) || '（还没写外貌，按正文描写画）'}`).join('\n'),
         notify: m => toastr.info(m, '智库 · 漫画', { timeOut: 1500 }), modal: UI.modal, esc: UI.esc,
     });
     globalThis.__zhikuComic = comic;
@@ -8091,6 +8521,7 @@ let ownCleanup = null;
 return {
     start,
     async stop() {
+        if (globalThis.__zhikuDl) { DOC.removeEventListener('click', globalThis.__zhikuDl, true); delete globalThis.__zhikuDl; }
         await __mod_store.flush();
         ownCleanup?.();
         while (cleanups.length) { try { cleanups.pop()?.(); } catch {} }

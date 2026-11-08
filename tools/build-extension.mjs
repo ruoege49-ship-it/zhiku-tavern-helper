@@ -11,8 +11,8 @@ process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.20';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.20');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.23';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.23');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -243,6 +243,7 @@ patch(tail,`let ownCleanup = null;
 return {
     start,
     async stop() {
+        if (globalThis.__zhikuDl) { DOC.removeEventListener('click', globalThis.__zhikuDl, true); delete globalThis.__zhikuDl; }
         await __mod_store.flush();
         ownCleanup?.();
         while (cleanups.length) { try { cleanups.pop()?.(); } catch {} }
@@ -366,7 +367,7 @@ function batchUnit(parts) {
     const text = parts.map(x => x.trim()).filter(Boolean).join(', ');
     if (!text) return null;
     const p = parseArtistString(text);
-    if (!p.members.length && !p.extra) return null;
+    if (!p.members.length) return null; // 一位画师都没有（只有 year 2025、detailed 这类词）的不算画师串
     if (p.members.length === 1 && !p.extra && Math.abs(p.members[0].weight - 1) < 0.001) return { tag: p.members[0].tag, weight: 1, key: artistKey(p.members[0].tag) };
     return { text, members: p.members, key: text.toLowerCase() };
 }
@@ -416,6 +417,360 @@ patch(`    d.recent = Array.isArray(d.recent) ? d.recent : [];
     return d;`,`    d.recent = Array.isArray(d.recent) ? d.recent : [];
     d.history = Array.isArray(d.history) ? d.history : [];
     return d;`);
+// ───── 生图页「入画角色」：从角色库选 user / char / 配角，一个人或几个人（分角色）一起画 ─────
+patch(`return { namesOf, castIn, markerPrompt,`,`/** 生图页选的入画角色 → 提示词。cast：[{ key, pos: 'L'|'C'|'R', outfit?: 衣服 id，'' = 不穿固定衣服 }] */
+const CAST_X = { L: 0.3, C: 0.5, R: 0.7 };
+function studioCastPick(e) {
+    const ch = getChar(e.key);
+    if (!ch) return null;
+    const out = e.outfit === '' ? null : (ch.outfits.find(o => o.id === e.outfit) || currentOutfit(ch));
+    return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', tags: [tagText(ch.appearance), tagText(out?.tags)].filter(Boolean).join(', '), x: CAST_X[e.pos] ?? 0.5 };
+}
+function studioCastPrompt({ pos = '', neg = '', scene = '' }, cast) {
+    const picks = (cast || []).map(studioCastPick).filter(Boolean);
+    if (!picks.length) return { ...E.composeStudio({ pos, neg, scene }), chars: [], picks };
+    const chars = picks.map(p => p.char);
+    const hasCount = /\\b(?:\\d+(?:boys?|girls?|others?)|no humans)\\b/i.test(pos);
+    const negAll = [neg, ...chars.map(c => c.negative)].filter(Boolean).join(', ');
+    if (picks.length === 1 || !canSplit()) {
+        const lead = picks.length === 1 ? 'solo' : (hasCount ? '' : countTags(chars));
+        return { ...E.composeStudio({ pos: M.mergeTags(pos, lead, ...picks.map(p => p.tags)), neg: negAll, scene }), chars: [], picks };
+    }
+    const r = E.composeStudio({ pos: M.mergeTags(hasCount ? '' : countTags(chars), pos), neg, scene });
+    return { ...r, chars: picks.map(p => ({ prompt: soloize(p.tags), uc: p.char.negative || '', center: { x: p.x, y: 0.5 } })), picks };
+}
+/** 入画角色绑的长相参考组 */
+function studioCastRefs(picks) {
+    const d = getData();
+    return [...new Set((picks || []).map(p => p.char.charRef).filter(id => id && d.charRefGroups?.[id]))];
+}
+
+return { studioCastPrompt, studioCastRefs, namesOf, castIn, markerPrompt,`);
+patch(`    st.sceneExpand = !!saved.sceneExpand;
+    st.loaded = true;`,`    st.sceneExpand = !!saved.sceneExpand;
+    st.cast = Array.isArray(saved.cast) ? saved.cast : [];
+    st.castByChat = saved.castByChat && typeof saved.castByChat === 'object' ? saved.castByChat : {};
+    st.castMemo = saved.castMemo !== false;
+    st.loaded = true;`);
+patch(`sceneSrc: st.sceneSrc || '', sceneExpand: !!st.sceneExpand };`,`sceneSrc: st.sceneSrc || '', sceneExpand: !!st.sceneExpand, cast: st.cast || [], castByChat: st.castByChat || {}, castMemo: st.castMemo !== false };`);
+patch(`function studioParts() {`,`const CAST_POS = { L: '左', C: '中', R: '右' };
+const castMemoOn = () => ui.studio.castMemo !== false;
+/** 生图页现在选的入画角色（开着「记住」时按聊天分开存） */
+function studioCast() {
+    const st = ui.studio;
+    st.cast ||= []; st.castByChat ||= {};
+    const list = castMemoOn() ? st.castByChat[C.chatId()] || [] : st.cast;
+    return list.filter(e => C.getChar(e.key));
+}
+function setStudioCast(list) {
+    const st = ui.studio;
+    if (castMemoOn()) st.castByChat[C.chatId()] = list; else st.cast = list;
+    saveStudio();
+}
+function castAv(c, cls = 'pc-castav') {
+    const u = c.kind === 'side' ? '' : C.avatarUrl(c);
+    const letter = esc(String(c.name || '?').slice(0, 1));
+    return u ? \`<img class="\${cls}" src="\${esc(u)}" alt="" onerror="this.outerHTML='<span class=&quot;\${cls}&quot;>\${letter}</span>'">\` : \`<span class="\${cls}">\${letter}</span>\`;
+}
+const CAST_CSS = \`<style>
+.pc-castmode{font-size:12px;color:var(--pc-ink-soft);background:var(--pc-paper);border-radius:12px;padding:9px 11px;line-height:1.6}
+.pc-castmode b{color:var(--pc-ink)}
+.pc-castrow{background:var(--pc-paper);border-radius:16px;padding:10px 12px;margin-top:8px}
+.pc-castrow-top{display:flex;align-items:center;gap:9px}
+.pc-castrow-top>b{flex:1;min-width:0;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pc-castav{flex:0 0 auto;width:30px;height:30px;border-radius:9px;object-fit:cover;background:var(--pc-gold);color:#fbf8f0;display:inline-grid;place-items:center;font-family:var(--pc-font-name);font-weight:700;font-size:14px}
+.pc-castseg{display:inline-flex !important;padding:2px;border-radius:10px;background:transparent;border:1.5px solid var(--pc-ink)}
+.pc-castseg button{min-height:26px !important;padding:0 9px;border-radius:7px !important;font-size:12px !important}
+.pc-castseg button.on{background:var(--pc-ink) !important;color:var(--pc-paper) !important}
+.pc-casttags{font-size:11.5px;line-height:1.55;color:var(--pc-ink-soft);margin-top:6px;word-break:break-word}
+.pc-castadd{width:100%;margin:9px 0 6px;min-height:42px;border:1.5px dashed var(--pc-dash);border-radius:14px;background:transparent;font-family:var(--pc-font);font-size:14px;color:var(--pc-ink);cursor:pointer}
+.pc-castsec{font-size:11px;letter-spacing:.3em;color:var(--pc-ink-soft);margin:10px 0 4px}
+.pc-castgrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.pc-castpick{position:relative;min-width:0;border:1.5px dashed var(--pc-dash);border-radius:16px;background:transparent;padding:9px 4px 7px;text-align:center;cursor:pointer;font-family:var(--pc-font);color:var(--pc-ink);display:flex;flex-direction:column;align-items:center;gap:2px}
+.pc-castpick.on{border:1.5px solid var(--pc-ink);background:var(--pc-paper-2)}
+.pc-castpick .pc-castbig{width:46px;height:46px;border-radius:14px;object-fit:cover;background:var(--pc-gold);color:#fbf8f0;display:grid;place-items:center;font-family:var(--pc-font-name);font-weight:700;font-size:18px;margin-bottom:3px}
+.pc-castpick b{max-width:100%;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pc-castpick small{font-size:10px;letter-spacing:.08em;color:var(--pc-ink-soft)}
+.pc-castpick small.warn{color:#a8582c}.pc-castpick small.ref{color:#5f7a52}
+.pc-castnum{position:absolute;top:-7px;right:-5px;width:22px;height:22px;border-radius:7px;background:var(--pc-ink);color:var(--pc-paper);font-size:12px;display:grid;place-items:center;transform:rotate(6deg)}
+</style>\`;
+function castFold() {
+    const d = getData();
+    const list = studioCast().map(e => ({ e, c: C.getChar(e.key) }));
+    const n = list.length, split = C.canSplit();
+    const mode = n === 0 ? '<b>不选人：</b>就按上面的提示词画，跟以前一样。'
+        : n === 1 ? '<b>单人：</b>把这个人的外貌、衣服接在提示词后面（加 solo）。'
+        : split ? \`<b>\${n} 人：</b>每个人的外貌单独发给 NAI（分角色），发色瞳色不会串到别人身上；人数词自动补上。\`
+        : \`<b>\${n} 人：</b>现在的模型或通道（V3 / 酒馆里的 key）不能分角色，几个人的外貌会按顺序接在一起，容易串色。\`;
+    const rows = list.map(({ e, c }) => {
+        const look = C.tagText(c.appearance);
+        const ref = c.charRef && d.charRefGroups?.[c.charRef];
+        const fitOn = id => e.outfit === undefined ? C.currentOutfit(c)?.id === id : e.outfit === id;
+        const k = esc(e.key);
+        return \`<div class="pc-castrow"><div class="pc-castrow-top">\${castAv(c)}<b>\${esc(c.name)}</b>
+            \${n > 1 && split ? \`<span class="pc-seg pc-castseg">\${['L', 'C', 'R'].map(v => \`<button class="\${(e.pos || 'C') === v ? 'on' : ''}" data-act="castpos" data-key="\${k}" data-v="\${v}">\${CAST_POS[v]}</button>\`).join('')}</span>\` : ''}
+            <button class="pc-x" data-act="castrm" data-key="\${k}" aria-label="不画\${esc(c.name)}">×</button></div>
+          <div class="pc-casttags mono">\${look ? esc(look) : '这个角色还没写外貌：去「角色」页写一下，或者在提示词里自己写'}</div>
+          \${c.outfits.length ? \`<div class="pc-chips wrap">\${c.outfits.map(o => \`<button class="pc-pill tiny \${fitOn(o.id) ? 'on' : 'dashed'}" data-act="castfit" data-key="\${k}" data-id="\${esc(o.id)}">\${esc(o.name)}</button>\`).join('')}<button class="pc-pill tiny \${e.outfit === '' ? 'on' : 'dashed'}" data-act="castfit" data-key="\${k}" data-id="">不穿固定衣服</button></div>\` : ''}
+          \${ref ? \`<div class="pc-dim small" style="margin-top:6px">带上长相参考「\${esc(ref.name)}」\${N.charRefSupported() ? '' : '（现在的模型用不了，这次不带）'}</div>\` : ''}</div>\`;
+    }).join('');
+    return CAST_CSS + fold('cast', '入画角色', n ? list.map(x => x.c.name).join('、') : '不画指定的人', \`
+      <div class="pc-castmode">\${mode}</div>\${rows}
+      <button class="pc-castadd" data-act="castopen">＋ 从角色库里选人</button>
+      <label class="pc-switch"><input type="checkbox" data-cast-memo \${castMemoOn() ? 'checked' : ''}><span></span>记住这次聊天选的人<small>下次打开同一个聊天，自动选好</small></label>\`);
+}
+function openCastPicker() {
+    const d = getData();
+    DOC.querySelector('.pc-sheet-backdrop')?.remove();
+    const back = DOC.createElement('div');
+    back.className = 'pc-sheet-backdrop fresh'; setTimeout(() => back.classList.remove('fresh'), 400);
+    const openedAt = Date.now();
+    pcMount(back);
+    const here = C.currentCast().map(x => x.char);
+    const hereKeys = new Set(here.map(c => c.key));
+    const others = Object.values(d.characters || {}).filter(c => c?.key && !hereKeys.has(c.key));
+    const KIND = { user: 'USER', char: 'CHAR', side: '配角', free: '自建' };
+    const card = c => {
+        const i = studioCast().findIndex(e => e.key === c.key);
+        const ref = c.charRef && d.charRefGroups?.[c.charRef];
+        const look = (c.appearance || []).length;
+        return \`<button class="pc-castpick \${i >= 0 ? 'on' : ''}" data-key="\${esc(c.key)}">\${i >= 0 ? \`<span class="pc-castnum">\${i + 1}</span>\` : ''}\${castAv(c, 'pc-castbig')}<b>\${esc(c.name)}</b><small class="\${look ? '' : 'warn'}">\${look ? KIND[c.kind] || '角色' : '没写外貌'}</small>\${ref ? '<small class="ref">参考图</small>' : ''}</button>\`;
+    };
+    const close = () => { back.remove(); render(); };
+    const draw = () => {
+        back.innerHTML = CAST_CSS + \`<section class="pc-sheet" role="dialog" aria-label="选入画角色"><div class="pc-sheet-grip" aria-hidden="true"></div>
+          <div class="pc-row-between"><h3 class="pc-h3" style="margin:0">选入画角色</h3><button class="pc-icon-btn" data-c="close" aria-label="关闭">\${ICON.close}</button></div>
+          <div class="pc-dim small">点头像选上 / 取消，数字是入画顺序。可以只选一个人，也可以选几个人。</div>
+          <div class="pc-castsec">这次聊天</div><div class="pc-castgrid">\${here.map(card).join('') || '<div class="pc-dim small">这次聊天里没有角色</div>'}</div>
+          \${others.length ? \`<div class="pc-castsec">角色库里的其他人</div><div class="pc-castgrid">\${others.map(card).join('')}</div>\` : ''}
+          <button class="pc-btn dark big pc-mt" data-c="close">好了</button></section>\`;
+    };
+    back.addEventListener('click', ev => {
+        if (ev.target === back) { if (Date.now() - openedAt > 400) close(); return; }
+        if (ev.target.closest('[data-c="close"]')) { close(); return; }
+        const b = ev.target.closest('.pc-castpick');
+        if (!b) return;
+        const list = studioCast().slice();
+        const i = list.findIndex(e => e.key === b.dataset.key);
+        if (i >= 0) list.splice(i, 1);
+        else {
+            const used = new Set(list.map(e => e.pos));
+            list.push({ key: b.dataset.key, pos: ['L', 'R', 'C'].find(p => !used.has(p)) || 'C' });
+        }
+        setStudioCast(list);
+        draw();
+    });
+    draw();
+}
+function studioParts() {`);
+// 生图页里放进「入画角色」折叠
+patch(`      <textarea id="pc-neg" class="pc-textarea small mono" data-bind="studio.neg" placeholder="不想出现的东西，比如 1girl, text">\${esc(st.neg)}</textarea>`,`      <textarea id="pc-neg" class="pc-textarea small mono" data-bind="studio.neg" placeholder="不想出现的东西，比如 1girl, text">\${esc(st.neg)}</textarea>
+      <div class="pc-mt-s">\${castFold()}</div>`);
+// 预览带上入画角色
+patch(`function previewHtml(s) {
+    const c = E.composeStudio(studioParts(), s);`,`function previewHtml(s) {
+    const cast = studioCast();
+    const c = cast.length ? C.studioCastPrompt(studioParts(), cast) : E.composeStudio(studioParts(), s);
+    const charLines = (c.chars || []).map((x, i) => \`<br><b>角色\${i + 1}（\${CAST_POS[c.picks[i].pos]}）</b>：\${esc(x.prompt)}\`).join('');`);
+patch(`    return { pos: esc(c.positive) + (wait ?`,`    return { pos: esc(c.positive) + charLines + (wait ?`);
+// 生成：选了人就按分角色发，带上他们的长相参考
+patch(`        st.result = await E.generate(studioParts());
+        st.sent = E.runtime.lastSent;`,`        const cast = studioCast();
+        if (cast.length) {
+            const p = C.studioCastPrompt(studioParts(), cast);
+            const ids = C.studioCastRefs(p.picks);
+            st.result = await E.generateFull({ ...studioParts(), positive: p.positive, negative: p.negative, chars: p.chars, director: ids.length ? await E.charRefs(ids) : null });
+        } else st.result = await E.generate(studioParts());
+        st.sent = E.runtime.lastSent;`);
+patch(`            case 'generate': await doGenerate(); break;`,`            case 'generate': await doGenerate(); break;
+            case 'castopen': openCastPicker(); break;
+            case 'castrm': setStudioCast(studioCast().filter(e => e.key !== el.dataset.key)); render(); break;
+            case 'castpos': setStudioCast(studioCast().map(e => e.key === el.dataset.key ? { ...e, pos: el.dataset.v } : e)); render(); break;
+            case 'castfit': setStudioCast(studioCast().map(e => e.key === el.dataset.key ? { ...e, outfit: el.dataset.id } : e)); render(); break;`);
+patch(`    if (el.dataset.sceneOn !== undefined) {`,`    if (el.dataset.castMemo !== undefined) {
+        const st = ui.studio, list = studioCast();
+        st.castMemo = el.checked;
+        if (el.checked) st.castByChat[C.chatId()] = list; else st.cast = list;
+        saveStudio(); render(); return;
+    }
+    if (el.dataset.sceneOn !== undefined) {`);
+patch(`    if (!st.pos.trim()) { toastr.warning('正面提示词是空的', '生成图片'); return; }`,`    if (!st.pos.trim() && !studioCast().length) { toastr.warning('正面提示词是空的', '生成图片'); return; }`);
+// 中转站兼容：有的第三方站点不认分角色（char_captions / 坐标）和角色参考，聊天里出图变成满屏噪点。打开后合成一段发
+patch(`async function generateRequest(opts) {
+    const s = settings();`,`async function generateRequest(opts) {
+    const s = settings();
+    if (!opts.comic && s.naiMode === 'site' && String(s.naiSiteSimple) === 'true') {
+        const cs = opts.chars || [];
+        opts = {
+            ...opts, chars: [], director: null,
+            positive: cs.length ? [opts.positive, ...cs.map(c => c.prompt)].filter(Boolean).join(', ') : opts.positive,
+            negative: cs.length ? [opts.negative, ...cs.map(c => c.uc)].filter(Boolean).join(', ') : opts.negative,
+        };
+    }`);
+patch(`      <label class="pc-field"><span>站点给的 key</span><input data-st="naiSiteKey" type="password" value="\${esc(n.naiSiteKey)}"></label>\` : ''}`,`      <label class="pc-field"><span>站点给的 key</span><input data-st="naiSiteKey" type="password" value="\${esc(n.naiSiteKey)}"></label>
+      <label class="pc-switch"><input type="checkbox" data-st-check="naiSiteSimple" \${String(n.naiSiteSimple) === 'true' ? 'checked' : ''}><span></span>中转站兼容模式<small>生图页正常、聊天里出图却是满屏噪点 / 乱码图时打开：几个人的外貌合成一段发，不带长相参考图（有些中转站不支持分角色和角色参考）。漫画不受影响。</small></label>\` : ''}`);
+// ───── 固定提示词可以存多段：起名存下、最近用过自动记，点一下换上 ─────
+patch(`    st.castMemo = saved.castMemo !== false;
+    st.loaded = true;`,`    st.castMemo = saved.castMemo !== false;
+    st.scenes = Array.isArray(saved.scenes) ? saved.scenes : [];
+    st.recentScenes = Array.isArray(saved.recentScenes) ? saved.recentScenes : [];
+    st.loaded = true;`);
+patch(`castMemo: st.castMemo !== false };`,`castMemo: st.castMemo !== false, scenes: st.scenes || [], recentScenes: st.recentScenes || [] };`);
+patch(`function studioParts() {`,`/** 现在的固定提示词 */
+function sceneSnapshot() {
+    const st = ui.studio;
+    return { scene: String(st.scene || '').trim(), sceneEn: st.sceneEn || '', sceneSrc: st.sceneSrc || '', at: Date.now() };
+}
+const sceneSig = p => String(p.scene || '').toLowerCase().replace(/[\\s，,]+/g, ',');
+const sceneName = text => String(text || '').split(/[,，\\n]/).map(s => s.trim()).filter(s => s && !/quality|masterpiece|highres|absurdres|detailed/i.test(s)).slice(0, 3).join(', ').slice(0, 24);
+function rememberScene() {
+    const st = ui.studio, p = sceneSnapshot();
+    if (st.sceneOn === false || !p.scene) return;
+    const sig = sceneSig(p);
+    if ((st.scenes || []).some(x => sceneSig(x) === sig)) return; // 已经存下的就不再记
+    st.recentScenes = [p, ...(st.recentScenes || []).filter(x => sceneSig(x) !== sig)].slice(0, 20);
+    saveStudio();
+}
+function applyScene(p) {
+    const st = ui.studio;
+    st.scene = p.scene || ''; st.sceneEn = p.sceneEn || ''; st.sceneSrc = p.sceneSrc || '';
+    st.sceneOn = true;
+    saveStudio();
+}
+function sceneRow(p, i, kind) {
+    const cur = sceneSig(p) === sceneSig(sceneSnapshot());
+    const title = kind === 'saved' ? p.name || '没起名' : new Date(p.at).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+    return \`<div class="pc-promptrow \${cur ? 'cur' : ''}">
+      <div class="pc-grow"><b>\${esc(title)}\${cur ? ' <em>在用</em>' : ''}</b><small class="mono">\${esc(p.scene)}</small></div>
+      <div class="pc-promptacts">\${cur ? '' : \`<button class="pc-pill tiny on" data-act="sceneuse" data-kind="\${kind}" data-i="\${i}">换上</button>\`}
+        \${kind === 'recent' ? \`<button class="pc-pill tiny dashed" data-act="scenekeep" data-i="\${i}">存下</button>\` : \`<button class="pc-pill tiny dashed" data-act="scenerename" data-i="\${i}">改名</button>\`}
+        <button class="pc-x" data-act="scenedel" data-kind="\${kind}" data-i="\${i}" aria-label="删掉">×</button></div></div>\`;
+}
+function sceneLibrary() {
+    const st = ui.studio;
+    const saved = st.scenes || [], recent = st.recentScenes || [];
+    return \`<style>
+.pc-promptrow{display:flex;gap:8px;align-items:flex-start;background:var(--pc-paper-2);border-radius:14px;padding:9px 10px;margin-top:7px}
+.pc-promptrow.cur{box-shadow:inset 0 0 0 1.5px var(--pc-ink)}
+.pc-promptrow b{display:block;font-size:14px}
+.pc-promptrow b em{font-style:normal;font-size:11px;font-weight:400;color:var(--pc-ink-soft);margin-left:4px}
+.pc-promptrow small{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:11.5px;line-height:1.5;color:var(--pc-ink-soft);word-break:break-word}
+.pc-promptacts{display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end;align-items:center;max-width:132px}
+.pc-promptsec{font-size:11px;letter-spacing:.3em;color:var(--pc-ink-soft);margin:12px 0 0}
+.pc-recent-scenes>summary{cursor:pointer;font-size:12px;color:var(--pc-ink-soft);margin-top:12px;list-style:none}
+.pc-recent-scenes>summary::-webkit-details-marker{display:none}
+</style>
+      <div class="pc-actions wrap" style="margin-top:8px"><button class="pc-pill dashed" data-act="scenesave">＋ 存下这段</button></div>
+      \${saved.length ? '<div class="pc-promptsec">存下的固定提示词</div>' + saved.map((p, i) => sceneRow(p, i, 'saved')).join('') : ''}
+      \${recent.length ? \`<details class="pc-recent-scenes" \${ui.studio.open.recentScenes ? 'open' : ''} data-fold="recentScenes"><summary>最近用过 \${recent.length} 条（生成时自动记）▸</summary>\${recent.map((p, i) => sceneRow(p, i, 'recent')).join('')}<div class="pc-actions" style="margin-top:6px"><button class="pc-pill tiny dashed" data-act="sceneclear">清空最近</button></div></details>\` : ''}\`;
+}
+function studioParts() {`);
+patch(`placeholder="中文英文都行。比如：坐在窗边喝咖啡，外面下雨 / 1boy, sitting, window, rain">\${esc(st.scene || '')}</textarea>`,`placeholder="中文英文都行。比如：坐在窗边喝咖啡，外面下雨 / 1boy, sitting, window, rain">\${esc(st.scene || '')}</textarea>
+      \${sceneLibrary()}`);
+patch(`        } else st.result = await E.generate(studioParts());
+        st.sent = E.runtime.lastSent;`,`        } else st.result = await E.generate(studioParts());
+        st.sent = E.runtime.lastSent;
+        rememberScene();`);
+patch(`            case 'castopen': openCastPicker(); break;`,`            case 'castopen': openCastPicker(); break;
+            case 'scenesave': {
+                const p = sceneSnapshot();
+                if (!p.scene) { toastr.info('固定提示词还是空的', '固定提示词'); break; }
+                if ((ui.studio.scenes || []).some(x => sceneSig(x) === sceneSig(p))) { toastr.info('这段已经存过了', '固定提示词'); break; }
+                const name = await promptText('给这段固定提示词起个名字', sceneName(p.scene));
+                if (name == null) break;
+                ui.studio.scenes = [{ ...p, name: name.trim() || '没起名' }, ...(ui.studio.scenes || [])];
+                ui.studio.recentScenes = (ui.studio.recentScenes || []).filter(x => sceneSig(x) !== sceneSig(p));
+                saveStudio(); toastr.success('存好了', '固定提示词', { timeOut: 1500 }); render(); break;
+            }
+            case 'sceneuse': {
+                const p = (el.dataset.kind === 'saved' ? ui.studio.scenes : ui.studio.recentScenes)?.[Number(el.dataset.i)];
+                if (!p) break;
+                const cur = sceneSnapshot();
+                // 现在这段没存过，换掉前先记进「最近用过」，免得丢
+                if (cur.scene && ![...(ui.studio.scenes || []), ...(ui.studio.recentScenes || [])].some(x => sceneSig(x) === sceneSig(cur))) ui.studio.recentScenes = [cur, ...(ui.studio.recentScenes || [])].slice(0, 20);
+                applyScene(p);
+                toastr.info(\`固定提示词换成了\${p.name ? '「' + p.name + '」' : '这一段'}\`, '固定提示词', { timeOut: 1800 }); render(); break;
+            }
+            case 'scenekeep': {
+                const list = ui.studio.recentScenes || [];
+                const p = list[Number(el.dataset.i)];
+                if (!p) break;
+                const name = await promptText('给这段固定提示词起个名字', sceneName(p.scene));
+                if (name == null) break;
+                ui.studio.scenes = [{ ...p, name: name.trim() || '没起名' }, ...(ui.studio.scenes || [])];
+                ui.studio.recentScenes = list.filter(x => x !== p);
+                saveStudio(); render(); break;
+            }
+            case 'scenerename': {
+                const p = ui.studio.scenes?.[Number(el.dataset.i)];
+                if (!p) break;
+                const name = await promptText('改名', p.name || '');
+                if (name == null) break;
+                p.name = name.trim() || p.name; saveStudio(); render(); break;
+            }
+            case 'scenedel': {
+                const key = el.dataset.kind === 'saved' ? 'scenes' : 'recentScenes';
+                const list = (ui.studio[key] || []).slice();
+                const [gone] = list.splice(Number(el.dataset.i), 1);
+                if (el.dataset.kind === 'saved' && gone && !(await confirmBox(\`删掉「\${gone.name || '没起名'}」？现在框里的固定提示词不受影响。\`, { ok: '删除', cancel: '算了' }))) break;
+                ui.studio[key] = list; saveStudio(); render(); break;
+            }
+            case 'sceneclear': {
+                if (!(await confirmBox('清空最近用过的固定提示词？存下的不受影响。', { ok: '清空', cancel: '算了' }))) break;
+                ui.studio.recentScenes = []; saveStudio(); render(); break;
+            }`);
+// 漫画：楼层按钮「画成漫画」——没用漫画台预设也能把已有的楼层改编成漫画
+patch(`recordImage: shot => pcRecordImage(shot), askLLM: (...a) => __mod_translate.askLLM(...a),`,`recordImage: shot => pcRecordImage(shot), askLLM: (...a) => __mod_translate.askLLM(...a),
+        castText: () => __mod_chars.currentCast().filter(x => x.on || (x.char.appearance || []).length).map(x => \`\${x.char.name}：\${__mod_chars.fixedTags(x.char) || '（还没写外貌，按正文描写画）'}\`).join('\\n'),`);
+patch(`        if (!box || box.querySelector('.pc-mes-gen')) return;`,`        if (!box || box.querySelector('.pc-mes-gen')) return;
+        const cm = DOC.createElement('div');
+        cm.className = 'mes_button pc-mes-comic fa-solid fa-book-open interactable';
+        cm.title = '智库：把这一楼画成漫画';
+        cm.tabIndex = 0;
+        box.prepend(cm);`);
+patch(`    const b = ev.target.closest?.('.pc-mes-gen');`,`    const cm = ev.target.closest?.('.pc-mes-comic');
+    if (cm) {
+        ev.stopPropagation();
+        const id = Number(cm.closest('.mes')?.getAttribute('mesid'));
+        if (!Number.isFinite(id)) return;
+        if (!N.isReady()) { toastr.warning('先到智库设置里填 NovelAI key', '智库 · 漫画'); return; }
+        void globalThis.__zhikuComic?.adapt(id);
+        return;
+    }
+    const b = ev.target.closest?.('.pc-mes-gen');`);
+// 画师库里混进来的「year 2025」「detailed」这类不是画师的条目：没例图的自动清掉
+patch("    const fake = a => a && (NOT_ARTIST.test(a.tag.replace(/^artist:/i, '').trim()) || /[<>]/.test(a.tag));","    const fake = a => a && (NOT_ARTIST.test(a.tag.replace(/^artist:/i, '').trim()) || /^(?:(?:ultra|very|highly|extremely|hyper)[ _-]?)?detailed$|^(?:illustration|anime(?: style)?|best|quality)$/i.test(a.tag.replace(/^artist:/i, '').trim()) || /[<>]/.test(a.tag));");
+patch(`    d.history = Array.isArray(d.history) ? d.history : [];
+    return d;`,`    d.history = Array.isArray(d.history) ? d.history : [];
+    // 一位画师都没有、也没有例图的画师串（批量时把画风词误当成一串）删掉
+    for (const g of Object.values(d.groups)) {
+        if (g.members.length || g.images.length) continue;
+        delete d.groups[g.id];
+        if (d.active?.type === 'group' && d.active.id === g.id) d.active = null;
+    }
+    d.recent = d.recent.filter(r => r.type !== 'group' || d.groups[r.id]);
+    return d;`);
+// 下载成功提醒：智库里所有下载（看大图、生图结果、历史生图、漫画、导出数据）
+patch(`download.download='image.png';`,`download.download='zhiku_'+Date.now()+'.png';`);
+patch(`function updateStudioPreview() {`,`/** 点了智库的下载链接后提示一下；连着下好几张的合成一条 */
+let dlCount = 0, dlTimer = null, dlLast = '';
+function onDownloadClick(ev) {
+    const a = ev.target?.closest?.('a[download]');
+    if (!a || !a.getAttribute('href')) return;
+    const name = a.getAttribute('download') || '';
+    if (!/^(zhiku|piaoce|漫画|画师库)/.test(name)) return;
+    dlCount++; dlLast = name;
+    clearTimeout(dlTimer);
+    dlTimer = setTimeout(() => {
+        const json = /\\.json$/i.test(dlLast);
+        toastr.success(dlCount > 1 ? \`已发起 \${dlCount} 项下载，请在浏览器的「下载」里查看\` : \`\${json ? '数据' : '图片'}已发起下载：\${dlLast}\`, '智库', { timeOut: 2500 });
+        dlCount = 0;
+    }, 700);
+}
+if (globalThis.__zhikuDl) DOC.removeEventListener('click', globalThis.__zhikuDl, true);
+globalThis.__zhikuDl = onDownloadClick;
+DOC.addEventListener('click', onDownloadClick, true);
+function updateStudioPreview() {`);
 // 提示词体检：多出来的 ::、权重前面混进的下划线、没关上的权重、SD 括号权重
 patch(`function banWarn(d, str) {`,`/** 找出会让 NovelAI 把后面一大段都按错权重读的写法；fixed 是能自动改好的版本 */
 function lintPrompt(text) {
@@ -469,6 +824,12 @@ patch("${sw('markerAuto', '开启标记自动生图', '默认开启 · 回复出
     "${sw('markerAuto', '开启标记自动生图', '默认开启 · 回复出现完整生图标记时自动生成，提示词默认折叠')}${sw('imageExpanded', '图片默认展开', '开启：默认展开；关闭：默认折叠。立即应用到当前图片，并记住选择。')}");
 patch('if (el.dataset.opt) { d.options[el.dataset.opt] = el.checked; commit(); return; }',
     "if (el.dataset.opt) { d.options[el.dataset.opt] = el.checked; if (el.dataset.opt === 'imageExpanded') __mod_marker.applyImageDefault(); commit(); return; }");
+// Keep compatibility preview/reference loading and lifecycle cleanup aligned with the request.
+patch("function canSplit() {\n    const s = N.settings();\n    return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3';", "function canSplit() {\n    const s = N.settings();\n    return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3' && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');");
+patch("return s.naiMode !== 'tavern' && s.novelaimode.includes('4-5');", "return s.naiMode !== 'tavern' && s.novelaimode.includes('4-5') && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');");
+patch("        model,\n    };", "        model,\n        director: params.director_reference_images_cached?.length || 0,\n    };");
+patch("director: opts.director?.length || 0 };", "director: r.sent.director ?? (opts.director?.length || 0) };");
+patch(".pc-mes-gen, .pc-mes-outfit", ".pc-mes-gen, .pc-mes-outfit, .pc-mes-comic");
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
@@ -482,9 +843,9 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',prefix+s+'\n}\n');
 fs.copyFileSync('src/index.js',dir+'/index.js');
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.20',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.20',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.23',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.23',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.8.20 built; storage keys and shared upload preserved.');
+console.log('Extension 0.8.23 built; storage keys and shared upload preserved.');
