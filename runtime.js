@@ -1562,7 +1562,7 @@ function imageInsertionPoint(text, sentence) {
     return last.start + last.text.trimEnd().length;
 }
 
-// 智库 · 原生扩展版 v0.8.34（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.35（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1580,7 +1580,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.34';
+globalThis.__PC_VERSION = '0.8.35';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -3356,8 +3356,19 @@ async function aiMessages(fn, system, userContent) {
     if (!out.includes(core[0])) out.push(...core);
     return out;
 }
+/** 这个功能用哪个 AI：功能里单独选了就用它，没选跟「翻译和 AI」 */
+function apiFor(fn) {
+    const f = fn ? aiCfg().fn[fn] : null;
+    const id = f?.api || '';
+    if (!id) return currentApi();
+    if (id === 'st') return { st: true, from: '酒馆现在连接的 API' };
+    const p = apiProfiles().find(x => x.id === id);
+    if (!p) return currentApi();
+    const model = String(f.model || '').trim() || (p.model || '').trim();
+    return { url: (p.url || '').trim().replace(/\/+$/, ''), key: (p.key || '').trim(), model, bypass: !!p.bypass, from: p.name + (f.model ? ' · ' + f.model : '') };
+}
 async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {
-    const api = currentApi();
+    const api = apiFor(fn);
     const messages = await aiMessages(fn, system, user);
     let res;
     if (api.st) {
@@ -3599,7 +3610,7 @@ ${PAIRS}
 
 /** 让 AI 看一张图（要能看图的模型）。imageDataUrl 是 data:image/... */
 async function askVision(system, text, imageDataUrl, { maxTokens = 800, fn = '' } = {}) {
-    const api = currentApi();
+    const api = apiFor(fn);
     const messages = await aiMessages(fn, system, [{ type: 'text', text }, { type: 'image_url', image_url: { url: imageDataUrl } }]);
     let body;
     if (api.st) {
@@ -3704,7 +3715,7 @@ ${PAIRS}
     if (!pose.length && !composition.length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
     return { pose, composition };
 }
-return { AI_FNS, aiSeen, aiCfg, splitFormat, stToEntries, tavernPresets, entriesFor, currentTavernPreset, imagePose, imageToPrompt, zhForTags, extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
+return { AI_FNS, apiFor, aiSeen, aiCfg, splitFormat, stToEntries, tavernPresets, entriesFor, currentTavernPreset, imagePose, imageToPrompt, zhForTags, extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
 })();
 
 // ───── chars.js ─────
@@ -7328,6 +7339,15 @@ async function onClick(ev, outside = false) {
                 commit(); render(); break;
             }
             case 'aipfn': ui.aipOpen = ui.aipOpen === el.dataset.k ? '' : el.dataset.k; render(); break;
+            case 'aipmodels': {
+                const k = el.dataset.k, f = T.aiCfg().fn[k], p = T.apiProfiles().find(x => x.id === f?.api);
+                if (!p) break;
+                ui.aipModelsBusy = k; render();
+                try { (ui.aipModels ||= {})[k] = await T.listModels(p); if (!ui.aipModels[k].length) toastr.info('这个接口没列出模型，自己填名字也行', 'AI 预设'); }
+                catch (e) { toastr.error(e.message || String(e), '拉取模型失败'); }
+                ui.aipModelsBusy = ''; render(); break;
+            }
+            case 'aipmodelpick': { const f = (T.aiCfg().fn[el.dataset.k] ||= { extra: [] }); f.model = f.model === el.dataset.m ? '' : el.dataset.m; commit(); render(); break; }
             case 'aipseen': { const s = T.aiSeen[el.dataset.k]; if (!s) break; modal(`<h3 class="pc-h3">${el.dataset.w === 'fmt' ? '输出格式（只能看）' : '内置指令'}</h3><textarea class="pc-textarea mono" readonly style="min-height:260px">${esc(el.dataset.w === 'fmt' ? s.fmt : s.main)}</textarea>`); break; }
             case 'aipxadd': {
                 const t = await promptText('加一条要求，比如「多写镜头和光影」「不要写 NSFW」', '', true);
@@ -7733,6 +7753,8 @@ async function onChangeEv(ev) {
     const el = ev.target;
     const d = getData();
     if (el.matches?.('[data-aipst]')) { T.aiCfg().active = 'tavern:' + el.value; commit(); render(); return; }
+    if (el.matches?.('[data-aipapi]')) { const f = (T.aiCfg().fn[el.dataset.k] ||= { extra: [] }); f.api = el.value; if (!el.value || el.value === 'st') f.model = ''; commit(); render(); return; }
+    if (el.matches?.('[data-aipmodel]')) { const f = (T.aiCfg().fn[el.dataset.k] ||= { extra: [] }); f.model = el.value.trim(); commit(); return; }
     if (el.dataset.castMemo !== undefined) {
         const st = ui.studio, list = studioCast();
         st.castMemo = el.checked;
@@ -8250,8 +8272,15 @@ function viewAiPreset(d) {
     const fnRows = T.AI_FNS.map(([k, n, where]) => {
         const f = cfg.fn[k] || { extra: [] }, extra = f.extra || [], seen = T.aiSeen[k];
         const open = ui.aipOpen === k;
-        return `<div class="pc-aifn ${open ? 'open' : ''}"><button class="pc-aifn-h" data-act="aipfn" data-k="${k}"><span class="pc-grow"><b>${esc(n)}</b><small>${esc(where)}${extra.length ? ` · 加了 ${extra.length} 条要求` : ''}</small></span><span>${open ? '⌄' : '›'}</span></button>
-          ${open ? `<div class="pc-aient"><span class="pc-airole tag">内置</span><div class="pc-grow"><b>指令</b><small>${seen ? esc(seen.main.slice(0, 80)) : '这次打开酒馆后还没用过，用一次就能看到'}</small></div>${seen ? `<button class="pc-aiib" data-act="aipseen" data-k="${k}" data-w="main">看</button>` : ''}</div>
+        const profiles = T.apiProfiles(), apiId = f.api || '', prof = profiles.find(p => p.id === apiId);
+        const apiName = !apiId ? '' : apiId === 'st' ? '酒馆现在连接的' : prof ? prof.name + (f.model ? ' · ' + f.model : '') : '';
+        const models = ui.aipModels?.[k] || [];
+        const apiPick = `<div class="pc-aiapi"><label class="pc-field"><span>用哪个 AI</span><select class="pc-input" data-aipapi data-k="${k}"><option value="">跟「翻译和 AI」一样（现在：${esc(T.currentApi().from || '')}）</option><option value="st" ${apiId === 'st' ? 'selected' : ''}>酒馆现在连接的 API</option>${profiles.map(p => `<option value="${esc(p.id)}" ${apiId === p.id ? 'selected' : ''}>${esc(p.name || p.url)}${p.model ? ' · ' + esc(p.model) : ''}</option>`).join('')}</select></label>
+            ${prof ? `<label class="pc-field"><span>模型（不填就用这个接口里选的${prof.model ? '：' + esc(prof.model) : ''}）</span><span class="pc-row" style="gap:6px"><input class="pc-input" data-aipmodel data-k="${k}" list="pc-aipm-${k}" value="${esc(f.model || '')}" placeholder="${esc(prof.model || '比如 gpt-4o-mini')}"><button class="pc-btn" data-act="aipmodels" data-k="${k}">${ui.aipModelsBusy === k ? '…' : '拉取'}</button></span><datalist id="pc-aipm-${k}">${models.map(m => `<option value="${esc(m)}">`).join('')}</datalist></label>${models.length ? `<div class="pc-chips wrap">${models.slice(0, 30).map(m => `<button class="pc-pill tiny ${f.model === m ? 'on' : 'dashed'}" data-act="aipmodelpick" data-k="${k}" data-m="${esc(m)}">${esc(m)}</button>`).join('')}</div>` : ''}` : ''}
+            ${!profiles.length ? '<div class="pc-hint">想给这个功能单独配一个 API，先到「设置 → 翻译和 AI」里点「＋」加一个接口。</div>' : ''}
+            ${k === 'img' || k === 'pose' ? '<div class="pc-hint">这个功能要看图，选能识图的模型（比如 GPT-4o、Claude、Gemini）。</div>' : ''}</div>`;
+        return `<div class="pc-aifn ${open ? 'open' : ''}"><button class="pc-aifn-h" data-act="aipfn" data-k="${k}"><span class="pc-grow"><b>${esc(n)}</b><small>${esc(where)}${apiName ? ' · 用 ' + esc(apiName) : ''}${extra.length ? ` · 加了 ${extra.length} 条要求` : ''}</small></span><span>${open ? '⌄' : '›'}</span></button>
+          ${open ? apiPick + `<div class="pc-aient"><span class="pc-airole tag">内置</span><div class="pc-grow"><b>指令</b><small>${seen ? esc(seen.main.slice(0, 80)) : '这次打开酒馆后还没用过，用一次就能看到'}</small></div>${seen ? `<button class="pc-aiib" data-act="aipseen" data-k="${k}" data-w="main">看</button>` : ''}</div>
             ${seen?.fmt ? `<div class="pc-aient"><span class="pc-airole tag">🔒</span><div class="pc-grow"><b>输出格式</b><small>插件要按这个读 AI 的回复，只能看</small></div><button class="pc-aiib" data-act="aipseen" data-k="${k}" data-w="fmt">看</button></div>` : ''}
             ${extra.map((x, i) => `<div class="pc-aient ${x.on === false ? 'off' : ''}"><span class="pc-airole tag">我的</span><div class="pc-grow"><b>${esc(x.n || '要求 ' + (i + 1))}</b><small>${esc(x.t)}</small></div><button class="pc-aisw ${x.on !== false ? 'on' : ''}" data-act="aipxsw" data-k="${k}" data-i="${i}" aria-label="开关"></button><button class="pc-aiib" data-act="aipxedit" data-k="${k}" data-i="${i}">✎</button></div>`).join('')}
             <button class="pc-castadd" data-act="aipxadd" data-k="${k}">＋ 加一条要求</button>

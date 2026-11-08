@@ -11,8 +11,8 @@ process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.34';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.34');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.35';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.35');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -1321,6 +1321,50 @@ patch(`    cleanups.push(onChange(() => { UI.renderChip(); UI.renderStub(); }));
     };
     syncModel();
     cleanups.push(onChange(syncModel));`);
+// AI 预设：每个功能单独选用哪个 AI（接口 + 模型），不选就跟「翻译和 AI」
+patch(`async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {
+    const api = currentApi();`,`/** 这个功能用哪个 AI：功能里单独选了就用它，没选跟「翻译和 AI」 */
+function apiFor(fn) {
+    const f = fn ? aiCfg().fn[fn] : null;
+    const id = f?.api || '';
+    if (!id) return currentApi();
+    if (id === 'st') return { st: true, from: '酒馆现在连接的 API' };
+    const p = apiProfiles().find(x => x.id === id);
+    if (!p) return currentApi();
+    const model = String(f.model || '').trim() || (p.model || '').trim();
+    return { url: (p.url || '').trim().replace(/\\/+$/, ''), key: (p.key || '').trim(), model, bypass: !!p.bypass, from: p.name + (f.model ? ' · ' + f.model : '') };
+}
+async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {
+    const api = apiFor(fn);`);
+patch(`async function askVision(system, text, imageDataUrl, { maxTokens = 800, fn = '' } = {}) {
+    const api = currentApi();`,`async function askVision(system, text, imageDataUrl, { maxTokens = 800, fn = '' } = {}) {
+    const api = apiFor(fn);`);
+patch(`return { AI_FNS, aiSeen, aiCfg,`,`return { AI_FNS, apiFor, aiSeen, aiCfg,`);
+patch(`        const open = ui.aipOpen === k;
+        return \`<div class="pc-aifn \${open ? 'open' : ''}"><button class="pc-aifn-h" data-act="aipfn" data-k="\${k}"><span class="pc-grow"><b>\${esc(n)}</b><small>\${esc(where)}\${extra.length ? \` · 加了 \${extra.length} 条要求\` : ''}</small></span><span>\${open ? '⌄' : '›'}</span></button>
+          \${open ? \``,`        const open = ui.aipOpen === k;
+        const profiles = T.apiProfiles(), apiId = f.api || '', prof = profiles.find(p => p.id === apiId);
+        const apiName = !apiId ? '' : apiId === 'st' ? '酒馆现在连接的' : prof ? prof.name + (f.model ? ' · ' + f.model : '') : '';
+        const models = ui.aipModels?.[k] || [];
+        const apiPick = \`<div class="pc-aiapi"><label class="pc-field"><span>用哪个 AI</span><select class="pc-input" data-aipapi data-k="\${k}"><option value="">跟「翻译和 AI」一样（现在：\${esc(T.currentApi().from || '')}）</option><option value="st" \${apiId === 'st' ? 'selected' : ''}>酒馆现在连接的 API</option>\${profiles.map(p => \`<option value="\${esc(p.id)}" \${apiId === p.id ? 'selected' : ''}>\${esc(p.name || p.url)}\${p.model ? ' · ' + esc(p.model) : ''}</option>\`).join('')}</select></label>
+            \${prof ? \`<label class="pc-field"><span>模型（不填就用这个接口里选的\${prof.model ? '：' + esc(prof.model) : ''}）</span><span class="pc-row" style="gap:6px"><input class="pc-input" data-aipmodel data-k="\${k}" list="pc-aipm-\${k}" value="\${esc(f.model || '')}" placeholder="\${esc(prof.model || '比如 gpt-4o-mini')}"><button class="pc-btn" data-act="aipmodels" data-k="\${k}">\${ui.aipModelsBusy === k ? '…' : '拉取'}</button></span><datalist id="pc-aipm-\${k}">\${models.map(m => \`<option value="\${esc(m)}">\`).join('')}</datalist></label>\${models.length ? \`<div class="pc-chips wrap">\${models.slice(0, 30).map(m => \`<button class="pc-pill tiny \${f.model === m ? 'on' : 'dashed'}" data-act="aipmodelpick" data-k="\${k}" data-m="\${esc(m)}">\${esc(m)}</button>\`).join('')}</div>\` : ''}\` : ''}
+            \${!profiles.length ? '<div class="pc-hint">想给这个功能单独配一个 API，先到「设置 → 翻译和 AI」里点「＋」加一个接口。</div>' : ''}
+            \${k === 'img' || k === 'pose' ? '<div class="pc-hint">这个功能要看图，选能识图的模型（比如 GPT-4o、Claude、Gemini）。</div>' : ''}</div>\`;
+        return \`<div class="pc-aifn \${open ? 'open' : ''}"><button class="pc-aifn-h" data-act="aipfn" data-k="\${k}"><span class="pc-grow"><b>\${esc(n)}</b><small>\${esc(where)}\${apiName ? ' · 用 ' + esc(apiName) : ''}\${extra.length ? \` · 加了 \${extra.length} 条要求\` : ''}</small></span><span>\${open ? '⌄' : '›'}</span></button>
+          \${open ? apiPick + \``);
+patch(`            case 'aipfn': ui.aipOpen = ui.aipOpen === el.dataset.k ? '' : el.dataset.k; render(); break;`,`            case 'aipfn': ui.aipOpen = ui.aipOpen === el.dataset.k ? '' : el.dataset.k; render(); break;
+            case 'aipmodels': {
+                const k = el.dataset.k, f = T.aiCfg().fn[k], p = T.apiProfiles().find(x => x.id === f?.api);
+                if (!p) break;
+                ui.aipModelsBusy = k; render();
+                try { (ui.aipModels ||= {})[k] = await T.listModels(p); if (!ui.aipModels[k].length) toastr.info('这个接口没列出模型，自己填名字也行', 'AI 预设'); }
+                catch (e) { toastr.error(e.message || String(e), '拉取模型失败'); }
+                ui.aipModelsBusy = ''; render(); break;
+            }
+            case 'aipmodelpick': { const f = (T.aiCfg().fn[el.dataset.k] ||= { extra: [] }); f.model = f.model === el.dataset.m ? '' : el.dataset.m; commit(); render(); break; }`);
+patch(`    if (el.matches?.('[data-aipst]')) { T.aiCfg().active = 'tavern:' + el.value; commit(); render(); return; }`,`    if (el.matches?.('[data-aipst]')) { T.aiCfg().active = 'tavern:' + el.value; commit(); render(); return; }
+    if (el.matches?.('[data-aipapi]')) { const f = (T.aiCfg().fn[el.dataset.k] ||= { extra: [] }); f.api = el.value; if (!el.value || el.value === 'st') f.model = ''; commit(); render(); return; }
+    if (el.matches?.('[data-aipmodel]')) { const f = (T.aiCfg().fn[el.dataset.k] ||= { extra: [] }); f.model = el.value.trim(); commit(); return; }`);
 // 下载成功提醒：智库里所有下载（看大图、生图结果、历史生图、漫画、导出数据）
 patch(`download.download='image.png';`,`download.download='zhiku_'+Date.now()+'.png';`);
 patch(`function updateStudioPreview() {`,`/** 点了智库的下载链接后提示一下；连着下好几张的合成一条 */
@@ -1414,9 +1458,9 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',prefix+s+'\n}\n');
 fs.copyFileSync('src/index.js',dir+'/index.js');
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.34',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.34',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.35',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.35',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.8.34 built; storage keys and shared upload preserved.');
+console.log('Extension 0.8.35 built; storage keys and shared upload preserved.');
