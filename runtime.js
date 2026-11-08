@@ -2784,7 +2784,7 @@ async function encodeVibeRequest(imageB64, infoExtracted = 1, model = settings()
     let r = await send();
     if (r.status >= 500) { await new Promise(ok => setTimeout(ok, 2000)); r = await send(); }
     const buf = new Uint8Array(await r.arrayBuffer());
-    if (!r.ok) throw Object.assign(new Error(explain(r.status, new TextDecoder().decode(buf)) + (settings().naiMode === 'site' ? '。第三方站点可能不支持氛围' : '')),{status:r.status,retryAfter:r.headers?.get('Retry-After')});
+    if (!r.ok) throw Object.assign(new Error((r.status === 402 ? '账号 Anlas 不够了：氛围每张图第一次用要先编码，NovelAI 每张扣约 2 点 Anlas，Opus 也要扣（编码过的会存下来，之后不再扣）。去官网看看 Anlas 余额，或者导入官网导出的 .naiv4vibe 文件' : explain(r.status, new TextDecoder().decode(buf))) + (settings().naiMode === 'site' ? '。第三方站点可能不支持氛围' : '')),{status:r.status,retryAfter:r.headers?.get('Retry-After')});
     if (buf.length < 100) throw new Error('编码结果不对，可能 key 或站点有问题');
     return toB64(buf);
 }
