@@ -137,8 +137,39 @@ function parseComicPage(inner) {
     // 对白按格分好，插件自己叠在图上用（NAI 画中文字常常是乱码）
     const pageTexts = [splitText(data.page.base).text, splitText(data.page.non_character).text].filter(Boolean);
     const panelTexts = data.panels.map(p => [splitText(p.description).text, splitText(p.non_character).text, ...(p.characters || []).map(c => splitText(c.positive).text)].filter(Boolean));
-    return { ok: true, base, visual, chars, manual: !!data.manual, spread, panels: data.panels.length, pageTexts, panelTexts };
+    return { ok: true, base, visual, chars, manual: !!data.manual, spread, panels: data.panels.length, pageTexts, panelTexts, boxes: panelBoxes(data) };
 }
+
+/** 按每格描述里的 top / bottom / left / right 估算每格在页面上的位置（0–1），对白叠在对应那一格 */
+function panelBoxes(data) {
+    const panels = data?.panels || [], n = panels.length;
+    if (!n) return [];
+    // 位置取开头的布局说明，避免对白或镜头描述里的 left/right 被当成分格。
+    const words = p => String(p.description || '').toLowerCase().trim().match(/^(?:top|upper|bottom|lower|middle|center|centre|left|right)\b[^,\n]*/)?.[0] || '';
+    const rowOf = t => /\b(top|upper)\b/.test(t) ? 0 : /\b(bottom|lower)\b/.test(t) ? 2 : /\b(middle|center|centre)\b/.test(t) ? 1 : null;
+    const colOf = t => /\bleft\b/.test(t) ? 0 : /\bright\b/.test(t) ? 2 : null;
+    const info = panels.map(p => { const t = words(p); return { row: rowOf(t), col: colOf(t) }; });
+    let rows = [];
+    if (info.every(x => x.row !== null)) {
+        const keys = [...new Set(info.map(x => x.row))].sort((a, b) => a - b);
+        rows = keys.map(k => info.map((x, i) => x.row === k ? i : -1).filter(i => i >= 0));
+    } else if (info.every(x => x.col === null) && n === 4 && /2\s*[x×]\s*2|grid|four[- ]panel/i.test(String(data.page?.base || ''))) {
+        rows = [[0, 1], [2, 3]];
+    } else {
+        for (let i = 0; i < n; i++) {
+            const row = rows[rows.length - 1], last = row && info[row[row.length - 1]];
+            if (!row || info[i].col === null || !last || last.col === null || info[i].col <= last.col) rows.push([i]); else row.push(i);
+        }
+    }
+    const boxes = [];
+    rows.forEach((row, r) => {
+        row.sort((a, b) => (info[a].col ?? 1) - (info[b].col ?? 1) || a - b);
+        row.forEach((i, c) => { boxes[i] = { x: c / row.length, y: r / rows.length, w: 1 / row.length, h: 1 / rows.length }; });
+    });
+    return boxes;
+}
+/** 去掉对白里多写的「Text:」前缀 */
+const capLine = t => String(t || '').replace(/(^|\n)[ \t]*Text[ \t]*[:：][ \t]*/gi, '$1').trim();
 
 /** 出图请求：画风（正文画师串）在最前面，漫画页描述在后；负面 = 画风负面 + 漫画负面 */
 const COMIC_NO_TEXT_NEG = 'text, speech bubble, letters, chinese text, english text';
@@ -156,11 +187,26 @@ function comicRequest(parsed, { stylePos = '', styleNeg = '', extraNeg = '', wid
 function captionsHtml(parsed, esc, size = 's') {
     if (!parsed?.ok || size === 'hide') return '';
     const n = Math.max(1, parsed.panelTexts.length);
-    const box = (t, style, cls = '') => `<div class="pc-comic-cap ${cls}" style="${style}">${t.map(x => esc(x).replace(/\n+/g, '<br>')).join('<br>')}</div>`;
+    const boxes = parsed.boxes?.length === parsed.panelTexts.length ? parsed.boxes : null;
+    const box = (t, style, cls = '') => `<div class="pc-comic-cap ${cls}" style="${style}">${t.map(capLine).filter(Boolean).map(x => esc(x).replace(/\n+/g, '<br>')).join('<br>')}</div>`;
     const out = [];
     if (parsed.pageTexts.length) out.push(box(parsed.pageTexts, 'top:8px', 'top'));
-    parsed.panelTexts.forEach((t, i) => { if (t.length) out.push(box(t, `top:calc(${((i + 1) / n * 100).toFixed(2)}% - ${i === n - 1 ? 44 : 8}px)`)); }); // 最后一格让开左下角的页码
+    parsed.panelTexts.forEach((t, i) => {
+        if (!t.map(capLine).some(Boolean)) return;
+        const b = boxes?.[i] || { x: 0, y: i / n, w: 1, h: 1 / n };
+        const bottom = b.y + b.h > 0.99;
+        // 字放在这一格底部、横向居中，宽度不超过这一格；底行让开左侧页码和右侧版本按钮
+        out.push(box(t, `left:${((b.x + b.w / 2) * 100).toFixed(2)}%;top:calc(${((b.y + b.h) * 100).toFixed(2)}% - ${bottom ? 40 : 6}px);max-width:calc(${(b.w * 100).toFixed(2)}% - 10px)`));
+    });
     return out.length ? `<div class="pc-comic-caps sz-${size}">${out.join('')}</div>` : '';
+}
+/** 存下的对白没有分格位置（旧版本）时，从这一页的提示词里补上 */
+function captionSource(v, inner) {
+    if (v?.textMode !== 'overlay') return null;
+    if (!v.captions) return parseComicPage(inner);
+    if (v.captions.boxes) return v.captions;
+    const p = parseComicPage(inner);
+    return { ...v.captions, boxes: p.ok ? p.boxes : undefined };
 }
 
 /** 「让 AI 重写本页」的请求 */
@@ -196,7 +242,8 @@ function adaptRequest(story, { pages = 0, panels = '', cast = '', before = '', c
         + '每一页先写一组 <comic_plan>（这一页讲什么、几格、每格的构图和对白），紧跟着写一组 <image>…</image>。只输出这些块，不要任何解释。'
         + '<image> 用分段文本协议：第一行 @page，下面写这一页的整体：分级（rating:general 或 rating:sensitive）、实际人数词（如 1boy, 1girl, 2boys）、comic page、画格数量与布局、留白、光影、色调。'
         + '然后每一格写 @panel P1、@panel P2…，下面写这一格的位置大小、镜头、环境；格内每个看得见的人物写 @character C1、C2…，下面写 boy / girl / other（不带数字）、完整外貌衣着、动作表情；可选 @negative 写这个人物不要的东西。'
-        + '要画进图里的对白、旁白、拟声，写在对应段落末尾单独一行「Text: 」后面，用正文的语言，一格不超过两句。'
+        + '要画进图里的对白、旁白、拟声，写在对应段落末尾单独一行「Text: 」后面，用正文的语言，一格不超过两句；一段只写一个「Text: 」，几句话都接在它后面换行写。'
+        + '每个 @panel 第一行先写这格在页面上的位置（top left、top right、bottom half、middle 这类英文词），插件按它把对白叠到对应的格子里。'
         + '标签用英文 NovelAI / Danbooru 标签，逗号隔开；不要写画师名和画风（画风另外加）。人物外貌照下面给的角色资料写，前后页保持一致。'
         + '\n\n格式示例：\n<comic_plan>第 1 页：两格。P1 远景交代咖啡馆和雨；P2 近景他看向窗外。</comic_plan>\n<image>\n@page\nrating:general, 1boy, comic page, 2 panels, vertical layout, rainy night, warm indoor light\n@panel P1\ntop half, wide shot, cafe interior, rain on window\n@panel P2\nbottom half, close-up\n@character C1\nboy, black hair, grey eyes, white shirt, black vest, sitting, looking outside, melancholic\nText: 「又下雨了。」\n</image>';
     const user = (cast ? `<characters>\n${cast}\n</characters>\n\n` : '')
@@ -241,7 +288,7 @@ const CSS = `
 .pc-comic-page{position:relative;margin:0;border-radius:14px;overflow:hidden;border:1.5px solid var(--pc-paper,#f4efe4);background:var(--pc-paper-2,#ebe4d2);-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}
 .pc-comic-page img{display:block;width:100%;height:auto;cursor:pointer;-webkit-user-drag:none}
 .pc-comic-caps{position:absolute;inset:0;pointer-events:none}
-.pc-comic-cap{position:absolute;left:50%;transform:translate(-50%,-100%);width:max-content;max-width:80%;background:rgba(255,255,255,.84);color:#16120f;border:1px solid rgba(22,18,15,.7);border-radius:10px;padding:2px 8px;font:600 11px/1.45 "Noto Serif SC","Songti SC",serif;text-align:center;word-break:break-word}
+.pc-comic-cap{position:absolute;box-sizing:border-box;left:50%;transform:translate(-50%,-100%);width:max-content;max-width:80%;background:rgba(255,255,255,.84);color:#16120f;border:1px solid rgba(22,18,15,.7);border-radius:10px;padding:2px 8px;font:600 11px/1.45 "Noto Serif SC","Songti SC",serif;text-align:center;word-break:break-word}
 .pc-comic-caps.sz-m .pc-comic-cap{font-size:13px;padding:3px 10px;max-width:86%}
 .pc-comic-caps.sz-l .pc-comic-cap{font-size:15px;padding:4px 12px;max-width:90%}
 .pc-comic-cap.top{transform:translate(-50%,0);background:#16120f;color:#f4efe4}
@@ -422,7 +469,7 @@ function createComicController(deps) {
             if (!saved?.url) throw new Error('漫画图片保存未返回地址');
             if (!snap.current()) { discard(saved.url); return; }
             const hadExtra = !!msg.extra, hadStore = !!msg.extra?.zhikuComic, old = rec(msg, block.key);
-            const versions = [...(old?.versions || []), { url: saved.url, seed: r.sent?.seed, size: r.sent?.size, at: Date.now(), style: st.name, textMode, captions: textMode === 'overlay' ? { ok: true, pageTexts: parsed.pageTexts, panelTexts: parsed.panelTexts } : null, sent: { positive: req.positive, negative: req.negative, chars: req.chars } }];
+            const versions = [...(old?.versions || []), { url: saved.url, seed: r.sent?.seed, size: r.sent?.size, at: Date.now(), style: st.name, textMode, captions: textMode === 'overlay' ? { ok: true, pageTexts: parsed.pageTexts, panelTexts: parsed.panelTexts, boxes: parsed.boxes } : null, sent: { positive: req.positive, negative: req.negative, chars: req.chars } }];
             const removed = versions.length > 10 ? versions.shift() : null;
             const entry = { ...(old || {}), versions, cur: versions.length - 1 };
             store(msg)[block.key] = entry;
@@ -464,7 +511,7 @@ function createComicController(deps) {
         const tag = `<span class="pc-comic-tag">第 ${b.page} / ${b.total} 页</span>`;
         if (v) {
             const ver = r.versions.length > 1 ? `<span class="pc-comic-ver"><button data-cv="-1" aria-label="上一版">‹</button>${(r.cur ?? 0) + 1}/${r.versions.length}<button data-cv="1" aria-label="下一版">›</button></span>` : '';
-            const caps = v.textMode === 'overlay' ? captionsHtml(v.captions || parseComicPage(b.inner), esc, opts().comicCapSize || 's') : '';
+            const caps = v.textMode === 'overlay' ? captionsHtml(captionSource(v, b.inner), esc, opts().comicCapSize || 's') : '';
             const acts = `<div class="pc-comic-acts"><button data-cgen>重画这一页</button><button data-cwork>编辑本页</button></div>`;
             const st = running.get(job);
             const busy = st ? `<div class="pc-comic-busy"><span>${st === 'wait' ? '排队中…' : '重画中…'}</span></div>` : '';
@@ -703,7 +750,7 @@ function createComicController(deps) {
               ${seg('comicColor', [['color', '彩色'], ['mono', '黑白网点']], 'color')}
               <div class="pc-label">对白怎么出现</div>
               ${seg('comicText', [['overlay', '插件叠字'], ['draw', 'NAI 画进图'], ['none', '不要对白']], 'overlay')}
-              <div class="pc-hint">NAI 画中文常常乱码，「插件叠字」让 NAI 只画画面，对白由浏览器显示，位置按分格数量竖向估算；下载的仍是未叠字原图。</div>
+              <div class="pc-hint">NAI 画中文常常乱码，「插件叠字」让 NAI 只画画面，对白由浏览器显示，位置按每格开头的位置描述或 2x2 布局估算，未标位置时按顺序排列；下载的仍是未叠字原图。</div>
               <div class="pc-label">叠字大小</div>
               ${seg('comicCapSize', [['s', '小'], ['m', '中'], ['l', '大'], ['hide', '不显示']], 's')}
               <div class="pc-hint">挡图的话调小，或者在楼层里点「隐藏对白」临时收起。想少点对白，在下面「给 AI 的改编要求」里写「对白少一点」。</div>
@@ -817,7 +864,7 @@ function createComicController(deps) {
         const pages = [];
         chat.forEach((msg, id) => {
             if (!msg || msg.is_user) return;
-            for (const b of comicBlocks(srcOf(msg))) { const v = curVer(rec(msg, b.key)); if (v) pages.push({ id, captionSource: v.textMode === 'overlay' ? (v.captions || parseComicPage(b.inner)) : null, page: b.page, total: b.total, url: v.url, name: msg.name || '', caps: v.textMode === 'overlay' ? captionsHtml(v.captions || parseComicPage(b.inner), esc, opts().comicCapSize || 's') : '' }); }
+            for (const b of comicBlocks(srcOf(msg))) { const v = curVer(rec(msg, b.key)); if (v) pages.push({ id, captionSource: captionSource(v, b.inner), page: b.page, total: b.total, url: v.url, name: msg.name || '', caps: v.textMode === 'overlay' ? captionsHtml(captionSource(v, b.inner), esc, opts().comicCapSize || 's') : '' }); }
         });
         const urls = new Map();
         const url = async p => { if (!urls.has(p.url)) urls.set(p.url, await resolveUrl(p.url)); return urls.get(p.url); };
@@ -2784,7 +2831,7 @@ async function encodeVibeRequest(imageB64, infoExtracted = 1, model = settings()
     let r = await send();
     if (r.status >= 500) { await new Promise(ok => setTimeout(ok, 2000)); r = await send(); }
     const buf = new Uint8Array(await r.arrayBuffer());
-    if (!r.ok) throw Object.assign(new Error(explain(r.status, new TextDecoder().decode(buf)) + (settings().naiMode === 'site' ? '。第三方站点可能不支持氛围' : '')),{status:r.status,retryAfter:r.headers?.get('Retry-After')});
+    if (!r.ok) throw Object.assign(new Error((r.status === 402 ? '账号 Anlas 不够了：氛围每张图第一次用要先编码，NovelAI 每张扣约 2 点 Anlas，Opus 也要扣（编码会按模型保存，复用已保存的编码不再扣编码费）。去官网看看 Anlas 余额，或者导入官网导出的 .naiv4vibe 文件' : explain(r.status, new TextDecoder().decode(buf))) + (settings().naiMode === 'site' ? '。第三方站点可能不支持氛围' : '')),{status:r.status,retryAfter:r.headers?.get('Retry-After')});
     if (buf.length < 100) throw new Error('编码结果不对，可能 key 或站点有问题');
     return toB64(buf);
 }
