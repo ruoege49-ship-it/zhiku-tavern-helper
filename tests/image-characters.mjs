@@ -19,8 +19,10 @@ assert.equal(resolveImageCharacters('$小红-from behind-sfw-upperbody$, standin
 assert.equal(resolveImageCharacters('$小红-sfw-upperbody$, $红红-sfw-upperbody$', roster).cast.length,1);
 assert.deepEqual(resolveImageCharacters('$小-sfw-upperbody$, waving', roster).unknown, ['小'], 'unknown name still draws');
 assert.equal(resolveImageCharacters('$小-sfw-upperbody$, waving', []).cast.length, 0);
-assert.throws(() => resolveImageCharacters('$小红$', roster), /角色标记请使用/);
-assert.throws(() => resolveImageCharacters('$小红-sfw-upperbody', roster), /配对/);
+assert.equal(resolveImageCharacters('$小红$, smile', roster).picks[0].char.name, '小红');
+assert.equal(resolveImageCharacters('$小红-sfw-upperbody, smile', roster).picks.length, 0);
+{ const r = resolveImageCharacters('1girl, $\{"upperBody":"白衬衫","lowerBody":"短裙"\}$, smile', roster); assert.equal(r.picks.length, 0); assert.ok(!r.scene.includes('$') && !r.scene.includes('白衬衫')); }
+{ const r = resolveImageCharacters('$\{"name":"小红"\}$ sitting', roster); assert.equal(r.picks[0].char.name, '小红'); }
 assert.equal(resolveImageCharacters('$小红-sfw-upperbody$', [{char:people[0],on:false}]).cast.length, 0, 'disabled character draws without appearance');
 assert.throws(() => resolveImageCharacters('$小红-sfw-upperbody$', [...roster, {char:{...people[1],aliases:'小红'},on:true}]), /匹配到多人/);
 assert.equal(resolveImageCharacters(names.map(n=>`$${n}-sfw-upperbody$`).join(', '),roster).cast.length,5,'no hidden four-character truncation');

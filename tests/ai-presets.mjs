@@ -32,6 +32,18 @@ const pose=await T.imagePose('data:image/png;base64,AA');assert.equal(pose.pose[
 const imageMessage=http.at(-1).body.messages.find(m=>Array.isArray(m.content));assert.equal(imageMessage.content[1].image_url.url,'data:image/png;base64,AA');
 data.options.apis[0].bypass=false;await T.askLLM('task','input',{fn:'comic',maxTokens:16000});assert.equal(http.at(-1).body.max_tokens,16000);
 data.aiPresets.active='plain';await T.askLLM('task','input',{fn:'comic'});assert.equal(http.at(-1).body.messages.length,2);
+// Each feature selects its own API/model without changing the global selection.
+data.options.apis.push({id:'vision',url:'https://vision.invalid/v1/',model:'vision-default',key:'test-only',bypass:true});
+data.aiPresets.fn.pose={api:'vision',model:'vision-override',extra:[]};
+response=JSON.stringify({pose:[{en:'standing',zh:'站立'}],composition:[]});
+await T.imagePose('data:image/png;base64,AA');
+assert.equal(http.at(-1).url,'https://vision.invalid/v1/chat/completions');assert.equal(http.at(-1).body.model,'vision-override');
+assert.equal(data.options.apiActive,'custom');
+data.aiPresets.fn.comic={api:'st',extra:[]};const hostBefore=host.length;
+await T.askLLM('task','input',{fn:'comic'});assert.equal(host.length,hostBefore+1);
+delete data.aiPresets.fn.pose.model;assert.equal(T.apiFor('pose').model,'vision-default');
+data.aiPresets.fn.pose.api='removed';assert.equal(T.apiFor('pose').model,'test-model');
+data.aiPresets.fn.pose.api='';assert.equal(T.apiFor('pose').model,'test-model');
 // Model binding survives reload, switches between bound styles, then restores the original model.
 const a=M.createFromString(data,{name:'A',text:'artist:alpha',forceGroup:true}),b=M.createFromString(data,{name:'B',text:'artist:beta',forceGroup:true});
 data.groups[a.id].model='nai-diffusion-5-full';data.groups[b.id].model='nai-diffusion-4-5-full';data.active=a;data=M.normalizeData(plain(data));

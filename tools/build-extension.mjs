@@ -11,8 +11,8 @@ process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.34';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.34');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.36';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.36');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -1289,9 +1289,6 @@ patch(`            case 'castopen': openCastPicker(); break;`,`            case 
             }`);
 patch(`    if (el.dataset.castMemo !== undefined) {`,`    if (el.matches?.('[data-aipst]')) { T.aiCfg().active = 'tavern:' + el.value; commit(); render(); return; }
     if (el.dataset.castMemo !== undefined) {`);
-// 入口：设置 → 翻译和 AI
-patch(`      <div class="pc-dim small">翻译、补全细节、读角色外貌、聊天生图都用这个。点一下就切换，可以存好几个。</div>`,`      <div class="pc-dim small">翻译、补全细节、读角色外貌、聊天生图都用这个。点一下就切换，可以存好几个。</div>
-      <div class="pc-actions wrap" style="margin-top:6px"><button class="pc-btn dark" data-act="nav" data-view="aipreset">AI 预设（发送结构）· \${(() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })()}</button></div>`);
 // 画师串绑定模型：切到这串时自动换模型，切到没绑的串时换回原来的
 patch(`      <label class="pc-field pc-mt-s"><span>负面（选这串时一起换上，可不填）</span><textarea class="pc-textarea small mono" data-bind-group="\${g.id}" data-field="neg" placeholder="比如 1girl, text">\${esc(g.neg || '')}</textarea></label>`,`      <label class="pc-field pc-mt-s"><span>负面（选这串时一起换上，可不填）</span><textarea class="pc-textarea small mono" data-bind-group="\${g.id}" data-field="neg" placeholder="比如 1girl, text">\${esc(g.neg || '')}</textarea></label>
       <label class="pc-field pc-mt-s"><span>绑定模型（这串当正文画师串时自动换成这个模型）</span><select class="pc-input" data-bind-group="\${g.id}" data-field="model"><option value="">不绑，跟设置走</option>\${N.MODELS.map(([v, t]) => \`<option value="\${v}" \${g.model === v ? 'selected' : ''}>\${esc(t)}</option>\`).join('')}</select></label>`);
@@ -1321,27 +1318,259 @@ patch(`    cleanups.push(onChange(() => { UI.renderChip(); UI.renderStub(); }));
     };
     syncModel();
     cleanups.push(onChange(syncModel));`);
+// AI 预设：每个功能单独选用哪个 AI（接口 + 模型），不选就跟「翻译和 AI」
+patch(`async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {
+    const api = currentApi();`,`/** 这个功能用哪个 AI：功能里单独选了就用它，没选跟「翻译和 AI」 */
+function apiFor(fn) {
+    const f = fn ? aiCfg().fn[fn] : null;
+    const id = f?.api || '';
+    if (!id) return currentApi();
+    if (id === 'st') return { st: true, from: '酒馆现在连接的 API' };
+    const p = apiProfiles().find(x => x.id === id);
+    if (!p) return currentApi();
+    const model = String(f.model || '').trim() || (p.model || '').trim();
+    return { url: (p.url || '').trim().replace(/\\/+$/, ''), key: (p.key || '').trim(), model, bypass: !!p.bypass, from: p.name + (f.model ? ' · ' + f.model : '') };
+}
+async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {
+    const api = apiFor(fn);`);
+patch(`async function askVision(system, text, imageDataUrl, { maxTokens = 800, fn = '' } = {}) {
+    const api = currentApi();`,`async function askVision(system, text, imageDataUrl, { maxTokens = 800, fn = '' } = {}) {
+    const api = apiFor(fn);`);
+patch(`return { AI_FNS, aiSeen, aiCfg,`,`return { AI_FNS, apiFor, aiSeen, aiCfg,`);
+patch(`        const open = ui.aipOpen === k;
+        return \`<div class="pc-aifn \${open ? 'open' : ''}"><button class="pc-aifn-h" data-act="aipfn" data-k="\${k}"><span class="pc-grow"><b>\${esc(n)}</b><small>\${esc(where)}\${extra.length ? \` · 加了 \${extra.length} 条要求\` : ''}</small></span><span>\${open ? '⌄' : '›'}</span></button>
+          \${open ? \``,`        const open = ui.aipOpen === k;
+        const profiles = T.apiProfiles(), apiId = f.api || '', prof = profiles.find(p => p.id === apiId);
+        const apiName = !apiId ? '' : apiId === 'st' ? '酒馆现在连接的' : prof ? prof.name + (f.model ? ' · ' + f.model : '') : '';
+        const models = ui.aipModels?.[k] || [];
+        const apiPick = \`<div class="pc-aiapi"><label class="pc-field"><span>用哪个 AI</span><select class="pc-input" data-aipapi data-k="\${k}"><option value="">跟「翻译和 AI」一样（现在：\${esc(T.currentApi().from || '')}）</option><option value="st" \${apiId === 'st' ? 'selected' : ''}>酒馆现在连接的 API</option>\${profiles.map(p => \`<option value="\${esc(p.id)}" \${apiId === p.id ? 'selected' : ''}>\${esc(p.name || p.url)}\${p.model ? ' · ' + esc(p.model) : ''}</option>\`).join('')}</select></label>
+            \${prof ? \`<label class="pc-field"><span>模型（不填就用这个接口里选的\${prof.model ? '：' + esc(prof.model) : ''}）</span><span class="pc-row" style="gap:6px"><input class="pc-input" data-aipmodel data-k="\${k}" list="pc-aipm-\${k}" value="\${esc(f.model || '')}" placeholder="\${esc(prof.model || '比如 gpt-4o-mini')}"><button class="pc-btn" data-act="aipmodels" data-k="\${k}">\${ui.aipModelsBusy === k ? '…' : '拉取'}</button></span><datalist id="pc-aipm-\${k}">\${models.map(m => \`<option value="\${esc(m)}">\`).join('')}</datalist></label>\${models.length ? \`<div class="pc-chips wrap">\${models.slice(0, 30).map(m => \`<button class="pc-pill tiny \${f.model === m ? 'on' : 'dashed'}" data-act="aipmodelpick" data-k="\${k}" data-m="\${esc(m)}">\${esc(m)}</button>\`).join('')}</div>\` : ''}\` : ''}
+            \${!profiles.length ? '<div class="pc-hint">想给这个功能单独配一个 API，先到「设置 → 翻译和 AI」里点「＋」加一个接口。</div>' : ''}
+            \${k === 'img' || k === 'pose' ? '<div class="pc-hint">这个功能要看图，选能识图的模型（比如 GPT-4o、Claude、Gemini）。</div>' : ''}</div>\`;
+        return \`<div class="pc-aifn \${open ? 'open' : ''}"><button class="pc-aifn-h" data-act="aipfn" data-k="\${k}"><span class="pc-grow"><b>\${esc(n)}</b><small>\${esc(where)}\${apiName ? ' · 用 ' + esc(apiName) : ''}\${extra.length ? \` · 加了 \${extra.length} 条要求\` : ''}</small></span><span>\${open ? '⌄' : '›'}</span></button>
+          \${open ? apiPick + \``);
+patch(`            case 'aipfn': ui.aipOpen = ui.aipOpen === el.dataset.k ? '' : el.dataset.k; render(); break;`,`            case 'aipfn': ui.aipOpen = ui.aipOpen === el.dataset.k ? '' : el.dataset.k; render(); break;
+            case 'aipmodels': {
+                const k = el.dataset.k, f = T.aiCfg().fn[k], p = T.apiProfiles().find(x => x.id === f?.api);
+                if (!p) break;
+                const seq = (ui.aipModelSeq ||= {})[k] = (ui.aipModelSeq[k] || 0) + 1;
+                const current = () => ui.aipModelSeq[k] === seq && T.aiCfg().fn[k]?.api === p.id;
+                ui.aipModelsBusy = k; render();
+                try { const models = await T.listModels(p); if (current()) { (ui.aipModels ||= {})[k] = models; if (!models.length) toastr.info('这个接口没列出模型，自己填名字也行', 'AI 预设'); } }
+                catch (e) { if (current()) toastr.error(e.message || String(e), '拉取模型失败'); }
+                if (current()) { if (ui.aipModelsBusy === k) ui.aipModelsBusy = ''; render(); } break;
+            }
+            case 'aipmodelpick': { const f = (T.aiCfg().fn[el.dataset.k] ||= { extra: [] }); f.model = f.model === el.dataset.m ? '' : el.dataset.m; commit(); render(); break; }`);
+patch(`    if (el.matches?.('[data-aipst]')) { T.aiCfg().active = 'tavern:' + el.value; commit(); render(); return; }`,`    if (el.matches?.('[data-aipst]')) { T.aiCfg().active = 'tavern:' + el.value; commit(); render(); return; }
+    if (el.matches?.('[data-aipapi]')) { const f = (T.aiCfg().fn[el.dataset.k] ||= { extra: [] }); if (f.api !== el.value) { f.model = ''; if (ui.aipModels) delete ui.aipModels[el.dataset.k]; (ui.aipModelSeq ||= {})[el.dataset.k] = (ui.aipModelSeq[el.dataset.k] || 0) + 1; if (ui.aipModelsBusy === el.dataset.k) ui.aipModelsBusy = ''; } f.api = el.value; commit(); render(); return; }
+    if (el.matches?.('[data-aipmodel]')) { const f = (T.aiCfg().fn[el.dataset.k] ||= { extra: [] }); f.model = el.value.trim(); commit(); return; }`);
 // 下载成功提醒：智库里所有下载（看大图、生图结果、历史生图、漫画、导出数据）
 patch(`download.download='image.png';`,`download.download='zhiku_'+Date.now()+'.png';`);
 patch(`function updateStudioPreview() {`,`/** 点了智库的下载链接后提示一下；连着下好几张的合成一条 */
 let dlCount = 0, dlTimer = null, dlLast = '';
-function onDownloadClick(ev) {
-    const a = ev.target?.closest?.('a[download]');
-    if (!a || !a.getAttribute('href')) return;
-    const name = a.getAttribute('download') || '';
-    if (!/^(zhiku|piaoce|漫画|画师库)/.test(name)) return;
+const isIOS = () => /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isAndroid = () => /Android|HarmonyOS/i.test(navigator.userAgent);
+function dlOpts() {
+    const o = getData().options, text = String(o.dlMarkText || '').trim();
+    return { strip: !!o.dlStrip, on: !!o.dlMark && !!text, text, pos: o.dlMarkPos || 'br', alpha: Number(o.dlMarkAlpha ?? 0.5) || 0.5, size: Number(o.dlMarkSize ?? 3) || 3, mode: o.dlMode || 'auto' };
+}
+function dlNote(name) {
     dlCount++; dlLast = name;
     clearTimeout(dlTimer);
     dlTimer = setTimeout(() => {
         const json = /\\.json$/i.test(dlLast);
-        toastr.success(dlCount > 1 ? \`已发起 \${dlCount} 项下载，请在浏览器的「下载」里查看\` : \`\${json ? '数据' : '图片'}已发起下载：\${dlLast}\`, '智库', { timeOut: 2500 });
+        const where = json ? '' : isIOS() ? '。在「文件」App 的「下载」里，不在相册；想进相册，到 设置 →「下载和水印」把「手机上点下载」改回「自动」，再从分享面板点「存储图像」' : isAndroid() ? '。存在手机的 Download 文件夹，相册里一般在「Download / 下载」相簿' : '，在浏览器的「下载」里';
+        toastr.success(dlCount > 1 ? \`已发起 \${dlCount} 项下载\${where}\` : \`\${json ? '数据' : '图片'}已发起下载：\${dlLast}\${where}\`, '智库', { timeOut: json ? 2500 : 5000 });
         dlCount = 0;
     }, 700);
+}
+/** 水印：pos = br 右下 / bl 左下 / tr 右上 / tl 左上 / c 正中 / tile 铺满；size 是短边的百分比 */
+function drawMark(ctx, w, h, o) {
+    const fs = Math.max(12, Math.round(Math.min(w, h) * o.size / 100));
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, Math.max(0.05, o.alpha));
+    ctx.font = \`bold \${fs}px "PingFang SC","Microsoft YaHei",sans-serif\`;
+    ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(0,0,0,.55)'; ctx.lineWidth = Math.max(1, fs / 10); ctx.lineJoin = 'round';
+    ctx.textBaseline = 'middle';
+    const put = (x, y) => { ctx.strokeText(o.text, x, y); ctx.fillText(o.text, x, y); };
+    const tw = ctx.measureText(o.text).width;
+    if (o.pos === 'tile') {
+        ctx.translate(w / 2, h / 2); ctx.rotate(-Math.PI / 6);
+        const R = Math.hypot(w, h) / 2, stepX = tw + fs * 3, stepY = fs * 4;
+        for (let y = -R, row = 0; y < R; y += stepY, row++) for (let x = -R - (row % 2) * stepX / 2; x < R; x += stepX) put(x, y);
+    } else {
+        const m = fs * 0.8;
+        const x = o.pos.endsWith('l') ? m : o.pos === 'c' ? (w - tw) / 2 : w - m - tw;
+        const y = o.pos.startsWith('t') ? m + fs / 2 : o.pos === 'c' ? h / 2 : h - m - fs / 2;
+        put(x, y);
+    }
+    ctx.restore();
+}
+function blobImage(blob) {
+    return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(blob), img = new Image();
+        img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片读不出来')); };
+        img.src = url;
+    });
+}
+/** 在不透明画布上重画一遍：PNG 里的文字信息和 NovelAI 藏在透明通道里的提示词都会没掉；需要时再打水印 */
+async function processImage(blob, o) {
+    if (!o.strip && !o.on) return blob;
+    const img = await blobImage(blob);
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const c = DOC.createElement('canvas'); c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0);
+    if (o.on) drawMark(ctx, w, h, o);
+    return await new Promise((resolve, reject) => c.toBlob(b => b ? resolve(b) : reject(new Error('图片处理失败')), 'image/png'));
+}
+function saveBlob(blob, name) {
+    const url = URL.createObjectURL(blob), a = DOC.createElement('a');
+    a.href = url; a.download = name; a.dataset.zkdl = '1';
+    pcMount(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    dlNote(name);
+}
+/** 分享面板要「刚点过」才肯打开；处理图片耽误久了就再给一个按钮点 */
+function shareAsk(file) {
+    const box = modal(\`<h3 class="pc-h3">图片准备好了</h3><p class="pc-dim small">点下面的按钮打开分享面板，选「存储图像 / 保存到相册」就进相册了。</p>
+      <div class="pc-actions"><button class="pc-btn" type="button" data-x="file">下载成文件</button><button class="pc-btn dark" type="button" data-x="share">存到相册 / 分享</button></div>\`);
+    box.addEventListener('click', ev => {
+        const x = ev.target.closest('[data-x]')?.dataset.x;
+        if (x === 'share') { navigator.share({ files: [file] }).catch(e => { if (e?.name !== 'AbortError') saveBlob(file, file.name); }); box.closeModal(); }
+        if (x === 'file') { saveBlob(file, file.name); box.closeModal(); }
+    });
+}
+async function dlImage(href, name, o, wantShare) {
+    let blob;
+    try { const response = await fetch(href); if (!response.ok) throw new Error('读取图片失败（' + response.status + '）'); blob = await response.blob(); blob = await processImage(blob, o); }
+    catch (e) { console.warn('[智库] 下载处理', e); toastr.error('图片处理失败：' + (e.message || e), '智库'); return; }
+    const fname = (o.strip || o.on) ? name.replace(/\\.(jpe?g|webp)$/i, '.png') : name;
+    if (wantShare) {
+        const file = new File([blob], fname, { type: blob.type || 'image/png' });
+        if (navigator.canShare?.({ files: [file] })) {
+            try { await navigator.share({ files: [file] }); return; }
+            catch (e) { if (e?.name === 'AbortError') return; if (e?.name === 'NotAllowedError') { shareAsk(file); return; } console.warn('[智库] 分享', e); }
+        }
+    }
+    saveBlob(blob, fname);
+}
+function onDownloadClick(ev) {
+    const a = ev.target?.closest?.('a[download]');
+    if (!a || !a.getAttribute('href') || a.dataset.zkdl) return;
+    const name = a.getAttribute('download') || '';
+    if (!/^(zhiku|piaoce|漫画|画师库)/.test(name)) return;
+    const img = !/\\.json$/i.test(name), o = dlOpts();
+    const wantShare = img && ev.isTrusted && !!navigator.canShare && (o.mode === 'share' || (o.mode === 'auto' && isIOS()));
+    if (img && (o.strip || o.on || wantShare)) { ev.preventDefault(); ev.stopPropagation(); dlImage(a.href, name, o, wantShare); return; }
+    dlNote(name);
 }
 if (globalThis.__zhikuDl) DOC.removeEventListener('click', globalThis.__zhikuDl, true);
 globalThis.__zhikuDl = onDownloadClick;
 DOC.addEventListener('click', onDownloadClick, true);
 function updateStudioPreview() {`);
+// 0.8.36：设置里单独的 AI 预设、下载和水印、先存后改名、一键上传到共享
+patch(`    const ai = setFold('ai', '翻译和 AI',`,`    const ai0 = setFold('ai', '翻译和 AI',`);
+patch(`    const tpl = setFold('tpl', '例图提示词',`,`    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), \`
+      <div class="pc-dim small">AI 发出去的结构：系统 / 用户 / 助手条目，可以直接跟酒馆的预设走；每个功能还能单独选 API 和模型。</div>
+      <div class="pc-actions wrap" style="margin-top:6px"><button class="pc-btn dark" data-act="nav" data-view="aipreset">打开 AI 预设</button></div>\`);
+    const dlo = dlOpts();
+    const opt = (v, t, cur) => \`<option value="\${v}" \${cur === v ? 'selected' : ''}>\${t}</option>\`;
+    const dlFold = setFold('dl', '下载和水印', [dlo.strip ? '读不出画师串' : '', dlo.on ? '水印「' + esc(dlo.text) + '」' : ''].filter(Boolean).join(' · ') || '原图下载', \`
+      <div class="pc-dim small">看大图、生图结果、历史生图、漫画里点「下载」都按这里来。原图在智库里不变。</div>
+      <label class="pc-field"><span>手机上点下载</span><select data-optstr="dlMode">\${opt('auto', '自动：iPhone 弹分享面板，安卓存进 Download', dlo.mode)}\${opt('share', '总是弹分享面板（选「存储图像」进相册）', dlo.mode)}\${opt('file', '总是下载成文件', dlo.mode)}</select></label>
+      <div class="pc-hint">iPhone 下载的文件在「文件」App 里，不进相册；要进相册得从分享面板点「存储图像」。安卓下载的在 Download 文件夹，相册一般有「Download / 下载」相簿。</div>
+      \${sw('dlStrip', '下载的图读不出画师串', 'NovelAI 原图里藏着正面、负面和画师串，别人拖进读图工具就能看到。开了以后下载的图会去掉这些。')}
+      \${sw('dlMark', '下载的图打水印', '填了文字才会打。打水印也会顺带去掉图里的提示词。')}
+      <label class="pc-field"><span>水印文字</span><input data-optstr="dlMarkText" maxlength="60" value="\${esc(dlo.text)}" placeholder="比如 @if love"></label>
+      <div class="pc-row" style="gap:8px;flex-wrap:wrap">
+        <label class="pc-field" style="flex:1;min-width:120px"><span>位置</span><select data-optstr="dlMarkPos">\${opt('br', '右下', dlo.pos)}\${opt('bl', '左下', dlo.pos)}\${opt('tr', '右上', dlo.pos)}\${opt('tl', '左上', dlo.pos)}\${opt('c', '正中', dlo.pos)}\${opt('tile', '斜着铺满', dlo.pos)}</select></label>
+        <label class="pc-field" style="flex:1;min-width:120px"><span>不透明度</span><input type="range" min="0.1" max="1" step="0.05" data-optstr="dlMarkAlpha" value="\${dlo.alpha}"></label>
+        <label class="pc-field" style="flex:1;min-width:120px"><span>字号</span><input type="range" min="1" max="10" step="0.5" data-optstr="dlMarkSize" value="\${dlo.size}"></label>
+      </div>
+      <div class="pc-actions wrap"><button class="pc-btn" data-act="dlmarkpreview">看看效果</button></div>\`);
+    const ai = ai0 + aipFold + dlFold;
+    const tpl = setFold('tpl', '例图提示词',`);
+patch(`            case 'saveresult': await saveStudioResult(); break;`,`            case 'dlmarkpreview': {
+                const o = { ...dlOpts(), on: true };
+                if (!o.text) o.text = '水印示例';
+                let blob;
+                if (ui.studio.result) { try { blob = await (await fetch(ui.studio.result)).blob(); } catch { } }
+                if (!blob) {
+                    const c = DOC.createElement('canvas'); c.width = 832; c.height = 1216;
+                    const g = c.getContext('2d'), gr = g.createLinearGradient(0, 0, 832, 1216);
+                    gr.addColorStop(0, '#c9b9a6'); gr.addColorStop(1, '#5b6b7a'); g.fillStyle = gr; g.fillRect(0, 0, 832, 1216);
+                    blob = await new Promise(r => c.toBlob(r, 'image/png'));
+                }
+                const url = URL.createObjectURL(await processImage(blob, o));
+                const box = modal(\`<h3 class="pc-h3">水印效果</h3><img src="\${url}" alt="" style="width:100%;border-radius:10px"><div class="pc-actions"><button class="pc-btn" type="button" data-x="close">关闭</button></div>\`);
+                box.addEventListener('click', ev => { if (ev.target.closest('[data-x="close"]')) box.closeModal(); });
+                break;
+            }
+            case 'quickshare': {
+                if (!L.serverBase()) { toastr.warning('先到「设置」里填共享服务器地址', '共享'); break; }
+                const st = ui.studio;
+                openSharedUpload({ artistString: st.pos, negative: st.neg, image: st.result });
+                break;
+            }
+            case 'saveresult': await saveStudioResult(); break;`);
+patch(`                const name = await promptText('新预设的名字', '我的预设');
+                if (name == null) break;
+                const cfg = T.aiCfg(), id = M.uid('ap');
+                cfg.list[id] = { id, name: name.trim() || '我的预设', ents:`,`                const cfg = T.aiCfg(), id = M.uid('ap');
+                let k = Object.keys(cfg.list).length + 1;
+                while (Object.values(cfg.list).some(x => x.name === '我的预设 ' + k)) k++;
+                const name = '我的预设 ' + k;
+                toastr.success(\`新建好了「\${name}」，想换名字点「改名」\`, 'AI 预设', { timeOut: 2500 });
+                cfg.list[id] = { id, name, ents:`);
+patch(`                const name = await promptText('给这段固定提示词起个名字', sceneName(p.scene));
+                if (name == null) break;
+                ui.studio.scenes = [{ ...p, name: name.trim() || '没起名' }, ...(ui.studio.scenes || [])];
+                ui.studio.recentScenes = (ui.studio.recentScenes || []).filter(x => sceneSig(x) !== sceneSig(p));
+                saveStudio(); toastr.success('存好了', '固定提示词', { timeOut: 1500 }); render(); break;`,`                ui.studio.scenes = [{ ...p, name: sceneName(p.scene) || '没起名' }, ...(ui.studio.scenes || [])];
+                ui.studio.recentScenes = (ui.studio.recentScenes || []).filter(x => sceneSig(x) !== sceneSig(p));
+                saveStudio(); toastr.success('存好了，想换名字点它旁边的「改名」', '固定提示词', { timeOut: 2500 }); render(); break;`);
+patch(`        <button class="pc-btn" data-act="saveresult">存为例图</button>`,`        <button class="pc-btn" data-act="saveresult">存为例图</button>
+        <button class="pc-btn" data-act="quickshare">上传到共享</button>`);
+patch(`        <a class="pc-btn" data-pc-href="\${esc(x.url)}" download="zhiku_\${x.at}.png">下载</a>`,`        <a class="pc-btn" data-pc-href="\${esc(x.url)}" download="zhiku_\${x.at}.png">下载</a>
+        <button class="pc-btn" type="button" data-h="share">上传到共享</button>`);
+patch(`        if (act === 'close') box.closeModal();
+        if (act === 'delete') { if (!(await confirmBox('删掉这张图？图片也会删掉。'`,`        if (act === 'close') box.closeModal();
+        if (act === 'share') {
+            if (!L.serverBase()) { toastr.warning('先到「设置」里填共享服务器地址', '共享'); return; }
+            box.closeModal();
+            openSharedUpload({ artistString: x.prompt || x.raw || '', negative: x.negative || '', image: await pcLocal.url(x.url) });
+        }
+        if (act === 'delete') { if (!(await confirmBox('删掉这张图？图片也会删掉。'`);
+patch(`function openSharedUpload() {`,`function openSharedUpload(pre = {}) {`);
+patch(`required placeholder="给这串起个名字"></label>`,`required placeholder="给这串起个名字" value="\${esc(pre.title || '')}"></label>`);
+patch(`required placeholder="artist:aaa, 0.8::artist:bbb::"></textarea>`,`required placeholder="artist:aaa, 0.8::artist:bbb::">\${esc(pre.artistString || '')}</textarea>`);
+patch(`name="negative" maxlength="20000" placeholder="lowres, bad anatomy …"></textarea>`,`name="negative" maxlength="20000" placeholder="lowres, bad anatomy …">\${esc(pre.negative || '')}</textarea>`);
+patch(`      <label class="pc-switch"><input type="checkbox" name="nsfw"><span></span>含 NSFW 内容</label>
+      <p class="pc-dim small" data-share-status`,`      <label class="pc-switch"><input type="checkbox" name="nsfw"><span></span>含 NSFW 内容</label>
+      \${(() => { const o = dlOpts(); return \`<label class="pc-switch"><input type="checkbox" name="mark" \${o.on ? 'checked' : ''} \${o.text ? '' : 'disabled'}><span></span>例图打上我的水印<small>\${o.text ? '「' + esc(o.text) + '」，位置和大小在 设置 →「下载和水印」' : '先到 设置 →「下载和水印」填水印文字'}</small></label>\`; })()}
+      <p class="pc-dim small" data-share-status`);
+patch(`    box.querySelector('[data-share-cancel]').addEventListener('click', () => { if (!busy) box.closeModal(); });`,`    box.querySelector('[data-share-cancel]').addEventListener('click', () => { if (!busy) box.closeModal(); });
+    let preLoading = !!pre.image;
+    if (pre.image) (async () => {
+        const version = previewVersion;
+        try {
+            const response = await fetch(pre.image); if (!response.ok) throw new Error('读取例图失败（' + response.status + '）');
+            const blob = await response.blob();
+            if (!box.isConnected || previewVersion !== version || files.files.length) return;
+            const dt = new DataTransfer();
+            dt.items.add(new File([blob], 'zhiku.png', { type: blob.type || 'image/png' }));
+            files.files = dt.files; files.dispatchEvent(new Event('change'));
+        } catch (e) { console.warn('[智库] 带上例图', e); if (box.isConnected && previewVersion === version) say('例图没带上，可以自己点「选图」。'); }
+        finally { preLoading = false; }
+    })();`);
+patch("        if (busy) return;\n        const value = name => form.elements.namedItem(name).value.trim();", "        if (busy) return;\n        if (preLoading && !files.files.length) { say('例图正在载入，请稍等再发布。'); return; }\n        const value = name => form.elements.namedItem(name).value.trim();");
+patch(`        const nsfw = form.elements.namedItem('nsfw').checked;`,`        const nsfw = form.elements.namedItem('nsfw').checked;
+        const mark = !!form.elements.namedItem('mark')?.checked;`);
+patch(`                const data = await shrinkDataUrl(await fileToDataUrl(selected[i]), 1024, 0.85);`,`                const src = mark ? await processImage(selected[i], { ...dlOpts(), strip: false, on: true }) : selected[i];
+                const data = await shrinkDataUrl(await fileToDataUrl(src), 1024, 0.85);`);
 // 提示词体检：多出来的 ::、权重前面混进的下划线、没关上的权重、SD 括号权重
 patch(`function banWarn(d, str) {`,`/** 找出会让 NovelAI 把后面一大段都按错权重读的写法；fixed 是能自动改好的版本 */
 function lintPrompt(text) {
@@ -1414,9 +1643,9 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',prefix+s+'\n}\n');
 fs.copyFileSync('src/index.js',dir+'/index.js');
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.34',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.34',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.36',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.36',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.8.34 built; storage keys and shared upload preserved.');
+console.log('Extension 0.8.36 built; storage keys and shared upload preserved.');
