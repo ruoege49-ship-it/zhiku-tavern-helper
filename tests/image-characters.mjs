@@ -17,10 +17,11 @@ result = resolveImageCharacters('${"name":"red rose","angle":"from behind","uppe
 assert.equal(result.cast[0].name,'小红');assert.match(result.picks[0].tags,/from behind/);
 assert.equal(resolveImageCharacters('$小红-from behind-sfw-upperbody$, standing', roster).cast[0].name,'小红');
 assert.equal(resolveImageCharacters('$小红-sfw-upperbody$, $红红-sfw-upperbody$', roster).cast.length,1);
-assert.throws(() => resolveImageCharacters('$小-sfw-upperbody$', roster), /找不到/);
+assert.deepEqual(resolveImageCharacters('$小-sfw-upperbody$, waving', roster).unknown, ['小'], 'unknown name still draws');
+assert.equal(resolveImageCharacters('$小-sfw-upperbody$, waving', []).cast.length, 0);
 assert.throws(() => resolveImageCharacters('$小红$', roster), /角色标记请使用/);
 assert.throws(() => resolveImageCharacters('$小红-sfw-upperbody', roster), /配对/);
-assert.throws(() => resolveImageCharacters('$小红-sfw-upperbody$', [{char:people[0],on:false}]), /未启用/);
+assert.equal(resolveImageCharacters('$小红-sfw-upperbody$', [{char:people[0],on:false}]).cast.length, 0, 'disabled character draws without appearance');
 assert.throws(() => resolveImageCharacters('$小红-sfw-upperbody$', [...roster, {char:{...people[1],aliases:'小红'},on:true}]), /匹配到多人/);
 assert.equal(resolveImageCharacters(names.map(n=>`$${n}-sfw-upperbody$`).join(', '),roster).cast.length,5,'no hidden four-character truncation');
 result=resolveImageCharacters('Scene Composition: 2girls, garden; Character 1 Prompt: $小红-sfw-upperbody$, smiling|centers:0.1,0.5; Character 1 UC: angry; Character 2 Prompt: $小蓝-sfw-upperbody$, waving|centers:0.9,0.5; Character 2 UC: sad;',roster);
@@ -75,7 +76,7 @@ await controller.process(0,{manual:true,tokenIndex:0,promptOverride:'$小白-sfw
 assert.equal(requests.at(-1).director[0].key,'ref_3');assert.equal(requests.at(-1).chars.length,1);
 const count=requests.length;
 await controller.process(0,{manual:true,tokenIndex:0,promptOverride:'$不存在-sfw-upperbody$'});
-assert.equal(requests.length,count,'unknown role fails before the image API');assert(notices.some(n=>String(n[0]).includes('找不到')));
+assert.equal(requests.length,count+1,'unregistered role still draws');assert.ok(!requests.at(-1).director?.length,'unregistered role carries no reference');
 // Direct V3 and Tavern paths flatten only selected people; no implicit rest-of-cast append.
 for (const mode of [{naiMode:'tavern',novelaimode:'nai-diffusion-4-5-full'},{naiMode:'direct',novelaimode:'nai-diffusion-3'}]) {
     Object.assign(nai,mode);await adapter.generate('$小红-sfw-upperbody$, smiling');
