@@ -1353,14 +1353,16 @@ patch(`            case 'aipfn': ui.aipOpen = ui.aipOpen === el.dataset.k ? '' :
             case 'aipmodels': {
                 const k = el.dataset.k, f = T.aiCfg().fn[k], p = T.apiProfiles().find(x => x.id === f?.api);
                 if (!p) break;
+                const seq = (ui.aipModelSeq ||= {})[k] = (ui.aipModelSeq[k] || 0) + 1;
+                const current = () => ui.aipModelSeq[k] === seq && T.aiCfg().fn[k]?.api === p.id;
                 ui.aipModelsBusy = k; render();
-                try { (ui.aipModels ||= {})[k] = await T.listModels(p); if (!ui.aipModels[k].length) toastr.info('这个接口没列出模型，自己填名字也行', 'AI 预设'); }
-                catch (e) { toastr.error(e.message || String(e), '拉取模型失败'); }
-                ui.aipModelsBusy = ''; render(); break;
+                try { const models = await T.listModels(p); if (current()) { (ui.aipModels ||= {})[k] = models; if (!models.length) toastr.info('这个接口没列出模型，自己填名字也行', 'AI 预设'); } }
+                catch (e) { if (current()) toastr.error(e.message || String(e), '拉取模型失败'); }
+                if (current()) { if (ui.aipModelsBusy === k) ui.aipModelsBusy = ''; render(); } break;
             }
             case 'aipmodelpick': { const f = (T.aiCfg().fn[el.dataset.k] ||= { extra: [] }); f.model = f.model === el.dataset.m ? '' : el.dataset.m; commit(); render(); break; }`);
 patch(`    if (el.matches?.('[data-aipst]')) { T.aiCfg().active = 'tavern:' + el.value; commit(); render(); return; }`,`    if (el.matches?.('[data-aipst]')) { T.aiCfg().active = 'tavern:' + el.value; commit(); render(); return; }
-    if (el.matches?.('[data-aipapi]')) { const f = (T.aiCfg().fn[el.dataset.k] ||= { extra: [] }); f.api = el.value; if (!el.value || el.value === 'st') f.model = ''; commit(); render(); return; }
+    if (el.matches?.('[data-aipapi]')) { const f = (T.aiCfg().fn[el.dataset.k] ||= { extra: [] }); if (f.api !== el.value) { f.model = ''; if (ui.aipModels) delete ui.aipModels[el.dataset.k]; (ui.aipModelSeq ||= {})[el.dataset.k] = (ui.aipModelSeq[el.dataset.k] || 0) + 1; if (ui.aipModelsBusy === el.dataset.k) ui.aipModelsBusy = ''; } f.api = el.value; commit(); render(); return; }
     if (el.matches?.('[data-aipmodel]')) { const f = (T.aiCfg().fn[el.dataset.k] ||= { extra: [] }); f.model = el.value.trim(); commit(); return; }`);
 // 下载成功提醒：智库里所有下载（看大图、生图结果、历史生图、漫画、导出数据）
 patch(`download.download='image.png';`,`download.download='zhiku_'+Date.now()+'.png';`);
@@ -1378,7 +1380,7 @@ function dlNote(name) {
     dlTimer = setTimeout(() => {
         const json = /\\.json$/i.test(dlLast);
         const where = json ? '' : isIOS() ? '。在「文件」App 的「下载」里，不在相册；想进相册，到 设置 →「下载和水印」把「手机上点下载」改回「自动」，再从分享面板点「存储图像」' : isAndroid() ? '。存在手机的 Download 文件夹，相册里一般在「Download / 下载」相簿' : '，在浏览器的「下载」里';
-        toastr.success(dlCount > 1 ? \`已下载 \${dlCount} 项\${where}\` : \`\${json ? '数据' : '图片'}已下载：\${dlLast}\${where}\`, '智库', { timeOut: json ? 2500 : 5000 });
+        toastr.success(dlCount > 1 ? \`已发起 \${dlCount} 项下载\${where}\` : \`\${json ? '数据' : '图片'}已发起下载：\${dlLast}\${where}\`, '智库', { timeOut: json ? 2500 : 5000 });
         dlCount = 0;
     }, 700);
 }
@@ -1443,7 +1445,7 @@ function shareAsk(file) {
 }
 async function dlImage(href, name, o, wantShare) {
     let blob;
-    try { blob = await (await fetch(href)).blob(); blob = await processImage(blob, o); }
+    try { const response = await fetch(href); if (!response.ok) throw new Error('读取图片失败（' + response.status + '）'); blob = await response.blob(); blob = await processImage(blob, o); }
     catch (e) { console.warn('[智库] 下载处理', e); toastr.error('图片处理失败：' + (e.message || e), '智库'); return; }
     const fname = (o.strip || o.on) ? name.replace(/\\.(jpe?g|webp)$/i, '.png') : name;
     if (wantShare) {
@@ -1539,7 +1541,7 @@ patch(`        if (act === 'close') box.closeModal();
         if (act === 'share') {
             if (!L.serverBase()) { toastr.warning('先到「设置」里填共享服务器地址', '共享'); return; }
             box.closeModal();
-            openSharedUpload({ artistString: x.raw || x.prompt || '', negative: x.negative || '', image: await pcLocal.url(x.url) });
+            openSharedUpload({ artistString: x.prompt || x.raw || '', negative: x.negative || '', image: await pcLocal.url(x.url) });
         }
         if (act === 'delete') { if (!(await confirmBox('删掉这张图？图片也会删掉。'`);
 patch(`function openSharedUpload() {`,`function openSharedUpload(pre = {}) {`);
@@ -1551,14 +1553,20 @@ patch(`      <label class="pc-switch"><input type="checkbox" name="nsfw"><span><
       \${(() => { const o = dlOpts(); return \`<label class="pc-switch"><input type="checkbox" name="mark" \${o.on ? 'checked' : ''} \${o.text ? '' : 'disabled'}><span></span>例图打上我的水印<small>\${o.text ? '「' + esc(o.text) + '」，位置和大小在 设置 →「下载和水印」' : '先到 设置 →「下载和水印」填水印文字'}</small></label>\`; })()}
       <p class="pc-dim small" data-share-status`);
 patch(`    box.querySelector('[data-share-cancel]').addEventListener('click', () => { if (!busy) box.closeModal(); });`,`    box.querySelector('[data-share-cancel]').addEventListener('click', () => { if (!busy) box.closeModal(); });
+    let preLoading = !!pre.image;
     if (pre.image) (async () => {
+        const version = previewVersion;
         try {
-            const blob = await (await fetch(pre.image)).blob();
+            const response = await fetch(pre.image); if (!response.ok) throw new Error('读取例图失败（' + response.status + '）');
+            const blob = await response.blob();
+            if (!box.isConnected || previewVersion !== version || files.files.length) return;
             const dt = new DataTransfer();
             dt.items.add(new File([blob], 'zhiku.png', { type: blob.type || 'image/png' }));
             files.files = dt.files; files.dispatchEvent(new Event('change'));
-        } catch (e) { console.warn('[智库] 带上例图', e); say('例图没带上，可以自己点「选图」。'); }
+        } catch (e) { console.warn('[智库] 带上例图', e); if (box.isConnected && previewVersion === version) say('例图没带上，可以自己点「选图」。'); }
+        finally { preLoading = false; }
     })();`);
+patch("        if (busy) return;\n        const value = name => form.elements.namedItem(name).value.trim();", "        if (busy) return;\n        if (preLoading && !files.files.length) { say('例图正在载入，请稍等再发布。'); return; }\n        const value = name => form.elements.namedItem(name).value.trim();");
 patch(`        const nsfw = form.elements.namedItem('nsfw').checked;`,`        const nsfw = form.elements.namedItem('nsfw').checked;
         const mark = !!form.elements.namedItem('mark')?.checked;`);
 patch(`                const data = await shrinkDataUrl(await fileToDataUrl(selected[i]), 1024, 0.85);`,`                const src = mark ? await processImage(selected[i], { ...dlOpts(), strip: false, on: true }) : selected[i];
