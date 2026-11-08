@@ -124,17 +124,33 @@ export function parseComicPage(inner) {
     const texts = pieces.map(p => p.text).filter(Boolean);
     const base = visual + (texts.length ? '\nText: ' + texts.join('\n\n') : '');
     const spread = /見開き|double-page spread|2-page spread|wide spread/i.test(base);
-    return { ok: true, base, chars, manual: !!data.manual, spread, panels: data.panels.length };
+    // 对白按格分好，插件自己叠在图上用（NAI 画中文字常常是乱码）
+    const pageTexts = [splitText(data.page.base).text, splitText(data.page.non_character).text].filter(Boolean);
+    const panelTexts = data.panels.map(p => [splitText(p.description).text, splitText(p.non_character).text, ...(p.characters || []).map(c => splitText(c.positive).text)].filter(Boolean));
+    return { ok: true, base, visual, chars, manual: !!data.manual, spread, panels: data.panels.length, pageTexts, panelTexts };
 }
 
 /** 出图请求：画风（正文画师串）在最前面，漫画页描述在后；负面 = 画风负面 + 漫画负面 */
-export function comicRequest(parsed, { stylePos = '', styleNeg = '', extraNeg = '', width = 832, height = 1216 } = {}) {
+export const COMIC_NO_TEXT_NEG = 'text, speech bubble, letters, chinese text, english text';
+/** textMode：draw = 对白交给 NAI 画进图里；overlay = 不让 NAI 画字，插件叠在图上；none = 不要对白 */
+export function comicRequest(parsed, { stylePos = '', styleNeg = '', extraNeg = '', width = 832, height = 1216, textMode = 'draw' } = {}) {
     let w = Number(width) || 832, h = Number(height) || 1216;
     if (parsed.spread && w < h) [w, h] = [h, w];
-    const positive = [String(stylePos || '').trim(), parsed.base].filter(Boolean).join(', ');
-    const negative = [styleNeg, extraNeg].map(s => String(s || '').trim()).filter(Boolean).join(', ');
-    const chars = parsed.chars.map(c => ({ prompt: c.positive, uc: c.negative, ...(c.center ? { center: c.center } : {}) }));
+    const draw = textMode === 'draw' || !parsed.visual;
+    const positive = [String(stylePos || '').trim(), draw ? parsed.base : parsed.visual].filter(Boolean).join(', ');
+    const negative = [styleNeg, extraNeg, draw ? '' : COMIC_NO_TEXT_NEG].map(s => String(s || '').trim()).filter(Boolean).join(', ');
+    const chars = parsed.chars.map(c => ({ prompt: draw ? c.positive : splitText(c.positive).visual, uc: c.negative, ...(c.center ? { center: c.center } : {}) }));
     return { positive, negative, chars, width: w, height: h };
+}
+/** 叠在图上的对白：每格的字放在这一格（按竖着平分估算）底部，整页旁白放最上面 */
+export function captionsHtml(parsed, esc) {
+    if (!parsed?.ok) return '';
+    const n = Math.max(1, parsed.panelTexts.length);
+    const box = (t, style, cls = '') => `<div class="pc-comic-cap ${cls}" style="${style}">${t.map(x => esc(x).replace(/\n+/g, '<br>')).join('<br>')}</div>`;
+    const out = [];
+    if (parsed.pageTexts.length) out.push(box(parsed.pageTexts, 'top:8px', 'top'));
+    parsed.panelTexts.forEach((t, i) => { if (t.length) out.push(box(t, `top:calc(${((i + 1) / n * 100).toFixed(2)}% - ${i === n - 1 ? 44 : 8}px)`)); }); // 最后一格让开左下角的页码
+    return out.length ? `<div class="pc-comic-caps">${out.join('')}</div>` : '';
 }
 
 /** 「让 AI 重写本页」的请求 */
@@ -213,6 +229,13 @@ const CSS = `
 .pc-comic{display:flex;flex-direction:column;gap:10px;margin:10px 0 4px}
 .pc-comic-page{position:relative;margin:0;border-radius:14px;overflow:hidden;border:1.5px solid var(--pc-paper,#f4efe4);background:var(--pc-paper-2,#ebe4d2);-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}
 .pc-comic-page img{display:block;width:100%;height:auto;cursor:pointer;-webkit-user-drag:none}
+.pc-comic-caps{position:absolute;inset:0;pointer-events:none}
+.pc-comic-cap{position:absolute;left:50%;transform:translate(-50%,-100%);width:max-content;max-width:86%;background:rgba(255,255,255,.93);color:#16120f;border:1.5px solid #16120f;border-radius:12px;padding:3px 11px;font:600 13px/1.5 "Noto Serif SC","Songti SC",serif;text-align:center;box-shadow:0 2px 0 rgba(0,0,0,.25);word-break:break-word}
+.pc-comic-cap.top{transform:translate(-50%,0);background:#16120f;color:#f4efe4}
+.pc-cb-art .pc-comic-cap{font-size:11px;padding:2px 8px}
+.pc-comic-acts{position:absolute;left:0;right:0;top:0;display:none;gap:8px;justify-content:center;padding:10px;background:linear-gradient(rgba(20,18,16,.55),transparent)}
+.pc-comic-page.acts .pc-comic-acts{display:flex}
+.pc-comic-acts button{border:1.5px solid #f4efe4;background:rgba(20,18,16,.65);color:#f4efe4;border-radius:999px;padding:5px 14px;font-size:13px;cursor:pointer}
 .pc-comic-tag,.pc-comic-ver{position:absolute;bottom:8px;font:11px ui-monospace,Menlo,monospace;letter-spacing:.1em;background:rgba(244,239,228,.94);color:#3a2a22;padding:2px 10px;border-radius:999px}
 .pc-comic-tag{left:8px}.pc-comic-ver{right:8px;display:flex;gap:4px;align-items:center;padding:0 4px}
 .pc-comic-ver button{border:0;background:transparent;color:#3a2a22;font-size:15px;line-height:1;padding:4px 6px;cursor:pointer}
@@ -364,7 +387,8 @@ export function createComicController(deps) {
             if (!parsed.ok) throw new Error(parsed.reason);
             const st = style_();
             const [w, h] = size();
-            const req = comicRequest(parsed, { stylePos: st.pos, extraNeg: negativeFor(), width: w, height: h });
+            const textMode = ['draw', 'overlay', 'none'].includes(opts().comicText) ? opts().comicText : 'overlay';
+            const req = comicRequest(parsed, { stylePos: st.pos, extraNeg: negativeFor(), width: w, height: h, textMode });
             running.set(job, 'run'); render(id);
             const r = await generatePage(req);
             if (!snap.current()) return;
@@ -372,7 +396,7 @@ export function createComicController(deps) {
             if (!saved?.url) throw new Error('漫画图片保存未返回地址');
             if (!snap.current()) { discard(saved.url); return; }
             const hadExtra = !!msg.extra, hadStore = !!msg.extra?.zhikuComic, old = rec(msg, block.key);
-            const versions = [...(old?.versions || []), { url: saved.url, seed: r.sent?.seed, size: r.sent?.size, at: Date.now(), style: st.name, sent: { positive: req.positive, negative: req.negative, chars: req.chars } }];
+            const versions = [...(old?.versions || []), { url: saved.url, seed: r.sent?.seed, size: r.sent?.size, at: Date.now(), style: st.name, textMode, captions: textMode === 'overlay' ? { ok: true, pageTexts: parsed.pageTexts, panelTexts: parsed.panelTexts } : null, sent: { positive: req.positive, negative: req.negative, chars: req.chars } }];
             const removed = versions.length > 10 ? versions.shift() : null;
             const entry = { ...(old || {}), versions, cur: versions.length - 1 };
             store(msg)[block.key] = entry;
@@ -414,12 +438,14 @@ export function createComicController(deps) {
         const tag = `<span class="pc-comic-tag">第 ${b.page} / ${b.total} 页</span>`;
         if (v) {
             const ver = r.versions.length > 1 ? `<span class="pc-comic-ver"><button data-cv="-1" aria-label="上一版">‹</button>${(r.cur ?? 0) + 1}/${r.versions.length}<button data-cv="1" aria-label="下一版">›</button></span>` : '';
-            return `<figure class="pc-comic-page${running.has(job) ? ' busy' : ''}" data-ckey="${b.key}" data-page="${b.page}"><img data-comic-src="${esc(v.url)}" alt="第 ${b.page} 页" draggable="false">${tag}${ver}</figure>`;
+            const caps = v.textMode === 'overlay' ? captionsHtml(v.captions || parseComicPage(b.inner), esc) : '';
+            const acts = `<div class="pc-comic-acts"><button data-cgen>重画这一页</button><button data-cwork>编辑本页</button></div>`;
+            return `<figure class="pc-comic-page${running.has(job) ? ' busy' : ''}" data-ckey="${b.key}" data-page="${b.page}"><img data-comic-src="${esc(v.url)}" alt="第 ${b.page} 页" draggable="false">${caps}${tag}${ver}${acts}</figure>`;
         }
         const st = running.get(job);
         const err = errors.get(job);
         const text = st === 'run' ? '生成中…' : st === 'wait' ? '排队中' : err ? '没出来' : enabled() ? (opts().comicAuto === false ? '还没生成' : '等待生成') : '漫画模式没开';
-        return `<div class="pc-comic-wait" data-ckey="${b.key}" data-page="${b.page}"><div>第 ${b.page} / ${b.total} 页 · ${text}${err ? `<small>${esc(err)}</small>` : ''}${!st ? `<br><button data-cgen>${err ? '重试' : '生成这一页'}</button>` : ''}<small>长按打开本页工作台</small></div></div>`;
+        return `<div class="pc-comic-wait" data-ckey="${b.key}" data-page="${b.page}"><div>第 ${b.page} / ${b.total} 页 · ${text}${err ? `<small>${esc(err)}</small>` : ''}${!st ? `<br><button data-cgen>${err ? '重试' : '生成这一页'}</button> <button data-cwork>编辑本页</button>` : ''}</div></div>`;
     }
     function render(id) {
         const el = doc.querySelector(`#chat .mes[mesid="${id}"]`);
@@ -457,7 +483,7 @@ export function createComicController(deps) {
         hydrate(box);
     }
     function hydrate(root) {
-        for (const img of root.querySelectorAll('img[data-comic-src]')) Promise.resolve(resolveUrl(img.dataset.comicSrc)).then(u => { if (u) img.src = u; else img.alt = '这台设备上没有这张图（存在别的浏览器里），可以长按重画'; });
+        for (const img of root.querySelectorAll('img[data-comic-src]')) Promise.resolve(resolveUrl(img.dataset.comicSrc)).then(u => { if (u) img.src = u; else img.alt = '这台设备上没有这张图（存在别的浏览器里），点一下图可以重画'; });
     }
     /** chatChanged：换了聊天，在途的图不再往旧楼里存 */
     function renderAll({ chatChanged = false } = {}) {
@@ -499,19 +525,17 @@ export function createComicController(deps) {
             });
             render(t.id); return;
         }
-        if (ev.target.closest('[data-cgen]')) { ev.stopPropagation(); void generateOne(t.id, t.block); return; }
-        if (ev.target.tagName !== 'IMG') return;
-        const now = Date.now();
-        const twice = ev.detail === 2 || (lastTap && lastTap.page === t.page && now - lastTap.at < 380);
-        lastTap = twice ? null : { page: t.page, at: now };
-        if (twice) { ev.preventDefault(); notify('重画第 ' + t.block.page + ' 页'); void generateOne(t.id, t.block); }
+        if (ev.target.closest('[data-cgen]')) { ev.stopPropagation(); doc.querySelectorAll('.pc-comic-page.acts').forEach(n => n.classList.remove('acts')); void generateOne(t.id, t.block); return; }
+        if (ev.target.closest('[data-cwork]')) { ev.stopPropagation(); doc.querySelectorAll('.pc-comic-page.acts').forEach(n => n.classList.remove('acts')); openWorkbench(t.id, t.block.key); return; }
+        // 点一下图：只是显示 / 收起这一页的按钮，不会直接重画（以前双击就重画，滑动时很容易误触）
+        if (ev.target.tagName !== 'IMG' && !ev.target.closest('.pc-comic-caps')) return;
+        const fig = ev.target.closest('.pc-comic-page');
+        if (!fig) return;
+        const on = !fig.classList.contains('acts');
+        doc.querySelectorAll('.pc-comic-page.acts').forEach(n => n.classList.remove('acts'));
+        fig.classList.toggle('acts', on);
     }
-    function onDown(ev) {
-        const t = targetOf(ev);
-        if (!t || ev.button > 0 || ev.target.closest('button')) return;
-        const x = ev.clientX, y = ev.clientY;
-        press = { t, x, y, timer: win.setTimeout(() => { press = null; suppressClick = true; openWorkbench(t.id, t.block.key); }, 550) };
-    }
+    function onDown() { /* 不再用长按，留着给 stop() 解绑 */ }
     function cancelPress(ev) {
         if (!press) return;
         if (ev.type === 'pointermove' && Math.hypot(ev.clientX - press.x, ev.clientY - press.y) < 10) return;
@@ -670,11 +694,11 @@ export function createComicController(deps) {
         const pages = [];
         chat.forEach((msg, id) => {
             if (!msg || msg.is_user) return;
-            for (const b of comicBlocks(srcOf(msg))) { const v = curVer(rec(msg, b.key)); if (v) pages.push({ id, page: b.page, total: b.total, url: v.url, name: msg.name || '' }); }
+            for (const b of comicBlocks(srcOf(msg))) { const v = curVer(rec(msg, b.key)); if (v) pages.push({ id, page: b.page, total: b.total, url: v.url, name: msg.name || '', caps: v.textMode === 'overlay' ? captionsHtml(v.captions || parseComicPage(b.inner), esc) : '' }); }
         });
         const urls = new Map();
         const url = async p => { if (!urls.has(p.url)) urls.set(p.url, await resolveUrl(p.url)); return urls.get(p.url); };
-        const art = p => `<div class="pc-cb-art"><img data-cb="${esc(p.url)}" alt="第 ${p.id} 楼第 ${p.page} 页" draggable="false"><span>${p.id} 楼 · ${p.page}/${p.total}</span></div>`;
+        const art = p => `<div class="pc-cb-art"><img data-cb="${esc(p.url)}" alt="第 ${p.id} 楼第 ${p.page} 页" draggable="false">${p.caps || ''}<span>${p.id} 楼 · ${p.page}/${p.total}</span></div>`;
         const fill = root => { for (const img of root.querySelectorAll('img[data-cb]:not([src])')) { const p = pages.find(x => x.url === img.dataset.cb); if (p) url(p).then(u => { if (u) img.src = u; }); } };
 
         const book = doc.createElement('div');
