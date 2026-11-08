@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';import fs from 'node:fs';import vm from 'node:vm';
 const source=fs.readFileSync(new URL('../runtime.js',import.meta.url),'utf8');const part=(a,b)=>{const i=source.indexOf(a),j=source.indexOf(b,i);assert(i>=0&&j>i,a);return source.slice(i,j)};
 const calls=[];let array=false;
-const translate=vm.runInNewContext(part('async function zhForTags(', 'return { zhForTags,')+'\nzhForTags',{pickJson:JSON.parse,askLLM:async(s,t,o)=>{calls.push({s,t,o});const ens=t.split('\n');return JSON.stringify({zh:array?ens.map(()=> '中文'):Object.fromEntries(ens.map(en=>[en,'译文']))});}});
+const translate=vm.runInNewContext(part('async function zhForTags(', 'return { AI_FNS,')+'\nzhForTags',{pickJson:JSON.parse,askLLM:async(s,t,o)=>{calls.push({s,t,o});const ens=t.split('\n');return JSON.stringify({zh:array?ens.map(()=> '中文'):Object.fromEntries(ens.map(en=>[en,'译文']))});}});
 let result=await translate([...Array.from({length:61},(_,i)=>'tag'+i),'tag0']);assert.equal(calls.length,2);assert.equal(Object.keys(result).length,61);assert.equal(calls[0].t.split('\n').length,60);array=true;result=await translate(['Black Hair']);assert.equal(result['black hair'],'中文');
 const c={key:'one',appearance:[{en:'black hair',zh:''},{en:'blue eyes',zh:'蓝眼'}],outfits:[{tags:[{en:'coat',zh:''}]}]},data={characters:{one:c}};let saved=0,pending;
 const T={zhForTags:async ens=>Object.fromEntries(ens.map(en=>[en.toLowerCase(),'中文'])),textToPairs:async()=>[{en:'gloves',zh:''}]};
