@@ -45,7 +45,7 @@ export function applyComic(source) {
         document: DOC, getContext: () => SillyTavern.getContext(), getData, commit: () => __mod_store.commit({ silent: true }), model: __mod_model,
         generatePage: req => N.generate({ ...req, comic: true }), storeImage: pcStoreImage, resolveUrl: u => pcLocal.url(u), dropImage: pcDropImage,
         recordImage: shot => pcRecordImage(shot), askLLM: (...a) => __mod_translate.askLLM(...a),
-        notify: m => toastr.info(m, '智库 · 漫画', { timeOut: 1500 }), modal: UI.modal, esc: UI.esc,
+        notify: m => toastr.info(m, '智库 · 漫画', { timeOut: 1500 }), notifyError: m => toastr.error(m, '智库 · 漫画', { timeOut: 9000 }), modal: UI.modal, esc: UI.esc,
     });
     globalThis.__zhikuComic = comic;
     cleanups.push(() => { comic.stop(); if (globalThis.__zhikuComic === comic) globalThis.__zhikuComic = null; });
