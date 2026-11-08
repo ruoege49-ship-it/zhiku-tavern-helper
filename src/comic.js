@@ -157,6 +157,44 @@ export function parseRewrite(text) {
     const plan = /<comic_plan\b[^>]*>([\s\S]*?)<\/comic_plan>/i.exec(t);
     return { image, plan: plan ? plan[1].trim() : '' };
 }
+/** 正文 → 给 AI 读的干净文字（去掉思考、标签、旧的生图标记） */
+export function storyText(mes) {
+    return String(mes || '')
+        .replace(/<(thinking|think|comic_plan|image|details|style|script)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
+        .replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '')
+        .replace(/\n{3,}/g, '\n\n').trim();
+}
+/** 「把这一楼画成漫画」的请求：读这一楼的正文，改编成几页漫画分镜 */
+export function adaptRequest(story, { pages = 0, cast = '', before = '' } = {}) {
+    const system = '你是漫画分镜导演，把小说 / 角色扮演的正文改编成日式漫画页，给 NovelAI V5 出图用。'
+        + '每一页先写一组 <comic_plan>（这一页讲什么、几格、每格的构图和对白），紧跟着写一组 <image>…</image>。只输出这些块，不要任何解释。'
+        + '<image> 用分段文本协议：第一行 @page，下面写这一页的整体：分级（rating:general 或 rating:sensitive）、实际人数词（如 1boy, 1girl, 2boys）、comic page、画格数量与布局、留白、光影、色调。'
+        + '然后每一格写 @panel P1、@panel P2…，下面写这一格的位置大小、镜头、环境；格内每个看得见的人物写 @character C1、C2…，下面写 boy / girl / other（不带数字）、完整外貌衣着、动作表情；可选 @negative 写这个人物不要的东西。'
+        + '要画进图里的对白、旁白、拟声，写在对应段落末尾单独一行「Text: 」后面，用正文的语言，一格不超过两句。'
+        + '标签用英文 NovelAI / Danbooru 标签，逗号隔开；不要写画师名和画风（画风另外加）。人物外貌照下面给的角色资料写，前后页保持一致。'
+        + '\n\n格式示例：\n<comic_plan>第 1 页：两格。P1 远景交代咖啡馆和雨；P2 近景他看向窗外。</comic_plan>\n<image>\n@page\nrating:general, 1boy, comic page, 2 panels, vertical layout, rainy night, warm indoor light\n@panel P1\ntop half, wide shot, cafe interior, rain on window\n@panel P2\nbottom half, close-up\n@character C1\nboy, black hair, grey eyes, white shirt, black vest, sitting, looking outside, melancholic\nText: 「又下雨了。」\n</image>';
+    const user = (cast ? `<characters>\n${cast}\n</characters>\n\n` : '')
+        + (before ? `<previous readonly="true">\n${before}\n</previous>\n\n` : '')
+        + `<story>\n${story}\n</story>\n\n把 <story> 改编成${pages ? ` ${pages} 页` : ' 1–4 页（按剧情多少自己定，一页 2–5 格）'}漫画。只画 <story> 里发生的事。`;
+    return { system, user };
+}
+/** AI 改编出来的几页：只留能用的 <comic_plan> + <image> */
+export function parseAdapt(text) {
+    const t = String(text || '');
+    const out = [];
+    let last = 0;
+    for (const m of t.matchAll(COMIC_BLOCK)) {
+        const inner = m[1].trim();
+        if (parseComicPage(inner).ok) {
+            const plan = [...t.slice(last, m.index).matchAll(PLAN_BLOCK)].at(-1);
+            out.push((plan ? `<comic_plan>\n${plan[1].trim()}\n</comic_plan>\n` : '') + `<image>\n${inner}\n</image>`);
+        }
+        last = m.index + m[0].length;
+    }
+    if (!out.length) throw new Error('AI 没有按格式写出漫画页（缺少 <image>@page …</image>）');
+    return out.join('\n\n');
+}
+
 /** 把消息里的第 page 页换成新写的 */
 export function replacePage(message, page, { image, plan }) {
     const blocks = comicBlocks(message);
@@ -170,6 +208,8 @@ export function replacePage(message, page, { image, plan }) {
 // ───────────── 楼层里的显示与操作 ─────────────
 
 const CSS = `
+.pc-comic-redo{display:flex;gap:8px;justify-content:flex-end;margin-top:6px}
+.pc-comic-redo button{border:1px dashed currentColor;background:transparent;color:inherit;opacity:.75;border-radius:999px;padding:3px 12px;font-size:12px;cursor:pointer}
 .pc-comic{display:flex;flex-direction:column;gap:10px;margin:10px 0 4px}
 .pc-comic-page{position:relative;margin:0;border-radius:14px;overflow:hidden;border:1.5px solid var(--pc-paper,#f4efe4);background:var(--pc-paper-2,#ebe4d2);-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}
 .pc-comic-page img{display:block;width:100%;height:auto;cursor:pointer;-webkit-user-drag:none}
@@ -244,6 +284,19 @@ export function createComicController(deps) {
     const enabled = () => !!opts().comicOn;
     const chatKey = c => String(c.getCurrentChatId?.() ?? c.chatId ?? '') + '|' + String(c.characterId ?? '') + '|' + String(c.groupId ?? '');
     const store = msg => (msg.extra ||= {}, msg.extra.zhikuComic ||= {});
+    // 漫画页的来源：回复里自己写了 <image>@page 就用正文；没写的话，用「画成漫画」让 AI 改编出来、存在这楼 extra 里的（按 swipe 分开）
+    const swipeKey = msg => String(msg.swipe_id ?? 0);
+    const srcOf = msg => !msg ? '' : comicBlocks(msg.mes).length ? msg.mes : (msg.extra?.zhikuComicSrc?.[swipeKey(msg)] || '');
+    function setSrc(msg, text) {
+        if (comicBlocks(msg.mes).length) {
+            msg.mes = text;
+            if (msg.swipes && Number.isInteger(msg.swipe_id)) msg.swipes[msg.swipe_id] = msg.mes;
+            return 'mes';
+        }
+        ((msg.extra ||= {}).zhikuComicSrc ||= {})[swipeKey(msg)] = text;
+        return 'extra';
+    }
+    const adapting = new Map(); // id -> 状态文字
     const rec = (msg, key) => msg?.extra?.zhikuComic?.[key] || null;
     const curVer = r => r?.versions?.[Math.min(r.cur ?? r.versions.length - 1, r.versions.length - 1)] || null;
     const size = () => String(opts().comicSize || '832x1216').split('x').map(Number);
@@ -262,9 +315,20 @@ export function createComicController(deps) {
     async function saveChat(c = getContext()) { await (c.saveChatConditional || c.saveChat)?.call(c); }
     function pageSnapshot(id, block) {
         const c = getContext(), msg = c.chat?.[id], seq = chatSeq;
-        if (stopped || !msg || !comicBlocks(msg.mes).some(b => b.key === block.key)) return null;
-        const source = msg.mes, swipe = msg.swipe_id, chat = chatKey(c);
-        return { c, msg, source, swipe, chat, seq, current: () => !stopped && seq === chatSeq && chatKey(getContext()) === chat && getContext().chat?.[id] === msg && msg.mes === source && msg.swipe_id === swipe };
+        if (stopped || !msg || (block && !comicBlocks(srcOf(msg)).some(b => b.key === block.key))) return null;
+        const source = srcOf(msg), body = msg.mes, native = !!comicBlocks(body).length, swipe = msg.swipe_id, chat = chatKey(c);
+        return { c, msg, source, body, swipe, current: (next = source) => !stopped && seq === chatSeq && chatKey(getContext()) === chat && getContext().chat?.[id] === msg && msg.mes === (native ? next : body) && srcOf(msg) === next && msg.swipe_id === swipe };
+    }
+    function checkpoint(msg) {
+        const body = msg.mes, swipe = msg.swipe_id, oldSwipe = msg.swipes?.[swipe], hadExtra = !!msg.extra;
+        const fields = ['zhikuComic', 'zhikuComicSrc'];
+        const saved = fields.map(k => msg.extra?.[k] ? { ...msg.extra[k] } : undefined);
+        return () => {
+            msg.mes = body;
+            if (msg.swipes && Number.isInteger(swipe)) msg.swipes[swipe] = oldSwipe;
+            fields.forEach((k, i) => { if (saved[i]) (msg.extra ||= {})[k] = saved[i]; else if (msg.extra) delete msg.extra[k]; });
+            if (!hadExtra && msg.extra && !Object.keys(msg.extra).length) delete msg.extra;
+        };
     }
     const discard = url => { if (url) Promise.resolve().then(() => dropImage?.(url)).catch(() => {}); };
 
@@ -315,7 +379,7 @@ export function createComicController(deps) {
         if (stopped || (!manual && (!enabled() || opts().comicAuto === false))) return;
         const msg = getContext().chat?.[id];
         if (!msg || msg.is_user || msg.is_system) return;
-        const blocks = comicBlocks(msg.mes);
+        const blocks = comicBlocks(srcOf(msg));
         if (!blocks.length) return;
         render(id);
         const snap = pageSnapshot(id, blocks[0]);
@@ -342,12 +406,22 @@ export function createComicController(deps) {
         const msg = getContext().chat?.[id];
         el?.querySelector(':scope .pc-comic')?.remove();
         if (!el || !msg || msg.is_user) return;
-        const blocks = comicBlocks(msg.mes);
-        if (!blocks.length || (!enabled() && !blocks.some(b => rec(msg, b.key)?.versions?.length))) return;
+        const blocks = comicBlocks(srcOf(msg));
+        const own = comicBlocks(msg.mes).length > 0;
+        if (adapting.has(id) && !blocks.length) {
+            const box = doc.createElement('div');
+            box.className = 'pc-comic';
+            box.dataset.mes = String(id);
+            box.innerHTML = `<div class="pc-comic-wait"><div>${esc(adapting.get(id))}</div></div>`;
+            const text = el.querySelector('.mes_text');
+            (text ? text.after(box) : el.appendChild(box));
+            return;
+        }
+        if (!blocks.length || (own && !enabled() && !blocks.some(b => rec(msg, b.key)?.versions?.length))) return;
         const box = doc.createElement('div');
         box.className = 'pc-comic';
         box.dataset.mes = String(id);
-        box.innerHTML = blocks.map(b => pageHtml(id, msg, b)).join('');
+        box.innerHTML = blocks.map(b => pageHtml(id, msg, b)).join('') + (own ? '' : `<div class="pc-comic-redo"><button data-cadapt="${id}">${adapting.has(id) ? esc(adapting.get(id)) : '重新改编这一楼'}</button><button data-cremove="${id}">收起漫画</button></div>`);
         const text = el.querySelector('.mes_text');
         (text ? text.after(box) : el.appendChild(box));
         hydrate(box);
@@ -359,7 +433,7 @@ export function createComicController(deps) {
     function renderAll({ chatChanged = false } = {}) {
         if (chatChanged) { chatSeq++; errors.clear(); cancelPress({type:'cancel'}); for (const close of [...panels]) close(); }
         const chat = getContext().chat || [];
-        for (let i = 0; i < chat.length; i++) if (chat[i]?.mes?.includes('<image')) render(i);
+        for (let i = 0; i < chat.length; i++) if (chat[i]?.mes?.includes('<image') || chat[i]?.extra?.zhikuComicSrc || adapting.has(i)) render(i);
     }
 
     // ── 点击、双击、长按 ──
@@ -368,12 +442,19 @@ export function createComicController(deps) {
         if (!page) return null;
         const id = Number(page.closest('.pc-comic').dataset.mes);
         const msg = getContext().chat?.[id];
-        const block = msg && comicBlocks(msg.mes).find(b => b.key === page.dataset.ckey);
+        const block = msg && comicBlocks(srcOf(msg)).find(b => b.key === page.dataset.ckey);
         return block ? { page, id, msg, block } : null;
     };
     let lastTap = null, press = null, suppressClick = false;
     function onClick(ev) {
         if (suppressClick) { suppressClick = false; ev.preventDefault(); ev.stopPropagation(); return; }
+        const ad = ev.target?.closest?.('[data-cadapt],[data-cremove]');
+        if (ad) {
+            ev.stopPropagation();
+            if (ad.dataset.cadapt) { if (!adapting.has(Number(ad.dataset.cadapt))) void adapt(Number(ad.dataset.cadapt), { redo: true }); }
+            else void unadapt(Number(ad.dataset.cremove));
+            return;
+        }
         const t = targetOf(ev);
         if (!t) return;
         const cv = ev.target.closest('[data-cv]');
@@ -415,7 +496,7 @@ export function createComicController(deps) {
     // ── 本页工作台 ──
     function openWorkbench(id, key) {
         const msg = getContext().chat?.[id];
-        const block = msg && comicBlocks(msg.mes).find(b => b.key === key);
+        const block = msg && comicBlocks(srcOf(msg)).find(b => b.key === key);
         if (!block) return;
         const snap = pageSnapshot(id, block);
         if (!snap) return;
@@ -471,7 +552,7 @@ export function createComicController(deps) {
             if (act === 'ai') {
                 t.disabled = true; say('AI 正在重写这一页…');
                 try {
-                    const { system, user } = rewriteRequest(msg.mes, block.page, box.querySelector('[data-w-req]').value);
+                    const { system, user } = rewriteRequest(srcOf(msg), block.page, box.querySelector('[data-w-req]').value);
                     const out = parseRewrite(await askLLM(system, user, { maxTokens: 6000 }));
                     if (!snap.current()) throw new Error('聊天或原文已变化，本次改写未写入');
                     box.closeModal();
@@ -483,24 +564,67 @@ export function createComicController(deps) {
     /** 把新写的一页换进这楼的正文，旧版本跟着搬过去，然后出图 */
     async function applyNewPage(id, block, page, snap = pageSnapshot(id, block)) {
         if (!snap?.current()) return;
-        const { c, msg, source, swipe, chat, seq } = snap;
-        const hadExtra = !!msg.extra, oldStore = msg.extra?.zhikuComic, old = rec(msg, block.key), oldSwipe = msg.swipes?.[swipe];
-        msg.mes = replacePage(source, block.page, page);
-        const nb = comicBlocks(msg.mes)[block.page - 1];
-        if (old && nb && nb.key !== block.key) { msg.extra.zhikuComic = { ...oldStore, [nb.key]: old }; delete msg.extra.zhikuComic[block.key]; }
-        if (msg.swipes && Number.isInteger(swipe)) msg.swipes[swipe] = msg.mes;
+        const { c, msg, source } = snap, restore = checkpoint(msg), old = rec(msg, block.key);
+        const next = replacePage(source, block.page, page), where = setSrc(msg, next);
+        const nb = comicBlocks(next)[block.page - 1];
+        if (old && nb && nb.key !== block.key) { store(msg)[nb.key] = old; delete store(msg)[block.key]; }
         try { await saveChat(c); }
-        catch (e) {
-            msg.mes = source;
-            if (msg.swipes && Number.isInteger(swipe)) msg.swipes[swipe] = oldSwipe;
-            if (oldStore) msg.extra.zhikuComic = oldStore;
-            else if (msg.extra) { delete msg.extra.zhikuComic; if (!hadExtra && !Object.keys(msg.extra).length) delete msg.extra; }
-            notify('漫画改写保存失败：' + e.message); return;
-        }
-        if (stopped || getContext().chat?.[id] !== msg || chatKey(getContext()) !== chat || seq !== chatSeq || msg.mes !== replacePage(source, block.page, page) || msg.swipe_id !== swipe) return;
-        c.updateMessageBlock?.(id, msg);
+        catch (e) { restore(); notify('漫画改写保存失败：' + e.message); return; }
+        if (!snap.current(next)) return;
+        if (where === 'mes') c.updateMessageBlock?.(id, msg);
         render(id);
         if (nb) await generateOne(id, nb);
+    }
+
+    // ── 把一楼画成漫画：AI 读正文写分镜，存进这楼，再一页页出图 ──
+    async function adapt(id, { pages = 0, redo = false } = {}) {
+        const snap = pageSnapshot(id);
+        if (!snap) return;
+        const { c, msg, source } = snap;
+        if (msg.is_system) return;
+        if (msg.is_user) { notify('只能把角色的回复画成漫画'); return; }
+        if (comicBlocks(msg.mes).length || (source && !redo)) { await process(id, { manual: true }); return; }
+        if (adapting.has(id)) return;
+        const story = storyText(msg.mes);
+        if (!story) { notify('这一楼没有正文'); return; }
+        adapting.set(id, 'AI 正在把这一楼改编成漫画分镜…'); render(id);
+        try {
+            const prevMsg = (c.chat || []).slice(0, id).reverse().find(m => m && !m.is_system && m.extra?.zhikuComicSrc);
+            const before = prevMsg ? comicBlocks(srcOf(prevMsg)).slice(-1).map(b => b.inner).join('') : '';
+            const { system, user } = adaptRequest(story.slice(0, 12000), { pages, cast: deps.castText?.() || '', before });
+            const out = parseAdapt(await askLLM(system, user, { maxTokens: 12000 }));
+            if (!snap.current()) return;
+            const restore = checkpoint(msg), removed = [];
+            setSrc(msg, out);
+            const retained = new Set(Object.values(msg.extra.zhikuComicSrc).flatMap(text => comicBlocks(text).map(b => b.key)));
+            for (const b of comicBlocks(source)) if (!retained.has(b.key)) {
+                removed.push(...(rec(msg, b.key)?.versions || []));
+                delete store(msg)[b.key];
+            }
+            try { await saveChat(c); } catch (e) { restore(); throw e; }
+            removed.forEach(v => discard(v.url));
+            if (!snap.current(out)) return;
+        } catch (e) {
+            notify('没改编成：' + (e?.message || e));
+            return;
+        } finally { adapting.delete(id); render(id); }
+        await process(id, { manual: true });
+    }
+    async function unadapt(id) {
+        const snap = pageSnapshot(id);
+        if (!snap || adapting.has(id)) return;
+        const { c, msg, source } = snap;
+        if (!msg.extra?.zhikuComicSrc?.[swipeKey(msg)]) return;
+        const restore = checkpoint(msg), removed = [];
+        delete msg.extra.zhikuComicSrc[swipeKey(msg)];
+        const retained = new Set(Object.values(msg.extra.zhikuComicSrc).flatMap(text => comicBlocks(text).map(b => b.key)));
+        for (const b of comicBlocks(source)) if (!retained.has(b.key)) {
+            removed.push(...(rec(msg, b.key)?.versions || []));
+            delete store(msg)[b.key];
+        }
+        try { await saveChat(c); }
+        catch (e) { restore(); notify('漫画保存失败：' + e.message); render(id); return; }
+        removed.forEach(v => discard(v.url)); render(id);
     }
 
     // ── 漫画书：翻书（摊开两页）/ 卡片堆 / 上下滑 ──
@@ -509,8 +633,8 @@ export function createComicController(deps) {
         const chat = getContext().chat || [];
         const pages = [];
         chat.forEach((msg, id) => {
-            if (!msg || msg.is_user || !msg.mes?.includes('<image')) return;
-            for (const b of comicBlocks(msg.mes)) { const v = curVer(rec(msg, b.key)); if (v) pages.push({ id, page: b.page, total: b.total, url: v.url, name: msg.name || '' }); }
+            if (!msg || msg.is_user) return;
+            for (const b of comicBlocks(srcOf(msg))) { const v = curVer(rec(msg, b.key)); if (v) pages.push({ id, page: b.page, total: b.total, url: v.url, name: msg.name || '' }); }
         });
         const urls = new Map();
         const url = async p => { if (!urls.has(p.url)) urls.set(p.url, await resolveUrl(p.url)); return urls.get(p.url); };
@@ -608,7 +732,7 @@ export function createComicController(deps) {
         }
         function build() {
             book.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
-            if (!pages.length) { stage.innerHTML = '<div class="empty">这个聊天里还没有漫画页<br>开着智库「漫画模式」聊天，回复里的漫画页会自动画出来</div>'; book.querySelector('footer').hidden = true; info(); return; }
+            if (!pages.length) { stage.innerHTML = '<div class="empty">这个聊天里还没有漫画页<br>点楼层按钮里的 📖「画成漫画」，把那一楼改编成漫画；<br>或者配合漫画台预设聊天，回复里的漫画页会自动画出来</div>'; book.querySelector('footer').hidden = true; info(); return; }
             mode === 'book' ? buildBook() : mode === 'scroll' ? buildScroll() : buildFlow();
         }
         function go(n) {
@@ -681,7 +805,7 @@ export function createComicController(deps) {
     }
 
     return {
-        process, render, renderAll, openBook, generateOne,
+        process, render, renderAll, openBook, generateOne, adapt, unadapt,
         stop() {
             stopped = true;
             cancelPress({type:'stop'});
