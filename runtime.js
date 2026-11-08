@@ -1626,7 +1626,37 @@ function imageInsertionPoint(text, sentence) {
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
 const DOC = P.document;
 const pcMount = el => (DOC.documentElement || DOC.body).appendChild(el);
-const toastr = P.toastr || window.toastr;
+const stToastr = P.toastr || window.toastr;
+/** 智库开着的时候，提示显示在智库自己的界面里（不跑到酒馆那边、不被美化改样子）；关着就交给酒馆 */
+const zkPanelOpen = () => !!DOC.querySelector('.pc-overlay.open, .pc-comic-book, .pc-modal-backdrop, .pc-viewer');
+function zkToast(type, msg, title, opt = {}) {
+    if (!zkPanelOpen() && stToastr) return stToastr[type](msg, title, opt);
+    let host = DOC.getElementById('pc-toasts');
+    if (!host) {
+        host = DOC.createElement('div'); host.id = 'pc-toasts';
+        host.setAttribute('style', 'position:fixed;left:0;right:0;top:max(14px,env(safe-area-inset-top));z-index:2147483646;display:flex;flex-direction:column;align-items:center;gap:8px;padding:0 12px;pointer-events:none');
+        pcMount(host);
+    }
+    const color = { success: '#5f7d5a', info: '#7ea29c', warning: '#c98a3e', error: '#9b4f45' }[type] || '#7ea29c';
+    const el = DOC.createElement('div');
+    el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+    el.setAttribute('style', 'pointer-events:auto;display:flex;gap:10px;align-items:flex-start;max-width:min(520px,100%);padding:10px 14px;border-radius:14px;background:#f4efe4;color:#3a2a22;border:1.5px solid #3a2a22;box-shadow:0 4px 0 rgba(26,22,18,.22);font:14px/1.55 "Noto Serif SC","Songti SC",serif;word-break:break-word;cursor:pointer;transition:opacity .2s,transform .2s;opacity:0;transform:translateY(-6px)');
+    const dot = DOC.createElement('i');
+    dot.setAttribute('style', `flex-shrink:0;width:12px;height:12px;margin-top:5px;border-radius:50%;background:${color}`);
+    const body = DOC.createElement('div');
+    if (title) { const b = DOC.createElement('b'); b.textContent = title; b.setAttribute('style', `display:block;font-size:12px;letter-spacing:.1em;color:${color}`); body.appendChild(b); }
+    const t = DOC.createElement('div'); t.textContent = String(msg ?? ''); body.appendChild(t);
+    el.append(dot, body);
+    host.appendChild(el);
+    while (host.children.length > 4) host.firstChild.remove();
+    requestAnimationFrame(() => { el.style.opacity = '1'; el.style.transform = 'none'; });
+    const close = () => { el.style.opacity = '0'; setTimeout(() => el.remove(), 220); };
+    el.addEventListener('click', close);
+    const ms = Number(opt.timeOut ?? (type === 'error' ? 7000 : 3500));
+    if (ms > 0) setTimeout(close, ms);
+    return el;
+}
+const toastr = { success: (...a) => zkToast('success', ...a), info: (...a) => zkToast('info', ...a), warning: (...a) => zkToast('warning', ...a), error: (...a) => zkToast('error', ...a), clear: (...a) => stToastr?.clear?.(...a) };
 const SillyTavern = P.SillyTavern || window.SillyTavern;
 globalThis.__pcFetch = (...a) => P.fetch(...a);
 const __ctx = () => SillyTavern.getContext();
