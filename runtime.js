@@ -539,7 +539,7 @@ function imageInsertionPoint(text, sentence) {
     return last.start + last.text.trimEnd().length;
 }
 
-// 智库 · 原生扩展版 v0.8.17（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.18（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -557,7 +557,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.17';
+globalThis.__PC_VERSION = '0.8.18';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -669,7 +669,7 @@ function normalizeData(raw) {
         }
     }
     // 以前误把 absurdres 之类当成了画师（还加了 artist:）：组里的放回普通词；单独的没例图就删，有例图的留着让人自己删
-    const fake = a => a && NOT_ARTIST.test(a.tag.replace(/^artist:/i, '').trim());
+    const fake = a => a && (NOT_ARTIST.test(a.tag.replace(/^artist:/i, '').trim()) || /[<>]/.test(a.tag));
     for (const g of Object.values(d.groups)) {
         const bad = g.members.filter(m => fake(d.artists[m.artistId]));
         if (!bad.length) continue;
@@ -800,20 +800,50 @@ function parseArtistList(text) {
  * 这一行里有 artist: 开头的词 → 整行就是一个画师串（别的词原样跟着）；
  * 没有 artist: → 当成一串画师名，一个个拆开。
  */
+/** 普通词（画风、质量、构图），不是画师名 */
+const BATCH_GENERAL = /^(?:\d+(?:boy|girl|other)s?|solo|male|female|nsfw|sfw|rating:.*|year \d{4}|\d{4}|newest|oldest|recent|masterpiece|absurdres|highres|lowres|very aesthetic|aesthetic|no text|uncensored|.*quality.*)$/i;
+const BATCH_STYLE_WORD = /\b(?:background|lighting|light|lights|detailed|details?|emphasis|style|shading|colou?rs?|composition|focus|texture|fabric|depth of field|illustration|anime|realistic|photorealistic|sketch|painting|watercolor|lineart|cinematic|atmosphere|scenery|portrait)\b/i;
+const batchNameLike = t => !/[<>:]/.test(t) && t.split(/\s+/).length <= 3 && !BATCH_GENERAL.test(t) && !BATCH_STYLE_WORD.test(t);
+/** 一个词加上 artist:（保留前面的权重） */
+const batchWithArtist = raw => /artist\s*:/i.test(raw) ? raw : raw.replace(/^(\s*(?:-?\d+(?:\.\d+)?::)?\s*[{\[(]*\s*)/, '$1artist:');
+/** 一串词 → 一个批量单位（只有一位不带权重的画师时就是单个画师） */
+function batchUnit(parts) {
+    const text = parts.map(x => x.trim()).filter(Boolean).join(', ');
+    if (!text) return null;
+    const p = parseArtistString(text);
+    if (!p.members.length && !p.extra) return null;
+    if (p.members.length === 1 && !p.extra && Math.abs(p.members[0].weight - 1) < 0.001) return { tag: p.members[0].tag, weight: 1, key: artistKey(p.members[0].tag) };
+    return { text, members: p.members, key: text.toLowerCase() };
+}
+/**
+ * 批量用：
+ * - <artist>…</artist> 写法：每个 artist 块里的是画师，后面跟着的 <style> 等块是画风词，合起来算一串；
+ * - 一行里有 artist: 开头的词，或者混着画风、质量词 → 整行就是一个画师串（光秃秃的画师名自动补 artist:）；
+ * - 一行全是画师名 → 一个个拆开。
+ */
 function parseBatchLines(text) {
     const out = [], seen = new Set();
-    for (const line of String(text || '').split(/\n+/).map(x => x.trim()).filter(Boolean)) {
-        if (tokenize(line).some(t => t.isArtist)) {
-            const p = parseArtistString(line);
-            if (p.members.length === 1 && !p.extra && Math.abs(p.members[0].weight - 1) < 0.001) {
-                const k = artistKey(p.members[0].tag);
-                if (!seen.has(k)) { seen.add(k); out.push({ tag: p.members[0].tag, weight: 1 }); }
-            } else if (!seen.has(line)) { seen.add(line); out.push({ text: line, members: p.members }); }
+    const push = u => { if (u && !seen.has(u.key)) { seen.add(u.key); const { key, ...rest } = u; out.push(rest); } };
+    const src = String(text || '');
+    const SEC = /<([a-z_][\w-]*)[^>]*>([\s\S]*?)<\/\1\s*>/gi;
+    if ([...src.matchAll(SEC)].some(m => /artist/i.test(m[1]))) {
+        let cur = null, pre = [];
+        for (const m of src.matchAll(SEC)) {
+            const words = m[2].split(/[,\n]/).map(t => t.trim()).filter(t => t && !/^<\/?[\w-]+>$/.test(t));
+            if (/artist/i.test(m[1])) { if (cur) push(batchUnit(cur)); cur = [...words.map(batchWithArtist), ...pre]; }
+            else if (cur) cur.push(...words); else pre.push(...words);
+        }
+        if (cur) push(batchUnit(cur));
+        return out;
+    }
+    for (const line of src.split(/\n+/).map(x => x.replace(/<\/?[\w-]+[^>]*>/g, ' ').trim()).filter(Boolean)) {
+        const toks = splitTop(line).map(t => t.trim()).filter(Boolean);
+        const bare = t => t.replace(/^\s*-?\d+(?:\.\d+)?::/, '').replace(/::\s*$/, '').replace(/[{}\[\]]/g, '').trim();
+        if (tokenize(line).some(t => t.isArtist)) push(batchUnit([line]));
+        else if (!toks.every(t => batchNameLike(bare(t)))) {
+            push(batchUnit(toks.map(t => batchNameLike(bare(t)) ? batchWithArtist(t) : t)));
         } else {
-            for (const m of parseArtistList(line)) {
-                const k = artistKey(m.tag);
-                if (!seen.has(k)) { seen.add(k); out.push(m); }
-            }
+            for (const m of parseArtistList(line)) push({ ...m, key: artistKey(m.tag) });
         }
     }
     return out;
