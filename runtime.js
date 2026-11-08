@@ -539,7 +539,7 @@ function imageInsertionPoint(text, sentence) {
     return last.start + last.text.trimEnd().length;
 }
 
-// 智库 · 原生扩展版 v0.8.18（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.19（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -557,7 +557,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.18';
+globalThis.__PC_VERSION = '0.8.19';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -1891,7 +1891,8 @@ async function run(opts) {
         if (!opts.noVibe && opts.director === undefined) opts.director = await charRefs();
         if (!opts.noVibe && !opts.director && opts.refs === undefined) opts.refs = await vibeRefs();
         const r = await N.generate(opts);
-        runtime.lastSent = r.sent;
+        const vg = getData().vibeGroups?.[getData().vibeActive];
+        runtime.lastSent = { ...r.sent, vibes: opts.refs?.images?.length ? { name: vg?.name || '', n: opts.refs.images.length } : null, director: opts.director?.length || 0 };
         return r.image;
     } finally {
         runtime.busy--;
@@ -1899,8 +1900,8 @@ async function run(opts) {
 }
 
 /** 生图页 */
-async function generate({ pos, neg, width, height }) {
-    const { positive, negative } = composeStudio({ pos, neg });
+async function generate({ pos, neg, scene = '', width, height }) {
+    const { positive, negative } = composeStudio({ pos, neg, scene });
     return run({ positive, negative, width, height });
 }
 
@@ -3758,7 +3759,9 @@ function viewStudio(d) {
       </div>
       ${st.sent ? `<details class="pc-details pc-sent-box"><summary>这张图实际发出去的内容（${esc(st.sent.size)} · 种子 ${esc(st.sent.seed)}）</summary>
         <div class="pc-label">正面</div><p class="pc-quote small mono">${esc(st.sent.prompt)}</p>
-        <div class="pc-label">负面</div><p class="pc-quote small mono">${esc(st.sent.negative)}</p></details>` : ''}
+        <div class="pc-label">负面</div><p class="pc-quote small mono">${esc(st.sent.negative)}</p>
+        ${st.sent.vibes ? `<div class="pc-banwarn">还带了氛围「${esc(st.sent.vibes.name)}」${st.sent.vibes.n} 张参考图：画面会往这几张图的色调、构图、质感靠。不想要就到「氛围」选「不用氛围」。</div>` : ''}
+        ${st.sent.director ? `<div class="pc-banwarn">还带了角色参考 ${st.sent.director} 张：人物长相会往参考图靠。</div>` : ''}</details>` : ''}
     </section>` : ''}
 
     ${historyFold(d)}
@@ -3782,6 +3785,7 @@ function viewStudio(d) {
       <div class="pc-hint">每次出图都加在负面最前面：生图页、聊天标记出图、例图、试穿都带上。</div>` : pv.ucp ? `<p class="pc-quote small mono">${esc(pv.ucp)}</p>` : ''}`)}
     ${fold('params', '更多参数', `步数 ${s.novelai_steps} · 种子 ${Number(s.novelai_seed) > 0 ? s.novelai_seed : '随机'} · ${w}×${h}`, paramFields(s, { withSize: true }))}
     ${fold('preview', '将会发送的内容', '正面 + 固定提示词 + 质量词，负面预设 + 负面', `
+      ${d.vibeGroups?.[d.vibeActive]?.vibes?.length && N.vibeSupported() ? `<div class="pc-banwarn" style="margin-top:0">生成时还会带上氛围「${esc(d.vibeGroups[d.vibeActive].name)}」${d.vibeGroups[d.vibeActive].vibes.length} 张参考图，画面会往它们靠。</div>` : ''}
       <div class="pc-label" style="margin-top:0">正面</div><p class="pc-quote small mono" id="pc-pv-pos">${pv.pos || '（空）'}</p>
       <div class="pc-label">负面</div><p class="pc-quote small mono" id="pc-pv-neg">${pv.neg || '（空）'}</p>`)}`;
 }
