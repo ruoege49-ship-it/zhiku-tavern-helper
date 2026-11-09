@@ -20,6 +20,9 @@ assert.equal(resolveImageCharacters('$小红-sfw-upperbody$, $红红-sfw-upperbo
 assert.deepEqual(resolveImageCharacters('$小-sfw-upperbody$, waving', roster).unknown, ['小'], 'unknown name still draws');
 assert.equal(resolveImageCharacters('$小-sfw-upperbody$, waving', []).cast.length, 0);
 assert.equal(resolveImageCharacters('$小红$, smile', roster).picks[0].char.name, '小红');
+{ const r = resolveImageCharacters('$小红-nsfw-fullbody$, lying', roster); assert.equal(r.picks[0].char.name, '小红'); assert.equal(r.picks[0].nsfw ?? r.picks[0].token?.nsfw ?? true, true); }
+assert.equal(resolveImageCharacters('$小红-sfw-fullbody$', roster).picks[0].char.name, '小红');
+assert.equal(resolveImageCharacters('$小红-nsfw-lowerbody$', roster).picks[0].char.name, '小红');
 assert.equal(resolveImageCharacters('$小红-sfw-upperbody, smile', roster).picks.length, 0);
 { const r = resolveImageCharacters('1girl, $\{"upperBody":"白衬衫","lowerBody":"短裙"\}$, smile', roster); assert.equal(r.picks.length, 0); assert.ok(!r.scene.includes('$') && !r.scene.includes('白衬衫')); }
 { const r = resolveImageCharacters('$\{"name":"小红"\}$ sitting', roster); assert.equal(r.picks[0].char.name, '小红'); }
