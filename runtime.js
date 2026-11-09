@@ -1692,17 +1692,36 @@ const SHOTS = {
 const BASE = '1boy, solo, male focus, adult';
 const NEG = '1girl, female, multiple boys, child, text, watermark, signature';
 const BG = 'simple background, white background';
-// 正脸、正对镜头、居中：每位画师的例图构图一样，只比画风
-const FRONT = 'front view, facing viewer, looking at viewer, straight-on, centered, symmetrical composition';
-const NOT_FRONT = 'profile, from side, from above, from below, dutch angle, tilted head, head tilt, looking away, looking to the side, three-quarter view, extreme close-up, close-up of eye, cropped head, head out of frame, multiple views';
+// 正脸、居中：每位画师的例图构图一样，只比画风。
+// 不再写 symmetrical / arms at sides / feet apart 这类「人体参考图」的词，也写明穿着和上色，免得画成剪影、人台
+const FRONT = 'front view, facing viewer, looking at viewer, centered';
+const NOT_FRONT = 'profile, from side, from above, from below, dutch angle, looking away, three-quarter view, extreme close-up, cropped head, head out of frame, multiple views';
+const NOT_FLAT = 'silhouette, monochrome, greyscale, mannequin, faceless, reference sheet, character sheet, turnaround, anatomy chart, flat color, solid color, blank eyes';
+const CLOTHED = 'detailed face, detailed eyes, casual clothes, shirt, pants, full color';
 const DEFAULT_TEMPLATES = {
-    sfw_head: { id: 'sfw_head', name: 'SFW 头像', nsfw: false, shot: 'head', positive: `${BASE}, portrait, headshot, head and shoulders, ${FRONT}, neutral expression, closed mouth, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, hands` },
-    sfw_bust: { id: 'sfw_bust', name: 'SFW 胸像', nsfw: false, shot: 'bust', positive: `${BASE}, upper body, ${FRONT}, standing straight, arms at sides, neutral expression, ${BG}`, negative: `${NEG}, ${NOT_FRONT}` },
-    sfw_full: { id: 'sfw_full', name: 'SFW 立绘', nsfw: false, shot: 'full', positive: `${BASE}, full body, standing, ${FRONT}, arms at sides, feet apart, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, cropped` },
-    nsfw_head: { id: 'nsfw_head', name: 'NSFW 头像', nsfw: true, shot: 'head', positive: `nsfw, ${BASE}, portrait, headshot, head and shoulders, ${FRONT}, blush, sweat, parted lips, half-closed eyes, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, hands` },
-    nsfw_bust: { id: 'nsfw_bust', name: 'NSFW 胸像', nsfw: true, shot: 'bust', positive: `nsfw, ${BASE}, upper body, ${FRONT}, shirtless, pectorals, nipples, sweat, ${BG}`, negative: `${NEG}, ${NOT_FRONT}` },
-    nsfw_full: { id: 'nsfw_full', name: 'NSFW 立绘', nsfw: true, shot: 'full', positive: `nsfw, ${BASE}, full body, standing, ${FRONT}, completely nude, penis, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, cropped` },
+    sfw_head: { id: 'sfw_head', name: 'SFW 头像', nsfw: false, shot: 'head', positive: `${BASE}, portrait, headshot, head and shoulders, ${FRONT}, detailed face, detailed eyes, shirt, light smile, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, ${NOT_FLAT}, hands` },
+    sfw_bust: { id: 'sfw_bust', name: 'SFW 胸像', nsfw: false, shot: 'bust', positive: `${BASE}, upper body, ${FRONT}, ${CLOTHED}, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, ${NOT_FLAT}` },
+    sfw_full: { id: 'sfw_full', name: 'SFW 立绘', nsfw: false, shot: 'full', positive: `${BASE}, full body, standing, ${FRONT}, ${CLOTHED}, shoes, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, ${NOT_FLAT}, cropped` },
+    nsfw_head: { id: 'nsfw_head', name: 'NSFW 头像', nsfw: true, shot: 'head', positive: `nsfw, ${BASE}, portrait, headshot, head and shoulders, ${FRONT}, detailed face, detailed eyes, blush, sweat, parted lips, half-closed eyes, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, ${NOT_FLAT}, hands` },
+    nsfw_bust: { id: 'nsfw_bust', name: 'NSFW 胸像', nsfw: true, shot: 'bust', positive: `nsfw, ${BASE}, upper body, ${FRONT}, detailed face, shirtless, pectorals, nipples, sweat, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, ${NOT_FLAT}` },
+    nsfw_full: { id: 'nsfw_full', name: 'NSFW 立绘', nsfw: true, shot: 'full', positive: `nsfw, ${BASE}, full body, standing, ${FRONT}, detailed face, completely nude, penis, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, ${NOT_FLAT}, cropped` },
 };
+/** 0.8.x 的「证件照式」默认模板（没改过的换成上面的新版） */
+const OLD_TEMPLATE_TEXT2 = (() => {
+    // 正脸、正对镜头、居中：每位画师的例图构图一样，只比画风
+    const FRONT = 'front view, facing viewer, looking at viewer, straight-on, centered, symmetrical composition';
+    const NOT_FRONT = 'profile, from side, from above, from below, dutch angle, tilted head, head tilt, looking away, looking to the side, three-quarter view, extreme close-up, close-up of eye, cropped head, head out of frame, multiple views';
+    const T = {
+        sfw_head: { id: 'sfw_head', name: 'SFW 头像', nsfw: false, shot: 'head', positive: `${BASE}, portrait, headshot, head and shoulders, ${FRONT}, neutral expression, closed mouth, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, hands` },
+        sfw_bust: { id: 'sfw_bust', name: 'SFW 胸像', nsfw: false, shot: 'bust', positive: `${BASE}, upper body, ${FRONT}, standing straight, arms at sides, neutral expression, ${BG}`, negative: `${NEG}, ${NOT_FRONT}` },
+        sfw_full: { id: 'sfw_full', name: 'SFW 立绘', nsfw: false, shot: 'full', positive: `${BASE}, full body, standing, ${FRONT}, arms at sides, feet apart, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, cropped` },
+        nsfw_head: { id: 'nsfw_head', name: 'NSFW 头像', nsfw: true, shot: 'head', positive: `nsfw, ${BASE}, portrait, headshot, head and shoulders, ${FRONT}, blush, sweat, parted lips, half-closed eyes, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, hands` },
+        nsfw_bust: { id: 'nsfw_bust', name: 'NSFW 胸像', nsfw: true, shot: 'bust', positive: `nsfw, ${BASE}, upper body, ${FRONT}, shirtless, pectorals, nipples, sweat, ${BG}`, negative: `${NEG}, ${NOT_FRONT}` },
+        nsfw_full: { id: 'nsfw_full', name: 'NSFW 立绘', nsfw: true, shot: 'full', positive: `nsfw, ${BASE}, full body, standing, ${FRONT}, completely nude, penis, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, cropped` },
+    };
+
+    return T;
+})();
 /** 上一版的默认模板（没改过的会换成上面的新版） */
 const OLD_TEMPLATE_TEXT = (() => {
     const BASE = '1boy, solo, male focus, adult';
@@ -1779,7 +1798,7 @@ function normalizeData(raw) {
     const rawT = { ...(raw.templates || {}) };
     // 旧版的 SFW / NSFW 两个模板没改过就去掉（换成 头像/胸像/立绘），改过的留着
     for (const k of ['sfw', 'nsfw']) if (rawT[k] && OLD_DEFAULT_POS.includes(rawT[k].positive)) delete rawT[k];
-    for (const [k, old] of Object.entries(OLD_TEMPLATE_TEXT)) if (rawT[k] && rawT[k].positive === old.positive && rawT[k].negative === old.negative) delete rawT[k];
+    for (const set of [OLD_TEMPLATE_TEXT, OLD_TEMPLATE_TEXT2]) for (const [k, old] of Object.entries(set)) if (rawT[k] && rawT[k].positive === old.positive && rawT[k].negative === old.negative) delete rawT[k];
     for (const t of Object.values(rawT)) t.shot ||= 'bust';
     d.templates = { ...structuredClone(DEFAULT_TEMPLATES), ...rawT };
     for (const a of Object.values(d.artists)) { a.images ||= []; a.note ||= ''; a.collections ||= []; a.tag = normalizeArtistTag(a.tag); }
