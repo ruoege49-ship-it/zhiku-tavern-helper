@@ -277,12 +277,12 @@ const CSS = `
 .pc-comic{display:flex;flex-direction:column;gap:10px;margin:10px 0 4px}
 .pc-comic-page{position:relative;margin:0;border-radius:14px;overflow:hidden;border:1.5px solid var(--pc-paper,#f4efe4);background:var(--pc-paper-2,#ebe4d2);-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}
 .pc-comic-page img{display:block;width:100%;height:auto;cursor:pointer;-webkit-user-drag:none}
-.pc-comic-caps{position:absolute;inset:0;pointer-events:none}
-.pc-comic-cap{position:absolute;box-sizing:border-box;left:50%;transform:translate(-50%,-100%);width:max-content;max-width:80%;background:rgba(255,255,255,.84);color:#16120f;border:1px solid rgba(22,18,15,.7);border-radius:10px;padding:2px 8px;font:600 11px/1.45 "Noto Serif SC","Songti SC",serif;text-align:center;word-break:break-word}
-.pc-comic-caps.sz-m .pc-comic-cap{font-size:13px;padding:3px 10px;max-width:86%}
-.pc-comic-caps.sz-l .pc-comic-cap{font-size:15px;padding:4px 12px;max-width:90%}
+.pc-comic-caps{position:absolute;inset:0;pointer-events:none;container-type:inline-size}
+.pc-comic-cap{position:absolute;box-sizing:border-box;left:50%;transform:translate(-50%,-100%);width:max-content;max-width:80%;background:rgba(255,255,255,.84);color:#16120f;border:1px solid rgba(22,18,15,.7);border-radius:.8em;padding:.15em .6em;font:600 9px/1.35 "Noto Serif SC","Songti SC",serif;font-size:clamp(6px,2.5cqw,13px);text-align:center;word-break:break-word}
+.pc-comic-caps.sz-xs .pc-comic-cap{font-size:7px;font-size:clamp(5px,1.9cqw,10px);font-weight:500}
+.pc-comic-caps.sz-m .pc-comic-cap{font-size:11px;font-size:clamp(8px,3.2cqw,16px)}
+.pc-comic-caps.sz-l .pc-comic-cap{font-size:13px;font-size:clamp(10px,4cqw,20px)}
 .pc-comic-cap.top{transform:translate(-50%,0);background:#16120f;color:#f4efe4}
-.pc-cb-art .pc-comic-cap{font-size:10px;padding:1px 7px}
 .pc-comic.nocap .pc-comic-caps{display:none}
 .pc-comic-fold{display:flex;gap:8px;align-items:center;margin-top:6px}
 .pc-comic-fold button{border:1px dashed currentColor;background:transparent;color:inherit;border-radius:999px;padding:4px 14px;font-size:13px;cursor:pointer}
@@ -740,9 +740,9 @@ export function createComicController(deps) {
               ${seg('comicColor', [['color', '彩色'], ['mono', '黑白网点']], 'color')}
               <div class="pc-label">对白怎么出现</div>
               ${seg('comicText', [['overlay', '插件叠字'], ['draw', 'NAI 画进图'], ['none', '不要对白']], 'overlay')}
-              <div class="pc-hint">NAI 画中文常常乱码，「插件叠字」让 NAI 只画画面，对白由浏览器显示，位置按每格开头的位置描述或 2x2 布局估算，未标位置时按顺序排列；下载的仍是未叠字原图。</div>
+              <div class="pc-hint">NAI 画中文常常乱码，「插件叠字」让 NAI 只画画面，对白由浏览器显示，位置按每格开头的位置描述或 2x2 布局估算，未标位置时按顺序排列，字号跟着图片宽度缩放；下载的仍是未叠字原图。</div>
               <div class="pc-label">叠字大小</div>
-              ${seg('comicCapSize', [['s', '小'], ['m', '中'], ['l', '大'], ['hide', '不显示']], 's')}
+              ${seg('comicCapSize', [['xs', '特小'], ['s', '小'], ['m', '中'], ['l', '大'], ['hide', '不显示']], 's')}
               <div class="pc-hint">挡图的话调小，或者在楼层里点「隐藏对白」临时收起。想少点对白，在下面「给 AI 的改编要求」里写「对白少一点」。</div>
               <div class="pc-label">页面尺寸（跨页自动横过来）</div>
               ${seg('comicSize', [['832x1216', '竖'], ['1216x832', '横'], ['1024x1024', '方']], '832x1216')}
