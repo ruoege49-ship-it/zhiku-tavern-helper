@@ -2043,6 +2043,76 @@ patch(`        <div class="pc-label">负面</div><p class="pc-quote small mono">
 // 聊天插图可以不分人物：人物描写合并进正面（开关），canSplit 的改动在后面
 patch(`      <label class="pc-field"><span>聊天生图额外正面词 · 每张都加在场景后面</span>`,`      \${sw('chatNoSplit', '聊天插图不分人物', '打开：几个人的描写都合并进正面（和生图页一样），画师串和质量词作用到所有内容，画风更稳；代价是人物特征可能串（比如发色互换）。关闭：用 NovelAI 4.5 的分人物提示词，人物更不容易混，但画风可能变弱。')}
       <label class="pc-field"><span>聊天生图额外正面词 · 每张都加在场景后面</span>`);
+// AI 请求用「干净的」fetch：别的插件改写了 window.fetch 并抢先读走回复时，会报 body stream already read
+patch(`async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {`,`let zkCleanFetch = null, zkFetchFrame = null, zkFetchStopped = false;
+/** 从隐藏的同源空白 iframe 借 fetch，隔离父窗口的 fetch 改写。 */
+function stopFetch() {
+    zkFetchStopped = true;
+    zkCleanFetch = null;
+    zkFetchFrame?.remove();
+    zkFetchFrame = null;
+}
+function zkFetch(...args) {
+    if (zkFetchStopped) throw new Error('智库已关闭');
+    if (zkFetchFrame && !zkFetchFrame.isConnected) {
+        zkFetchFrame = null;
+        zkCleanFetch = null;
+    }
+    if (!zkCleanFetch) {
+        let frame;
+        try {
+            frame = DOC.createElement('iframe');
+            frame.setAttribute('aria-hidden', 'true'); frame.tabIndex = -1;
+            frame.style.cssText = 'display:none!important';
+            (DOC.body || DOC.documentElement).appendChild(frame);
+            const w = frame.contentWindow;
+            if (!w?.fetch) throw new Error('no fetch');
+            zkCleanFetch = w.fetch.bind(w);
+            zkFetchFrame = frame;
+        } catch {
+            frame?.remove();
+        }
+    }
+    // 只在隔离通道创建失败时退回；请求本身失败不能自动重发。
+    return (zkCleanFetch || fetch)(...args);
+}
+async function readBody(res) {
+    const unavailable = res.bodyUsed || res.body?.locked;
+    try { return await res.text(); }
+    catch (e) {
+        if (e?.name === 'AbortError') throw e;
+        if (unavailable || /body.*(already.*(read|used)|unusable|locked)|body stream already read/i.test(String(e?.message || e))) {
+            throw new Error('AI 回复正文已被读取或锁定，可能有扩展或脚本提前读取了回复：' + (e?.message || e), { cause: e });
+        }
+        throw e;
+    }
+}
+async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {`);
+patch(`        res = await fetch(\`\${api.url}/chat/completions\`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(api.key ? { Authorization: \`Bearer \${api.key}\` } : {}) },
+            body: JSON.stringify({ model: api.model, messages, temperature: 0.3, stream: false, max_tokens: maxTokens }),`,`        res = await zkFetch(\`\${api.url}/chat/completions\`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(api.key ? { Authorization: \`Bearer \${api.key}\` } : {}) },
+            body: JSON.stringify({ model: api.model, messages, temperature: 0.3, stream: false, max_tokens: maxTokens }),`);
+patch(`        res = await fetch('/api/backends/chat-completions/generate', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                chat_completion_source: 'custom',
+                custom_url: api.url,`,`        res = await zkFetch('/api/backends/chat-completions/generate', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                chat_completion_source: 'custom',
+                custom_url: api.url,`);
+patch(`    const raw = await res.text();
+    if (!res.ok) throw new Error(\`AI 请求失败（\${res.status}）：\${raw.slice(0, 160)}\`);`,`    const raw = await readBody(res);
+    if (!res.ok) throw new Error(\`AI 请求失败（\${res.status}）：\${raw.slice(0, 160)}\`);`);
+patch(`            const r = await fetch(\`\${api.url}/chat/completions\`, {`,`            const r = await zkFetch(\`\${api.url}/chat/completions\`, {`);
+patch(`    const r = await fetch('/api/backends/chat-completions/generate', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });`,`    const r = await zkFetch('/api/backends/chat-completions/generate', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });`);
+patch('async function readChat(r) {\n    const raw = await r.text();', 'async function readChat(r) {\n    const raw = await readBody(r);');
+patch('timers.clear(); stopped = true; }', 'timers.clear(); stopped = true; __mod_translate.stopFetch(); }');
 // 0.8.36：设置里单独的 AI 预设、下载和水印、先存后改名、一键上传到共享
 patch(`    const ai = setFold('ai', '翻译和 AI',`,`    const ai0 = setFold('ai', '翻译和 AI',`);
 patch(`    const tpl = setFold('tpl', '例图提示词',`,`    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), \`
@@ -2204,6 +2274,8 @@ patch("        model,\n    };", "        model,\n        director: params.direct
 patch("director: opts.director?.length || 0 };", "director: r.sent.director ?? (opts.director?.length || 0) };");
 patch(".pc-mes-gen, .pc-mes-outfit", ".pc-mes-gen, .pc-mes-outfit, .pc-mes-comic");
 s=applyComfyCompatibility(s);
+patch('return { AI_FNS, apiFor, aiSeen, aiCfg,', 'return { AI_FNS, stopFetch, apiFor, aiSeen, aiCfg,');
+
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
