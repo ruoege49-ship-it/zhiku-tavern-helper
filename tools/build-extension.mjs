@@ -1574,7 +1574,7 @@ const OLD_TEMPLATE_TEXT2 = (() => {
     return T;
 })();
 `);
-patch(`    for (const [k, old] of Object.entries(OLD_TEMPLATE_TEXT)) if (rawT[k] && rawT[k].positive === old.positive && rawT[k].negative === old.negative) delete rawT[k];`,`    for (const set of [OLD_TEMPLATE_TEXT, OLD_TEMPLATE_TEXT2]) for (const [k, old] of Object.entries(set)) if (rawT[k] && rawT[k].positive === old.positive && rawT[k].negative === old.negative) delete rawT[k];`);
+patch(`    for (const [k, old] of Object.entries(OLD_TEMPLATE_TEXT)) if (rawT[k] && rawT[k].positive === old.positive && rawT[k].negative === old.negative) delete rawT[k];`,`    for (const set of [OLD_TEMPLATE_TEXT, OLD_TEMPLATE_TEXT2]) for (const [k, old] of Object.entries(set)) if (rawT[k] && rawT[k].positive === old.positive && rawT[k].negative === old.negative) rawT[k] = { ...rawT[k], positive: DEFAULT_TEMPLATES[k].positive, negative: DEFAULT_TEMPLATES[k].negative };`);
 // 0.8.36：设置里单独的 AI 预设、下载和水印、先存后改名、一键上传到共享
 patch(`    const ai = setFold('ai', '翻译和 AI',`,`    const ai0 = setFold('ai', '翻译和 AI',`);
 patch(`    const tpl = setFold('tpl', '例图提示词',`,`    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), \`

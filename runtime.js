@@ -1798,7 +1798,7 @@ function normalizeData(raw) {
     const rawT = { ...(raw.templates || {}) };
     // 旧版的 SFW / NSFW 两个模板没改过就去掉（换成 头像/胸像/立绘），改过的留着
     for (const k of ['sfw', 'nsfw']) if (rawT[k] && OLD_DEFAULT_POS.includes(rawT[k].positive)) delete rawT[k];
-    for (const set of [OLD_TEMPLATE_TEXT, OLD_TEMPLATE_TEXT2]) for (const [k, old] of Object.entries(set)) if (rawT[k] && rawT[k].positive === old.positive && rawT[k].negative === old.negative) delete rawT[k];
+    for (const set of [OLD_TEMPLATE_TEXT, OLD_TEMPLATE_TEXT2]) for (const [k, old] of Object.entries(set)) if (rawT[k] && rawT[k].positive === old.positive && rawT[k].negative === old.negative) rawT[k] = { ...rawT[k], positive: DEFAULT_TEMPLATES[k].positive, negative: DEFAULT_TEMPLATES[k].negative };
     for (const t of Object.values(rawT)) t.shot ||= 'bust';
     d.templates = { ...structuredClone(DEFAULT_TEMPLATES), ...rawT };
     for (const a of Object.values(d.artists)) { a.images ||= []; a.note ||= ''; a.collections ||= []; a.tag = normalizeArtistTag(a.tag); }
