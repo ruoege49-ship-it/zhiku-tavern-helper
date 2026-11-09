@@ -255,7 +255,7 @@ return {
     start: () => __mod_script_entry.start(),
     async stop() {
         try { await __mod_script_entry.stop(); }
-        finally { for (const id of timers) window.clearTimeout(id); timers.clear(); stopped = true; }
+        finally { DOC.getElementById('pc-toasts')?.remove(); for (const id of timers) window.clearTimeout(id); timers.clear(); stopped = true; }
     }
 };
 `);
@@ -1473,6 +1473,64 @@ DOC.addEventListener('click', onDownloadClick, true);
 function updateStudioPreview() {`);
 // 氛围编码 402：说清楚是 Anlas 不够（Opus 也要扣）
 patch(`    if (!r.ok) throw Object.assign(new Error(explain(r.status, new TextDecoder().decode(buf)) + (settings().naiMode === 'site'`,`    if (!r.ok) throw Object.assign(new Error((r.status === 402 ? '账号 Anlas 不够了：氛围每张图第一次用要先编码，NovelAI 每张扣约 2 点 Anlas，Opus 也要扣（编码会按模型保存，复用已保存的编码不再扣编码费）。去官网看看 Anlas 余额，或者导入官网导出的 .naiv4vibe 文件' : explain(r.status, new TextDecoder().decode(buf))) + (settings().naiMode === 'site'`);
+// 智库开着时提示显示在智库里
+patch(`const toastr = P.toastr || window.toastr;`,`const stToastr = P.toastr || window.toastr;
+/** 智库开着的时候，提示显示在智库自己的界面里（不跑到酒馆那边、不被美化改样子）；关着就交给酒馆 */
+const zkPanelOpen = () => !!DOC.querySelector('.pc-overlay.open, .pc-comic-book, .pc-modal-backdrop, .pc-viewer');
+function zkToast(type, msg, title, opt = {}) {
+    if (!zkPanelOpen() && typeof stToastr?.[type] === 'function') return stToastr[type](msg, title, opt);
+    opt ||= {};
+    let host = DOC.getElementById('pc-toasts');
+    if (!host) {
+        host = DOC.createElement('div'); host.id = 'pc-toasts';
+        host.setAttribute('style', 'position:fixed;left:0;right:0;top:max(14px,env(safe-area-inset-top));z-index:2147483646;display:flex;flex-direction:column;align-items:center;gap:8px;padding:0 12px;box-sizing:border-box;max-height:calc(100dvh - 28px);overflow-y:auto;scrollbar-width:none;pointer-events:none');
+        pcMount(host);
+    }
+    const color = { success: '#5f7d5a', info: '#7ea29c', warning: '#c98a3e', error: '#9b4f45' }[type] || '#7ea29c';
+    const el = DOC.createElement('div');
+    el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+    el.setAttribute('style', 'pointer-events:auto;box-sizing:border-box;flex-shrink:0;display:flex;gap:10px;align-items:flex-start;max-width:min(520px,100%);padding:10px 14px;border-radius:14px;background:#f4efe4;color:#3a2a22;border:1.5px solid #3a2a22;box-shadow:0 4px 0 rgba(26,22,18,.22);font:14px/1.55 "Noto Serif SC","Songti SC",serif;word-break:break-word;cursor:pointer;transition:opacity .2s,transform .2s;opacity:0;transform:translateY(-6px)');
+    const dot = DOC.createElement('i');
+    dot.setAttribute('style', \`flex-shrink:0;width:12px;height:12px;margin-top:5px;border-radius:50%;background:\${color}\`);
+    const body = DOC.createElement('div'); body.style.minWidth = '0';
+    if (title) { const b = DOC.createElement('b'); b.textContent = title; b.setAttribute('style', \`display:block;font-size:12px;letter-spacing:.1em;color:\${color}\`); body.appendChild(b); }
+    const t = DOC.createElement('div'); t.textContent = String(msg ?? ''); body.appendChild(t);
+    el.append(dot, body);
+    host.appendChild(el);
+    while (host.children.length > 4) host.firstChild.remove();
+    requestAnimationFrame(() => { el.style.opacity = '1'; el.style.transform = 'none'; });
+    const close = () => { el.style.opacity = '0'; setTimeout(() => el.remove(), 220); };
+    el.addEventListener('click', close);
+    const ms = Number(opt.timeOut ?? (type === 'error' ? 7000 : 3500));
+    if (ms > 0) setTimeout(close, ms);
+    return el;
+}
+const toastr = { success: (...a) => zkToast('success', ...a), info: (...a) => zkToast('info', ...a), warning: (...a) => zkToast('warning', ...a), error: (...a) => zkToast('error', ...a), clear: (el, ...a) => { const host = DOC.getElementById('pc-toasts'); if (el?.nodeType && host?.contains(el)) { el.remove(); return; } if (!el) host?.remove(); return stToastr?.clear?.(el, ...a); } };`);
+// 氛围：NAI 5 不带氛围、失败时说清楚按哪个模型编码、每张显示已编码的模型
+patch(`function vibeSupported() {
+    const s = settings();
+    return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3';
+}`,`function vibeSupported() {
+    const s = settings();
+    return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3' && !String(s.novelaimode).includes('diffusion-5');
+}`);
+patch(`    if (!g?.vibes?.length || !N.vibeSupported()) return null;
+    const key = N.encKey();`,`    if (!g?.vibes?.length) return null;
+    if (!N.vibeSupported()) {
+        const m = N.settings().novelaimode;
+        if (String(m).includes('diffusion-5') && !globalThis.__zkV5VibeTold) { globalThis.__zkV5VibeTold = 1; toastr.info('NAI 5 还不支持氛围，用 5 的时候不带氛围出图（不会产生氛围编码费用）。想带氛围请换回 4.5。', '氛围', { timeOut: 6000 }); }
+        return null;
+    }
+    const key = N.encKey();
+    const modelName = (N.MODELS.find(x => x[0] === N.settings().novelaimode)?.[1] || N.settings().novelaimode).replace('NAI Diffusion ', '');
+    const keyName = k => ({ 'v4-5full': '4.5 Full', 'v4-5curated': '4.5 Curated', v4full: '4 Full', v4curated: '4 Curated' })[k] || k;`);
+patch(`    if (failed.length) toastr.warning(\`氛围「\${failed.join('、')}」编码失败，这张先不带\${list.length ? '它' : '氛围'}出图：\${lastErr?.message || ''}\`, '氛围', { timeOut: 8000 });`,`    if (failed.length) {
+        const had = [...new Set(g.vibes.flatMap(v => Object.keys(v.encodings || {}).filter(k => v.encodings[k])))].map(keyName);
+        toastr.warning(\`氛围「\${failed.join('、')}」要按 \${modelName} 编码，编码失败，这张先不带\${list.length ? '它' : '氛围'}出图。\${had.length ? \`（这组已经编码过的模型：\${had.join('、')}。换了模型就得重新编码一次）\` : '（这几张还没编码成功过）'}：\${lastErr?.message || ''}\`, '氛围', { timeOut: 9000 });
+    }`);
+patch(`现在的连接方式或模型用不了氛围（「用酒馆里的 key」和 NAI 3 不支持）。`,`现在的连接方式或模型用不了氛围（「用酒馆里的 key」、NAI 3、NAI 5 都不支持）。`);
+patch(`<small class="pc-dim">\${esc(v.name || '参考图 ' + (i + 1))}</small>`,`<small class="pc-dim">\${esc(v.name || '参考图 ' + (i + 1))}<br><span style="font-size:10px">\${(() => { const ks = Object.keys(v.encodings || {}).filter(k => v.encodings[k]); const nm = { 'v4-5full': '4.5 Full', 'v4-5curated': '4.5 Curated', v4full: '4 Full', v4curated: '4 Curated' }; return ks.length ? '已编码：' + ks.map(k => esc(nm[k] || k)).join('、') : (v.path ? '还没编码（第一次用时扣约 2 点 Anlas）' : '官网文件，没有原图'); })()}</span></small>`);
+patch('第一次用某张图时 NovelAI 会扣一点点数来编码，之后就不扣了。', '首次为当前模型编码会收取编码费；复用已保存的编码不再收取编码费。');
 // 0.8.36：设置里单独的 AI 预设、下载和水印、先存后改名、一键上传到共享
 patch(`    const ai = setFold('ai', '翻译和 AI',`,`    const ai0 = setFold('ai', '翻译和 AI',`);
 patch(`    const tpl = setFold('tpl', '例图提示词',`,`    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), \`
