@@ -2039,6 +2039,9 @@ patch(`raw: cut(raw, 800), prompt: cut(sent?.prompt, 800), negative: cut(sent?.n
 patch(`<div class="pc-label">负面</div><p class="pc-quote small mono">\${esc(x.negative)}</p>\` : ''}</details>\` : ''}`,`<div class="pc-label">负面</div><p class="pc-quote small mono">\${esc(x.negative)}</p>\` : ''}\${(x.chars || []).map((c, i) => \`<div class="pc-label">人物 \${i + 1}</div><p class="pc-quote small mono">\${esc(c)}</p>\`).join('')}</details>\` : ''}`);
 patch(`        <div class="pc-label">负面</div><p class="pc-quote small mono">\${esc(st.sent.negative)}</p>`,`        <div class="pc-label">负面</div><p class="pc-quote small mono">\${esc(st.sent.negative)}</p>
         \${(st.sent.chars || []).map((c, i) => \`<div class="pc-label">人物 \${i + 1}</div><p class="pc-quote small mono">\${esc(typeof c === 'string' ? c : c?.prompt || '')}</p>\`).join('')}`);
+// 聊天插图可以不分人物：人物描写合并进正面（开关），canSplit 的改动在后面
+patch(`      <label class="pc-field"><span>聊天生图额外正面词 · 每张都加在场景后面</span>`,`      \${sw('chatNoSplit', '聊天插图不分人物', '打开：几个人的描写都合并进正面（和生图页一样），画师串和质量词作用到所有内容，画风更稳；代价是人物特征可能串（比如发色互换）。关闭：用 NovelAI 4.5 的分人物提示词，人物更不容易混，但画风可能变弱。')}
+      <label class="pc-field"><span>聊天生图额外正面词 · 每张都加在场景后面</span>`);
 // 0.8.36：设置里单独的 AI 预设、下载和水印、先存后改名、一键上传到共享
 patch(`    const ai = setFold('ai', '翻译和 AI',`,`    const ai0 = setFold('ai', '翻译和 AI',`);
 patch(`    const tpl = setFold('tpl', '例图提示词',`,`    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), \`
@@ -2194,6 +2197,7 @@ patch('if (el.dataset.opt) { d.options[el.dataset.opt] = el.checked; commit(); r
     "if (el.dataset.opt) { d.options[el.dataset.opt] = el.checked; if (el.dataset.opt === 'imageExpanded') __mod_marker.applyImageDefault(); commit(); return; }");
 // Keep compatibility preview/reference loading and lifecycle cleanup aligned with the request.
 patch("function canSplit() {\n    const s = N.settings();\n    return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3';", "function canSplit() {\n    const s = N.settings();\n    return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3' && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');");
+patch("function canSplit() {\n    const s = N.settings();\n    return s.naiMode","function canSplit() {\n    const s = N.settings();\n    if (getData().options.chatNoSplit) return false;\n    return s.naiMode");
 patch("return s.naiMode !== 'tavern' && s.novelaimode.includes('4-5');", "return s.naiMode !== 'tavern' && s.novelaimode.includes('4-5') && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');");
 patch("        model,\n    };", "        model,\n        director: params.director_reference_images_cached?.length || 0,\n    };");
 patch("director: opts.director?.length || 0 };", "director: r.sent.director ?? (opts.director?.length || 0) };");

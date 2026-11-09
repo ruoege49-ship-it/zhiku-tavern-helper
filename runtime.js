@@ -1118,6 +1118,7 @@ const DEFAULT_ILLUSTRATION_PROMPT = `你负责根据小说正文选择插图瞬�
 整体构图填写：景别（特写到远景）、机位（平视、俯视、仰视、正侧背面）、主体位置、视觉重点、留白、前后层次、地点、关键物品、时间、光线和氛围。
 剧情未指定的镜头与构图，可以选择适合表现该瞬间的方案；人物、事件和关键动作必须有正文依据。
 标签使用英文，逗号分隔；场景与各角色标签分别输出。不添加画师串和质量词。
+每个标签都写成 danbooru 风格的短标签（1 到 4 个词），不要写成整句或长短语：写 hand over mouth、covering mouth、hug from behind、tail around waist、whispering，不写 mouth and nose covered by boy's large hand、whispering near her ear 这类句子。
 
 【输出格式】
 mode=after：只输出 JSON：{"images":[画面对象]}，不输出分析过程。
@@ -4281,6 +4282,7 @@ const snap = v => { const g = [0.1, 0.3, 0.5, 0.7, 0.9]; v = Number(v); return N
 /** 能不能分角色（酒馆转发和 V3 不行） */
 function canSplit() {
     const s = N.settings();
+    if (getData().options.chatNoSplit) return false;
     return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3' && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');
 }
 
@@ -7467,6 +7469,7 @@ function viewSettings(d) {
       <label class="pc-field"><span>开始标记（前缀）</span><input data-optstr="imageStartTag" value="${esc(marker.start)}" placeholder="image###"></label>
       <label class="pc-field"><span>结束标记</span><input data-optstr="imageEndTag" value="${esc(marker.end)}" placeholder="###"></label>
       <div class="pc-hint">逐图调用角色：在图片提示词内写 $名字-sfw-upperbody$，也支持智绘姬 JSON 角色标记。只补这张图指定角色的外貌和参考图；纯英文标签照常使用。使用外部生图预设时，请在该预设中加入逐图角色标记规则。<br>已内置「智库 · 生图标记不发送」正则：过滤发送给聊天模型的生图标记，不影响生图读取。修改标记时自动同步。</div>
+      ${sw('chatNoSplit', '聊天插图不分人物', '打开：几个人的描写都合并进正面（和生图页一样），画师串和质量词作用到所有内容，画风更稳；代价是人物特征可能串（比如发色互换）。关闭：用 NovelAI 4.5 的分人物提示词，人物更不容易混，但画风可能变弱。')}
       <label class="pc-field"><span>聊天生图额外正面词 · 每张都加在场景后面</span><textarea class="pc-textarea small mono" data-optstr="chatPositive" placeholder="比如 masterpiece, best quality, ultra-detailed, illustration, detailed background, cinematic lighting">${esc(d.options.chatPositive || '')}</textarea></label>
       <div class="pc-hint">生图页的「固定提示词」只在生图页用，不会带进聊天。生图页更精致、聊天里出图更糙的话，把固定提示词里的画质、画风、光影词（不要写人物外貌和人数）复制到这里。</div>
       <label class="pc-field"><span>聊天生图额外负面词</span><input data-optstr="chatNegative" value="${esc(d.options.chatNegative || '')}"></label>

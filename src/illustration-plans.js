@@ -38,6 +38,7 @@ export const DEFAULT_ILLUSTRATION_PROMPT = `你负责根据小说正文选择插
 整体构图填写：景别（特写到远景）、机位（平视、俯视、仰视、正侧背面）、主体位置、视觉重点、留白、前后层次、地点、关键物品、时间、光线和氛围。
 剧情未指定的镜头与构图，可以选择适合表现该瞬间的方案；人物、事件和关键动作必须有正文依据。
 标签使用英文，逗号分隔；场景与各角色标签分别输出。不添加画师串和质量词。
+每个标签都写成 danbooru 风格的短标签（1 到 4 个词），不要写成整句或长短语：写 hand over mouth、covering mouth、hug from behind、tail around waist、whispering，不写 mouth and nose covered by boy's large hand、whispering near her ear 这类句子。
 
 【输出格式】
 mode=after：只输出 JSON：{"images":[画面对象]}，不输出分析过程。
