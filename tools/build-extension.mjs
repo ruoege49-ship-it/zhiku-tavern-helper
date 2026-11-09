@@ -2113,6 +2113,52 @@ patch(`            const r = await fetch(\`\${api.url}/chat/completions\`, {`,` 
 patch(`    const r = await fetch('/api/backends/chat-completions/generate', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });`,`    const r = await zkFetch('/api/backends/chat-completions/generate', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });`);
 patch('async function readChat(r) {\n    const raw = await r.text();', 'async function readChat(r) {\n    const raw = await readBody(r);');
 patch('timers.clear(); stopped = true; }', 'timers.clear(); stopped = true; __mod_translate.stopFetch(); }');
+// 角色：从聊天正文读出人物和外貌（AI 回复里出现、卡里没写的人也能加进来）
+patch(`async function extractCast(cardName, description) {`,`async function extractCastFromChat(cardName, chatText) {
+    const sys = \`你从聊天正文里找出所有出场过、并且写到了外貌的角色（主角、配角、路人都算，{{user}} / 玩家本人不要），每人挑画图用的外貌标签。
+外貌只挑不会变的：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身、角尾巴翅膀等。最近一次写到的衣服另外放。正文没写到的不要编；同一个人前后写法不同时以较新的为准。
+\${PAIRS}
+只输出 JSON：{"people": [{"name": "正文里的名字", "aliases": ["昵称、称呼、别的叫法"], "appearance": [...], "outfit": [...]}]}\`;
+    const j = await askShrinking(sys, limit => \`卡名：\${cardName}\\n聊天正文（从旧到新）：\\n\${String(chatText || '').slice(-limit)}\`, { maxTokens: 8000, fn: 'look' });
+    const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
+    return (Array.isArray(j.people) ? j.people : []).map(p => ({
+        name: String(p?.name || '').trim().slice(0, 30),
+        aliases: (Array.isArray(p?.aliases) ? p.aliases : []).map(a => String(a || '').trim()).filter(Boolean).slice(0, 6),
+        appearance: norm(p?.appearance), outfit: norm(p?.outfit),
+    })).filter(p => p.name && !/^\\{\\{?user\\}?\\}$|^user$/i.test(p.name) && p.appearance.length);
+}
+async function extractCast(cardName, description) {`);
+patch(`return { AI_FNS, apiFor,`,`return { AI_FNS, extractCastFromChat, apiFor,`);
+patch(`        case 'readcast': {
+            const cardAvatar = c.kind === 'side' ? c.card : c.avatar;
+            const main = C.getChar('char:' + cardAvatar);
+            if (!cardAvatar || !main) return true;
+            ui.charBusy = 'cast'; render();
+            try {
+                const desc = await C.descOfFull(main);
+                if (!desc.trim()) { toastr.warning('描述、性格、场景、世界书里都没找到设定', '角色'); return true; }
+                const people = await T.extractCast(main.name, desc);`,`        case 'readchatcast':
+        case 'readcast': {
+            const cardAvatar = c.kind === 'side' ? c.card : c.avatar;
+            const main = C.getChar('char:' + cardAvatar);
+            if (!cardAvatar || !main) return true;
+            const fromChat = act === 'readchatcast';
+            ui.charBusy = fromChat ? 'chatcast' : 'cast'; render();
+            try {
+                let people;
+                if (fromChat) {
+                    const ctx = SillyTavern.getContext();
+                    const msgs = (ctx.chat || []).filter(m => !m.is_system && m.mes).slice(-40);
+                    const text = msgs.map(m => (m.is_user ? '【' + (m.name || '用户') + '】' : '【' + (m.name || main.name) + '】') + String(m.mes).replace(/<[^>]+>/g, ' ').replace(/\\n{3,}/g, '\\n\\n')).join('\\n\\n');
+                    if (!text.trim()) { toastr.warning('这个聊天还没有正文', '角色'); return true; }
+                    people = await T.extractCastFromChat(main.name, text);
+                    if (!people.length) { toastr.warning('AI 没在最近的正文里找到写了外貌的人', '角色'); return true; }
+                } else {
+                const desc = await C.descOfFull(main);
+                if (!desc.trim()) { toastr.warning('描述、性格、场景、世界书里都没找到设定', '角色'); return true; }
+                people = await T.extractCast(main.name, desc);
+                }`);
+patch(`'读出这张卡里所有人（含世界书）'}</button>\` : ''}`,`'读出这张卡里所有人（含世界书）'}</button><button class="pc-pill dashed tiny pc-mt-s" style="margin-left:6px" data-act="readchatcast" \${busy ? 'disabled' : ''}>\${busy === 'chatcast' ? '<span class="pc-busy">读取中</span>' : '从聊天正文读出人物（最近 40 楼）'}</button>\` : ''}`);
 // 0.8.36：设置里单独的 AI 预设、下载和水印、先存后改名、一键上传到共享
 patch(`    const ai = setFold('ai', '翻译和 AI',`,`    const ai0 = setFold('ai', '翻译和 AI',`);
 patch(`    const tpl = setFold('tpl', '例图提示词',`,`    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), \`

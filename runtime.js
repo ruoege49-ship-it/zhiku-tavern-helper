@@ -3917,6 +3917,19 @@ async function askShrinking(sys, userFor, opts) {
     throw new Error('设定太长，缩到 1.5 万字模型还是放不下：换个上下文更大的模型，或者关掉没用的世界书条目。' + (last?.message ? '（' + String(last.message).slice(0, 120) + '）' : ''));
 }
 /** 一张卡（连世界书）里所有人：[{ name, aliases, appearance, outfit }] */
+async function extractCastFromChat(cardName, chatText) {
+    const sys = `你从聊天正文里找出所有出场过、并且写到了外貌的角色（主角、配角、路人都算，{{user}} / 玩家本人不要），每人挑画图用的外貌标签。
+外貌只挑不会变的：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身、角尾巴翅膀等。最近一次写到的衣服另外放。正文没写到的不要编；同一个人前后写法不同时以较新的为准。
+${PAIRS}
+只输出 JSON：{"people": [{"name": "正文里的名字", "aliases": ["昵称、称呼、别的叫法"], "appearance": [...], "outfit": [...]}]}`;
+    const j = await askShrinking(sys, limit => `卡名：${cardName}\n聊天正文（从旧到新）：\n${String(chatText || '').slice(-limit)}`, { maxTokens: 8000, fn: 'look' });
+    const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
+    return (Array.isArray(j.people) ? j.people : []).map(p => ({
+        name: String(p?.name || '').trim().slice(0, 30),
+        aliases: (Array.isArray(p?.aliases) ? p.aliases : []).map(a => String(a || '').trim()).filter(Boolean).slice(0, 6),
+        appearance: norm(p?.appearance), outfit: norm(p?.outfit),
+    })).filter(p => p.name && !/^\{\{?user\}?\}$|^user$/i.test(p.name) && p.appearance.length);
+}
 async function extractCast(cardName, description) {
     const sys = `你从角色卡和世界书里找出所有有外貌描写的角色（主角、配角都要，{{user}} / 玩家本人不要），每人挑画图用的外貌标签。
 外貌只挑不会变的：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身等。衣服另外放。设定里没写的不要编。
@@ -4136,7 +4149,7 @@ ${PAIRS}
     if (!pose.length && !composition.length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
     return { pose, composition };
 }
-return { AI_FNS, stopFetch, apiFor, aiSeen, aiCfg, splitFormat, stToEntries, tavernPresets, entriesFor, currentTavernPreset, imagePose, imageToPrompt, zhForTags, extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
+return { AI_FNS, stopFetch, extractCastFromChat, apiFor, aiSeen, aiCfg, splitFormat, stToEntries, tavernPresets, entriesFor, currentTavernPreset, imagePose, imageToPrompt, zhForTags, extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
 })();
 
 // ───── chars.js ─────
@@ -6739,7 +6752,7 @@ function viewCharEdit(d) {
     <section class="pc-card pc-pad pc-mt">
       <div class="pc-row-between"><b>固定外貌</b><span class="pc-chips" style="margin:0">${c.kind !== 'free' ? `<button class="pc-pill dashed tiny" data-act="readcard" ${busy ? 'disabled' : ''}>${busy === 'read' ? '读取中…' : c.kind === 'user' ? '从人设读' : c.kind === 'side' ? '从卡和世界书读' : '从角色卡读'}</button>` : ''}<label class="pc-pill dashed tiny">${busy === 'look' ? '<span class="pc-busy">看图中</span>' : '从图片读'}<input type="file" accept="image/*" data-lookimg hidden></label></span></div>
       <div class="pc-dim small">头发、眼睛、脸、身材这类不会变的。第一个写 1boy 或 1girl。点标签可以改，× 删掉。</div>
-      ${c.kind === 'char' || c.kind === 'side' ? `<button class="pc-pill dashed tiny pc-mt-s" data-act="readcast" ${busy ? 'disabled' : ''}>${busy === 'cast' ? '<span class="pc-busy">读取中</span>' : '读出这张卡里所有人（含世界书）'}</button>` : ''}
+      ${c.kind === 'char' || c.kind === 'side' ? `<button class="pc-pill dashed tiny pc-mt-s" data-act="readcast" ${busy ? 'disabled' : ''}>${busy === 'cast' ? '<span class="pc-busy">读取中</span>' : '读出这张卡里所有人（含世界书）'}</button><button class="pc-pill dashed tiny pc-mt-s" style="margin-left:6px" data-act="readchatcast" ${busy ? 'disabled' : ''}>${busy === 'chatcast' ? '<span class="pc-busy">读取中</span>' : '从聊天正文读出人物（最近 40 楼）'}</button>` : ''}
       <label class="pc-field pc-mt-s"><span>别名（逗号隔开）· 图片角色标记可使用名字或别名</span><input data-charalias value="${esc(c.aliases || '')}" placeholder="比如 小秋，秋秋"></label>
       ${(() => { const n = charPairs(c).filter(t => !t.zh).length; return n ? `<div class="pc-chips wrap"><button class="pc-pill dashed tiny" data-act="zhtags" ${busy ? 'disabled' : ''}>${busy === 'zh' ? '<span class="pc-busy">翻译中</span>' : `译成中文 · ${n} 个没有中文`}</button></div>` : ''; })()}
       <div class="pc-pairs">${pairChips(c.appearance, 'app') || '<span class="pc-dim small">还没有</span>'}</div>
@@ -6906,15 +6919,27 @@ async function charAction(act, el) {
     if (!c) return false;
     const save = () => { C.saveChar(c); render(); };
     switch (act) {
+        case 'readchatcast':
         case 'readcast': {
             const cardAvatar = c.kind === 'side' ? c.card : c.avatar;
             const main = C.getChar('char:' + cardAvatar);
             if (!cardAvatar || !main) return true;
-            ui.charBusy = 'cast'; render();
+            const fromChat = act === 'readchatcast';
+            ui.charBusy = fromChat ? 'chatcast' : 'cast'; render();
             try {
+                let people;
+                if (fromChat) {
+                    const ctx = SillyTavern.getContext();
+                    const msgs = (ctx.chat || []).filter(m => !m.is_system && m.mes).slice(-40);
+                    const text = msgs.map(m => (m.is_user ? '【' + (m.name || '用户') + '】' : '【' + (m.name || main.name) + '】') + String(m.mes).replace(/<[^>]+>/g, ' ').replace(/\n{3,}/g, '\n\n')).join('\n\n');
+                    if (!text.trim()) { toastr.warning('这个聊天还没有正文', '角色'); return true; }
+                    people = await T.extractCastFromChat(main.name, text);
+                    if (!people.length) { toastr.warning('AI 没在最近的正文里找到写了外貌的人', '角色'); return true; }
+                } else {
                 const desc = await C.descOfFull(main);
                 if (!desc.trim()) { toastr.warning('描述、性格、场景、世界书里都没找到设定', '角色'); return true; }
-                const people = await T.extractCast(main.name, desc);
+                people = await T.extractCast(main.name, desc);
+                }
                 if (!people.length) { toastr.warning('AI 没在设定里找到写了外貌的人', '角色'); return true; }
                 const made = [], filled = [], kept = [];
                 for (const p of people) {
