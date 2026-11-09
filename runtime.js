@@ -2834,7 +2834,7 @@ function encKey(model = settings().novelaimode) {
 }
 function vibeSupported() {
     const s = settings();
-    return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3';
+    return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3' && !String(s.novelaimode).includes('diffusion-5');
 }
 
 /** 把一张图编码成当前模型能用的氛围（NovelAI 会扣一点点数）。imageB64 不带 data: 前缀 */
@@ -2993,8 +2993,15 @@ function composeStudio({ pos = '', neg = '', scene = '' }, s = N.settings()) {
 async function vibeRefs() {
     const d = getData();
     const g = d.vibeGroups?.[d.vibeActive];
-    if (!g?.vibes?.length || !N.vibeSupported()) return null;
+    if (!g?.vibes?.length) return null;
+    if (!N.vibeSupported()) {
+        const m = N.settings().novelaimode;
+        if (String(m).includes('diffusion-5') && !globalThis.__zkV5VibeTold) { globalThis.__zkV5VibeTold = 1; toastr.info('NAI 5 还不支持氛围，用 5 的时候不带氛围出图（也不会扣点）。想带氛围请换回 4.5。', '氛围', { timeOut: 6000 }); }
+        return null;
+    }
     const key = N.encKey();
+    const modelName = (N.MODELS.find(x => x[0] === N.settings().novelaimode)?.[1] || N.settings().novelaimode).replace('NAI Diffusion ', '');
+    const keyName = k => ({ 'v4-5full': '4.5 Full', 'v4-5curated': '4.5 Curated', v4full: '4 Full', v4curated: '4 Curated' })[k] || k;
     const list = [];
     const failed = [];
     let lastErr = null;
@@ -3010,7 +3017,10 @@ async function vibeRefs() {
         }
         list.push({ data: v.encodings[key], strength: Number(v.strength ?? 0.6) });
     }
-    if (failed.length) toastr.warning(`氛围「${failed.join('、')}」编码失败，这张先不带${list.length ? '它' : '氛围'}出图：${lastErr?.message || ''}`, '氛围', { timeOut: 8000 });
+    if (failed.length) {
+        const had = [...new Set(g.vibes.flatMap(v => Object.keys(v.encodings || {}).filter(k => v.encodings[k])))].map(keyName);
+        toastr.warning(`氛围「${failed.join('、')}」要按 ${modelName} 编码，编码失败，这张先不带${list.length ? '它' : '氛围'}出图。${had.length ? `（这组已经编码过的模型：${had.join('、')}。换了模型就得重新编码一次）` : '（这几张还没编码成功过）'}：${lastErr?.message || ''}`, '氛围', { timeOut: 9000 });
+    }
     if (!list.length) return null;
     const total = list.reduce((a, b) => a + b.strength, 0);
     const is45 = N.settings().novelaimode.includes('4-5');
@@ -6707,7 +6717,7 @@ function viewVibe(d) {
         <div class="pc-dim small">氛围就是参考图：照着这几张图的色调、光线、质感去画，不会照抄里面的人和构图。角色长相参考在「角色」里给每个角色单独绑。</div></div>
       <button class="pc-add" data-act="vibenew" aria-label="新建氛围组">＋</button>
     </section>
-    ${!N.vibeSupported() ? '<div class="pc-card pc-pad pc-mt pc-warn-card">现在的连接方式或模型用不了氛围（「用酒馆里的 key」和 NAI 3 不支持）。</div>' : ''}
+    ${!N.vibeSupported() ? '<div class="pc-card pc-pad pc-mt pc-warn-card">现在的连接方式或模型用不了氛围（「用酒馆里的 key」、NAI 3、NAI 5 都不支持）。</div>' : ''}
     <div class="pc-grid2 pc-mt">${groups.map(card).join('')}
       <article class="pc-ticket ${!cur ? 'active' : ''}" data-act="vibeuse" data-id="">
         <div class="pc-ticket-img"><span>不加氛围</span></div>
@@ -6721,7 +6731,7 @@ function viewVibe(d) {
       <div class="pc-chips wrap pc-mt-s"><button class="pc-pill dashed tiny" data-act="viberename" data-id="${show.id}">改名</button><button class="pc-pill dashed tiny danger" data-act="vibegdel" data-id="${show.id}">删除这一组</button></div>
       ${show.vibes.map((v, i) => `<div class="pc-vrow">
         <div class="pc-vthumb">${v.path || v.thumb ? `<img src="${esc(v.path ? '/' + v.path : v.thumb)}" alt="">` : ''}</div>
-        <div class="pc-grow"><div class="pc-row-between"><small class="pc-dim">${esc(v.name || '参考图 ' + (i + 1))}</small><button class="pc-x" data-act="vibedel" data-g="${show.id}" data-i="${i}" aria-label="删掉">×</button></div>
+        <div class="pc-grow"><div class="pc-row-between"><small class="pc-dim">${esc(v.name || '参考图 ' + (i + 1))}<br><span style="font-size:10px">${(() => { const ks = Object.keys(v.encodings || {}).filter(k => v.encodings[k]); const nm = { 'v4-5full': '4.5 Full', 'v4-5curated': '4.5 Curated', v4full: '4 Full', v4curated: '4 Curated' }; return ks.length ? '已编码：' + ks.map(k => nm[k] || k).join('、') : (v.path ? '还没编码（第一次用时扣约 2 点 Anlas）' : '官网文件，没有原图'); })()}</span></small><button class="pc-x" data-act="vibedel" data-g="${show.id}" data-i="${i}" aria-label="删掉">×</button></div>
           <label class="pc-slider"><span>强度</span><input type="range" min="0" max="1" step="0.01" value="${Number(v.strength ?? 0.6)}" data-vibestr="${show.id}:${i}"><b>${Number(v.strength ?? 0.6).toFixed(2)}</b></label></div></div>`).join('') || '<div class="pc-dim small pc-mt-s">点「＋ 加图」放几张参考图。也可以放 NovelAI 官网导出的 .naiv4vibe 文件。</div>'}
       <div class="pc-hint">强度一般 0.3 到 0.6。太大会盖过提示词。第一次用某张图时 NovelAI 会扣一点点数来编码，之后就不扣了。</div>
     </section>

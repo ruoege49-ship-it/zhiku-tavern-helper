@@ -1505,6 +1505,30 @@ function zkToast(type, msg, title, opt = {}) {
     return el;
 }
 const toastr = { success: (...a) => zkToast('success', ...a), info: (...a) => zkToast('info', ...a), warning: (...a) => zkToast('warning', ...a), error: (...a) => zkToast('error', ...a), clear: (...a) => stToastr?.clear?.(...a) };`);
+// 氛围：NAI 5 不带氛围、失败时说清楚按哪个模型编码、每张显示已编码的模型
+patch(`function vibeSupported() {
+    const s = settings();
+    return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3';
+}`,`function vibeSupported() {
+    const s = settings();
+    return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3' && !String(s.novelaimode).includes('diffusion-5');
+}`);
+patch(`    if (!g?.vibes?.length || !N.vibeSupported()) return null;
+    const key = N.encKey();`,`    if (!g?.vibes?.length) return null;
+    if (!N.vibeSupported()) {
+        const m = N.settings().novelaimode;
+        if (String(m).includes('diffusion-5') && !globalThis.__zkV5VibeTold) { globalThis.__zkV5VibeTold = 1; toastr.info('NAI 5 还不支持氛围，用 5 的时候不带氛围出图（也不会扣点）。想带氛围请换回 4.5。', '氛围', { timeOut: 6000 }); }
+        return null;
+    }
+    const key = N.encKey();
+    const modelName = (N.MODELS.find(x => x[0] === N.settings().novelaimode)?.[1] || N.settings().novelaimode).replace('NAI Diffusion ', '');
+    const keyName = k => ({ 'v4-5full': '4.5 Full', 'v4-5curated': '4.5 Curated', v4full: '4 Full', v4curated: '4 Curated' })[k] || k;`);
+patch(`    if (failed.length) toastr.warning(\`氛围「\${failed.join('、')}」编码失败，这张先不带\${list.length ? '它' : '氛围'}出图：\${lastErr?.message || ''}\`, '氛围', { timeOut: 8000 });`,`    if (failed.length) {
+        const had = [...new Set(g.vibes.flatMap(v => Object.keys(v.encodings || {}).filter(k => v.encodings[k])))].map(keyName);
+        toastr.warning(\`氛围「\${failed.join('、')}」要按 \${modelName} 编码，编码失败，这张先不带\${list.length ? '它' : '氛围'}出图。\${had.length ? \`（这组已经编码过的模型：\${had.join('、')}。换了模型就得重新编码一次）\` : '（这几张还没编码成功过）'}：\${lastErr?.message || ''}\`, '氛围', { timeOut: 9000 });
+    }`);
+patch(`现在的连接方式或模型用不了氛围（「用酒馆里的 key」和 NAI 3 不支持）。`,`现在的连接方式或模型用不了氛围（「用酒馆里的 key」、NAI 3、NAI 5 都不支持）。`);
+patch(`<small class="pc-dim">\${esc(v.name || '参考图 ' + (i + 1))}</small>`,`<small class="pc-dim">\${esc(v.name || '参考图 ' + (i + 1))}<br><span style="font-size:10px">\${(() => { const ks = Object.keys(v.encodings || {}).filter(k => v.encodings[k]); const nm = { 'v4-5full': '4.5 Full', 'v4-5curated': '4.5 Curated', v4full: '4 Full', v4curated: '4 Curated' }; return ks.length ? '已编码：' + ks.map(k => nm[k] || k).join('、') : (v.path ? '还没编码（第一次用时扣约 2 点 Anlas）' : '官网文件，没有原图'); })()}</span></small>`);
 // 0.8.36：设置里单独的 AI 预设、下载和水印、先存后改名、一键上传到共享
 patch(`    const ai = setFold('ai', '翻译和 AI',`,`    const ai0 = setFold('ai', '翻译和 AI',`);
 patch(`    const tpl = setFold('tpl', '例图提示词',`,`    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), \`
