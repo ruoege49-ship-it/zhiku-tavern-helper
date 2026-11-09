@@ -2721,8 +2721,8 @@ function naiToSd(text, artist = 'plain') {
         if (ch === '{') { mult *= 1.05; stack.push(1.05); continue; }
         if (ch === '[') { mult *= 0.95; stack.push(0.95); continue; }
         if ((ch === '}' || ch === ']') && stack.length) { mult /= stack.pop(); continue; }
-        if (ch === '\u0001') { const j = src.indexOf('\u0002', i); const w = Number(src.slice(i + 1, j)) || 1; mult *= w; stack.push(w); i = j; continue; }
-        if (ch === '\u0003') { if (stack.length) mult /= stack.pop(); continue; }
+        if (ch === '\u0001') { const j = src.indexOf('\u0002', i); const parsed = Number(src.slice(i + 1, j)); const w = Number.isFinite(parsed) ? parsed : 1; stack.push(mult); mult *= w; i = j; continue; }
+        if (ch === '\u0003') { if (stack.length) mult = stack.pop(); continue; }
         if (ch.trim() && bufW === null && !buf.trim()) bufW = mult;
         buf += ch;
     }
@@ -2738,9 +2738,9 @@ async function comfyPost(path, body) {
     return r;
 }
 /** 浏览器直接问 ComfyUI（读工作流、节点说明），要 ComfyUI 开 --enable-cors-header */
-async function comfyDirect(path) {
+async function comfyDirect(path, url = comfyUrl()) {
     let r;
-    try { r = await fetch(comfyUrl() + path, { cache: 'no-store' }); }
+    try { r = await fetch(url + path, { cache: 'no-store' }); }
     catch { throw Object.assign(new Error('浏览器读不到 ComfyUI 里的工作流：ComfyUI 启动时加上 --enable-cors-header 再重连（不加也能生图，工作流可以「从电脑选文件」）'), { cors: true }); }
     if (!r.ok) throw new Error(`ComfyUI 返回 ${r.status}`);
     return r;
@@ -2751,20 +2751,23 @@ async function comfyConnect() {
     if (!url) throw new Error('先填 ComfyUI 地址');
     await comfyPost('ping', { url });
     const [models, samplers, schedulers] = await Promise.all(['models', 'samplers', 'schedulers'].map(p => comfyPost(p, { url }).then(r => r.json()).catch(() => [])));
-    const info = { models: (models || []).map(m => typeof m === 'string' ? { value: m, text: m } : m), samplers, schedulers, workflows: null, wfError: '' };
+    const info = { models: (models || []).map(m => typeof m === 'string' ? { value: m, text: m } : m).filter(m => !/^(UNet:|GGUF:)/i.test(m.text || '')), samplers, schedulers, workflows: null, wfError: '' };
     try {
         let list;
-        try { list = await (await comfyDirect('/api/userdata?dir=workflows&recurse=true&split=false')).json(); }
-        catch (e) { if (e.cors) throw e; list = await (await comfyDirect('/userdata?dir=workflows&recurse=true&split=false')).json(); }
+        try { list = await (await comfyDirect('/api/userdata?dir=workflows&recurse=true&split=false', url)).json(); }
+        catch (e) { if (e.cors) throw e; list = await (await comfyDirect('/userdata?dir=workflows&recurse=true&split=false', url)).json(); }
         info.workflows = (Array.isArray(list) ? list : []).map(x => typeof x === 'string' ? x : x?.path || x?.name).filter(x => x && /\.json$/i.test(x)).sort();
     } catch (e) { info.wfError = e.message; }
     return info;
 }
-let objectInfo = null;
-async function comfyObjectInfo() {
-    if (objectInfo) return objectInfo;
-    try { objectInfo = await (await comfyDirect('/object_info')).json(); } catch { objectInfo = null; }
-    return objectInfo;
+let objectInfo = null, objectInfoUrl = '';
+let comfyWorkflowSeq = 0;
+async function comfyObjectInfo(url = comfyUrl()) {
+    if (objectInfo && objectInfoUrl === url) return objectInfo;
+    let info = null;
+    try { info = await (await comfyDirect('/object_info', url)).json(); } catch {}
+    if (comfyUrl() === url) { objectInfo = info; objectInfoUrl = url; }
+    return info;
 }
 async function comfyLoadWorkflow(name) {
     const r = await comfyDirect('/api/userdata/' + encodeURIComponent('workflows/' + name));
@@ -2789,7 +2792,7 @@ function widgetNames(type, info) {
         const names = [];
         for (const sec of ['required', 'optional']) for (const [n, spec] of Object.entries(def[sec] || {})) {
             const t = Array.isArray(spec) ? spec[0] : spec;
-            if (Array.isArray(t) || ['INT', 'FLOAT', 'STRING', 'BOOLEAN', 'COMBO'].includes(t)) names.push(n);
+            if (!spec?.[1]?.forceInput && (Array.isArray(t) || ['INT', 'FLOAT', 'STRING', 'BOOLEAN', 'COMBO'].includes(t))) names.push(n);
         }
         return names;
     }
@@ -2850,10 +2853,16 @@ function uiToApi(wf, info) {
 }
 /** 往工作流里填正面、负面、尺寸、种子（有 "%prompt%" 这类占位符就按占位符填） */
 function fillWorkflow(api, v, builtin) {
-    let text = JSON.stringify(api);
+    if (!api || Array.isArray(api) || typeof api !== 'object' || !Object.values(api).every(n => n && typeof n.class_type === 'string' && n.inputs && typeof n.inputs === 'object')) throw new Error('请导入 ComfyUI 的 API 工作流，或可转换的界面工作流');
+    const text = JSON.stringify(api);
     if (builtin || text.includes('"%prompt%"')) {
-        for (const [k, val] of Object.entries(v)) text = text.replaceAll(`"%${k}%"`, JSON.stringify(val));
-        return text;
+        const fill = x => {
+            if (typeof x === 'string' && /^%[a-z_]+%$/.test(x)) { const k = x.slice(1,-1); if (!(k in v)) throw new Error('工作流占位符没有对应参数：' + x); return v[k]; }
+            if (Array.isArray(x)) return x.map(fill);
+            if (x && typeof x === 'object') return Object.fromEntries(Object.entries(x).map(([k,val]) => [k,fill(val)]));
+            return x;
+        };
+        return JSON.stringify(fill(api));
     }
     const wf = JSON.parse(text);
     const nodes = Object.values(wf);
@@ -2871,7 +2880,7 @@ function fillWorkflow(api, v, builtin) {
         return false;
     };
     if (!setText(sampler.inputs.positive, v.prompt)) throw new Error('顺着采样器找不到正面提示词的文字框');
-    setText(sampler.inputs.negative, v.negative_prompt);
+    if (sampler.inputs.negative && !setText(sampler.inputs.negative, v.negative_prompt)) throw new Error('顺着采样器找不到负面提示词的文字框');
     for (const n of nodes) {
         if (/Sampler/i.test(n.class_type)) { if ('seed' in n.inputs && !Array.isArray(n.inputs.seed)) n.inputs.seed = v.seed; if ('noise_seed' in n.inputs && !Array.isArray(n.inputs.noise_seed)) n.inputs.noise_seed = v.seed; }
         if (/RandomNoise/.test(n.class_type) && 'noise_seed' in n.inputs) n.inputs.noise_seed = v.seed;
@@ -2891,7 +2900,7 @@ async function comfyGenerate(opts, s) {
     const w = Math.round((Number(opts.width || s.novelai_width) || 832) / 8) * 8;
     const h = Math.round((Number(opts.height || s.novelai_height) || 1216) / 8) * 8;
     const sd = Number(opts.seed ?? s.comfySeed);
-    const seed = sd > 0 ? sd : Math.floor(Math.random() * 4294967294) + 1;
+    const seed = String(opts.seed ?? s.comfySeed ?? '').trim() !== '' && Number.isSafeInteger(sd) && sd >= 0 ? sd : Math.floor(Math.random() * 4294967294) + 1;
     const vals = { prompt: positive, negative_prompt: negative, model: String(s.comfyModel || '').trim(), width: w, height: h, seed, steps: Number(s.comfySteps) || 28, scale: Number(s.comfyCfg) || 6, sampler: s.comfySampler || 'euler_ancestral', scheduler: s.comfyScheduler || 'normal', denoise: 1, clip_skip: -2 };
     let api = COMFY_WORKFLOW;
     if (custom) {
@@ -2900,18 +2909,21 @@ async function comfyGenerate(opts, s) {
     const wf = fillWorkflow(api, vals, !custom);
     const r = await comfyPost('generate', { url, prompt: `{"prompt": ${wf}}` });
     const { format, data } = await r.json();
+    if (typeof data !== 'string' || !data.trim()) throw new Error('ComfyUI 没有返回图片数据');
     const sent = { prompt: positive, negative, size: `${w}×${h}`, chars: [], seed, model: 'ComfyUI · ' + (custom ? custom.replace(/^\w+:/, '') : vals.model), director: 0 };
     return { image: `data:image/${format || 'png'};base64,${data}`, sent };
 }
 /** 选工作流：内置 / ComfyUI 里存的 / 电脑上的文件；选的时候就转好格式存下来 */
 async function comfyUseWorkflow(kind, name = '', raw = null) {
     const s = settings();
+    const seq = ++comfyWorkflowSeq, url = comfyUrl();
     if (!kind) { s.comfyWf = ''; s.comfyWfApi = ''; save(); return; }
     const wf = raw ?? await comfyLoadWorkflow(name);
-    const info = Array.isArray(wf?.nodes) ? await comfyObjectInfo() : null;
+    const info = Array.isArray(wf?.nodes) ? await comfyObjectInfo(url) : null;
     const api = uiToApi(wf, info);
     if (!api || typeof api !== 'object' || !Object.keys(api).length) throw new Error('这个文件不像 ComfyUI 工作流');
-    fillWorkflow(api, { prompt: 'x', negative_prompt: 'x', width: 832, height: 1216, seed: 1 }, false);
+    fillWorkflow(api, { prompt: 'x', negative_prompt: 'x', model: 'test', width: 832, height: 1216, seed: 1, steps: 28, scale: 6, sampler: 'euler', scheduler: 'normal', denoise: 1, clip_skip: -2 }, false);
+    if (seq !== comfyWorkflowSeq || url !== comfyUrl()) return;
     s.comfyWf = kind + ':' + name; s.comfyWfApi = JSON.stringify(api); save();
 }
 async function generateRequest(opts) {
@@ -4282,7 +4294,6 @@ const snap = v => { const g = [0.1, 0.3, 0.5, 0.7, 0.9]; v = Number(v); return N
 /** 能不能分角色（酒馆转发和 V3 不行） */
 function canSplit() {
     const s = N.settings();
-    if (getData().options.chatNoSplit) return false;
     return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3' && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');
 }
 
@@ -4296,7 +4307,7 @@ function buildChatPrompt(scene, picks) {
     const chars = picks.map(p => p.char);
     const base = M.mergeTags(artist, /\b(?:\d+(?:boys?|girls?|others?)|no humans)\b/i.test(scene) ? '' : countTags(chars), scene, d.options.chatPositive || '');
     const chatNeg = [d.active ? M.ticketNeg(d, d.active) : '', d.options.chatNegative || ''].filter(Boolean).join(', ');
-    if (!canSplit() || picks.length === 0) {
+    if (d.options.chatNoSplit || !canSplit() || picks.length === 0) {
         const flat = M.mergeTags(base, ...picks.map(p => [fixedTags(p.char), p.tags].filter(Boolean).join(', ')));
         const { positive, negative } = E.composeStudio({ pos: flat, neg: [chatNeg, ...picks.flatMap(p => [p.char.negative, p.uc])].filter(Boolean).join(', ') });
         return { positive, negative, chars: [] };
@@ -4355,10 +4366,10 @@ async function generateForMessage(mesId, { onStep } = {}) {
         if (ch && !picks.some(q => q.char === ch)) picks.push({ char: ch, tags: p.tags, x: p.x, y: p.y });
     }
     const prompt = buildChatPrompt(sc.scene, picks);
-    onStep?.('NovelAI 正在画…');
+    onStep?.(N.chatBackend() === 'comfy' ? 'ComfyUI 正在画…' : 'NovelAI 正在画…');
     // 只用出场角色在角色页里绑的角色参考
     const bound = [...new Set(picks.map(p => p.char.charRef).filter(id => id && getData().charRefGroups?.[id]))];
-    const director = bound.length ? await E.charRefs(bound) : null;
+    const director = N.chatBackend() !== 'comfy' && bound.length ? await E.charRefs(bound) : null;
     const image = await E.generateFull({ ...prompt, director, backend: (typeof __mod_nai !== 'undefined' && __mod_nai.chatBackend?.()) || 'nai' });
     await insertImage(mesId, image);
     return image;
@@ -4907,7 +4918,7 @@ async function pcRecordImage({ dataUrl, url, raw = '', sent = null, from }) {
     try { thumb = await pcLocal.put(await pcMakeThumb(dataUrl)); } catch (e) { console.warn('[智库] 缩略图没存上', e); }
     const d = __mod_store.getData();
     const cut = (v, n) => String(v || '').slice(0, n);
-    const entry = { id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), url: String(url), thumb, raw: cut(raw, 4000), prompt: cut(sent?.prompt, 6000), negative: cut(sent?.negative, 6000), chars: (sent?.chars || []).slice(0, 6).map(c => typeof c === 'string' ? cut(c, 2000) : cut(c?.prompt, 2000)).filter(Boolean), seed: sent?.seed ?? '', size: cut(sent?.size, 20), model: cut(sent?.model, 40), from, at: Date.now() };
+    const entry = { id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), url: String(url), thumb, raw: String(raw ?? ''), prompt: String(sent?.prompt ?? ''), negative: String(sent?.negative ?? ''), chars: (sent?.chars || []).map(c => String(typeof c === 'string' ? c : c?.prompt ?? '')).filter(Boolean), seed: sent?.seed ?? '', size: cut(sent?.size, 20), model: cut(sent?.model, 40), from, at: Date.now() };
     d.history = [entry, ...(Array.isArray(d.history) ? d.history : []).filter(h => h.url !== entry.url)].slice(0, 300);
     __mod_store.commit({ silent: !DOC.querySelector('#pc-root.open') });
 }
@@ -4919,7 +4930,7 @@ const __mod_marker=createMarkerController({
             const hit=__mod_chars.markerPrompt(prompt,where);
             const {positive,negative,chars}=hit||__mod_engine.composeStudio({pos:__mod_model.mergeTags(d.active?__mod_model.ticketString(d,d.active):'',prompt,d.options.chatPositive||''),neg:[d.active?__mod_model.ticketNeg(d,d.active):'',d.options.chatNegative||''].filter(Boolean).join(', ')});
             const bound=[...new Set((hit?.cast||[]).map(ch=>ch.charRef).filter(id=>id&&d.charRefGroups?.[id]))];
-            const image=await __mod_engine.generateFull({positive,negative,...(chars?.length?{chars}:{}),backend:(typeof __mod_nai!=='undefined'&&__mod_nai.chatBackend?.()||'nai'),director:bound.length?await __mod_engine.charRefs(bound):null});__mod_engine.afterChatImage();return image;},
+            const image=await __mod_engine.generateFull({positive,negative,...(chars?.length?{chars}:{}),backend:(typeof __mod_nai!=='undefined'&&__mod_nai.chatBackend?.()||'nai'),director:__mod_nai.chatBackend?.()!=='comfy'&&bound.length?await __mod_engine.charRefs(bound):null});__mod_engine.afterChatImage();return image;},
         resolveUrl:u=>pcLocal.url(u),upload:async(image,name)=>{const r=await pcStoreImage(image,name);void pcRecordImage({dataUrl:image,url:r?.url,raw:pcMarkerRaw,sent:__mod_engine.runtime.lastSent,from:'chat'}).catch(e=>console.warn('[智库] 历史生图没存上',e));return r;},notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
     });
 const __mod_ui = (() => {
@@ -5030,29 +5041,45 @@ function closeWindow() {
 }
 
 /** 重画界面时记住正在打字的框，画完放回去：后台有东西触发重画时，手机键盘不会被收掉 */
-let tapOutAt = 0;
-DOC.addEventListener('pointerdown', ev => { if (!ev.target?.closest?.('input, textarea')) tapOutAt = Date.now(); }, true);
+let tapOutAt = 0, focusComposing = false, focusPending = false;
+const onFocusPointer = ev => { tapOutAt = ev.target?.closest?.('input, textarea') ? 0 : Date.now(); };
+const onFocusCompositionStart = ev => { if (root?.contains(ev.target)) focusComposing = true; };
+const onFocusCompositionEnd = () => { focusComposing = false; if (focusPending) { focusPending = false; setTimeout(render, 0); } };
+if (globalThis.__zhikuInputCleanup) globalThis.__zhikuInputCleanup();
+DOC.addEventListener('pointerdown', onFocusPointer, true);
+DOC.addEventListener('compositionstart', onFocusCompositionStart, true);
+DOC.addEventListener('compositionend', onFocusCompositionEnd, true);
+globalThis.__zhikuInputCleanup = () => {
+    DOC.removeEventListener('pointerdown', onFocusPointer, true);
+    DOC.removeEventListener('compositionstart', onFocusCompositionStart, true);
+    DOC.removeEventListener('compositionend', onFocusCompositionEnd, true);
+};
 function keepFocus() {
-    if (Date.now() - tapOutAt < 1200) return null; // 刚点了按钮之类：是自己操作引起的重画，不把键盘拉回来
+    if (Date.now() - tapOutAt < 1200 || (render.focusView && render.focusView !== ui.view)) return null;
     const ae = DOC.activeElement;
-    if (!root || !ae || !root.contains(ae) || !/^(INPUT|TEXTAREA)$/.test(ae.tagName) || /^(checkbox|radio|range|file|button|submit|color)$/i.test(ae.type || '')) return null;
-    const attrs = ['data-bind', 'data-optstr', 'data-enter', 'data-field', 'data-k', 'data-i', 'data-where', 'name', 'placeholder'];
-    const q = v => String(v).replace(/["\\]/g, '\\$&');
-    const sel = ae.tagName.toLowerCase() + (ae.id ? '#' + CSS.escape(ae.id) : attrs.filter(a => ae.hasAttribute(a)).map(a => `[${a}="${q(ae.getAttribute(a))}"]`).join(''));
-    if (sel === ae.tagName.toLowerCase()) return null;
-    return { sel, s: ae.selectionStart, e: ae.selectionEnd, top: ae.scrollTop };
+    if (!root?.classList.contains('open') || !ae || !root.contains(ae) || !/^(INPUT|TEXTAREA)$/.test(ae.tagName) || /^(checkbox|radio|range|file|button|submit|color)$/i.test(ae.type || '')) return null;
+    const attrs = Array.from(ae.attributes).filter(a => a.name.startsWith('data-') || ['name','placeholder'].includes(a.name));
+    const sel = ae.tagName.toLowerCase() + (ae.id ? '#' + P.CSS.escape(ae.id) : attrs.map(a => '[' + a.name + '="' + P.CSS.escape(a.value) + '"]').join(''));
+    if (sel === ae.tagName.toLowerCase() || root.querySelectorAll(sel).length !== 1) return null;
+    return { sel, node: ae, value: ae.value, s: ae.selectionStart, e: ae.selectionEnd, top: ae.scrollTop };
 }
 function restoreFocus(k) {
-    if (!k || !root) return;
-    const n = root.querySelector(k.sel);
+    if (!k || !root?.classList.contains('open')) return;
+    let n = root.querySelector(k.sel);
     if (!n || DOC.activeElement === n) return;
+    for (let p = n.parentElement; p && p !== root; p = p.parentElement) if (p.tagName === 'DETAILS') p.open = true;
+    n.replaceWith(k.node); n = k.node;
+    n.value = k.value;
     try { n.focus({ preventScroll: true }); } catch { n.focus(); }
-    try { const L = n.value.length; n.setSelectionRange(Math.min(k.s ?? L, L), Math.min(k.e ?? L, L)); } catch { /* 有的输入框不支持 */ }
+    try { const L = n.value.length; n.setSelectionRange(Math.min(k.s ?? L, L), Math.min(k.e ?? L, L)); } catch {}
     n.scrollTop = k.top;
 }
 function render() {
+    if (typeof stopped !== 'undefined' && stopped) return;
+    if (focusComposing && root?.contains(DOC.activeElement) && render.focusView === ui.view) { focusPending = true; return; }
     const kept = keepFocus();
     renderView();
+    render.focusView = ui.view;
     restoreFocus(kept);
 }
 function renderView() {
@@ -5110,7 +5137,7 @@ function renderView() {
 }
 
 /** 换页动画：只在页面真的换了时才动 */
-const NAV_ORDER = ['studio', 'comic', 'book', 'vibe', 'cast', 'lobby', 'settings'];
+const NAV_ORDER = ['studio', 'comfy', 'comic', 'book', 'vibe', 'cast', 'lobby', 'settings'];
 const SUB_VIEWS = ['artist', 'group', 'batch', 'charedit', 'outfit'];
 function pageAnim(mainView) {
     const prev = pageAnim.last;
@@ -5529,14 +5556,18 @@ function saveCfy() {
 }
 function comfyConnectNow(force = false) {
     const k = ui.comfy || (ui.comfy = {});
-    if (k.busy || (k.tried && !force)) return;
-    k.busy = true; k.tried = true; k.err = '';
+    if (!force && (k.busy || k.tried)) return;
+    const seq = (k.seq || 0) + 1; k.seq = seq;
+    Object.assign(k, { busy:true, tried:true, ok:false, err:'', models:[], samplers:[], schedulers:[], workflows:[] });
     N.comfyAutoConfig();
+    const url = N.settings().comfyUrl;
+    const current = () => k.seq === seq && N.settings().comfyUrl === url && !stopped;
     N.comfyConnect().then(info => {
-        Object.assign(k, info, { busy: false, ok: true, err: '' });
+        if (!current()) return;
+        Object.assign(k, info, { busy:false, ok:true, err:'' });
         const s = N.settings();
         if (!s.comfyModel && info.models.length) { s.comfyModel = info.models[0].value; N.save(); }
-    }).catch(e => Object.assign(k, { busy: false, ok: false, err: e.message })).finally(() => { if (ui.view === 'comfy') render(); });
+    }).catch(e => { if (current()) Object.assign(k, { busy:false, ok:false, err:e.message }); }).finally(() => { if (current() && ui.view === 'comfy') render(); });
 }
 function ensureCfyCss() {
     if (!DOC.getElementById('pc-comfy-css')) {
@@ -8071,14 +8102,17 @@ async function onClick(ev, outside = false) {
             }
             case 'cfygen': {
                 const c = loadCfy();
+                if (c.busy) break;
                 if (!N.comfyReady()) { toastr.warning('先连上 ComfyUI', 'ComfyUI'); break; }
                 if (!c.pos.trim()) { toastr.warning('正面是空的', 'ComfyUI'); break; }
-                saveCfy(); c.busy = true; render();
+                saveCfy(); const input = { pos:c.pos, neg:c.neg, size:c.size }; c.busy = true; render();
                 try {
-                    const [w, h] = c.size.split('x').map(Number);
-                    c.result = await E.generateFull({ positive: c.pos, negative: c.neg, width: w, height: h, backend: 'comfy' });
+                    const [w, h] = input.size.split('x').map(Number);
+                    const result = await E.generateFull({ positive: input.pos, negative: input.neg, width: w, height: h, backend: 'comfy' });
+                    if (stopped) break;
+                    c.result = result;
                     c.sent = E.runtime.lastSent;
-                    const shot = { dataUrl: c.result, raw: c.pos, sent: c.sent, from: 'comfy' };
+                    const shot = { dataUrl: c.result, raw: input.pos, sent: c.sent, from: 'comfy' };
                     pcStoreImage(shot.dataUrl, 'comfy_' + Date.now()).then(r => pcRecordImage({ ...shot, url: r.url })).catch(e => console.warn('[智库] 历史生图没存上', e));
                 } catch (e) { toastr.error(e.message, 'ComfyUI 生成失败', { timeOut: 10000 }); }
                 finally { c.busy = false; render(); }
@@ -8392,6 +8426,7 @@ function setPath(obj, path, val) {
 }
 
 function onInput(ev) {
+    tapOutAt = 0;
     const el = ev.target;
     const d = getData();
     if (el.dataset.ucpCustom !== undefined) { N.settings().UCP_custom = el.value; N.save(); updateStudioPreview(); return; }
@@ -9933,7 +9968,7 @@ return {
     start: () => __mod_script_entry.start(),
     async stop() {
         try { await __mod_script_entry.stop(); }
-        finally { DOC.getElementById('pc-toasts')?.remove(); for (const id of timers) window.clearTimeout(id); timers.clear(); stopped = true; }
+        finally { globalThis.__zhikuInputCleanup?.(); delete globalThis.__zhikuInputCleanup; DOC.getElementById('pc-comfy-css')?.remove(); DOC.getElementById('pc-toasts')?.remove(); for (const id of timers) window.clearTimeout(id); timers.clear(); stopped = true; }
     }
 };
 

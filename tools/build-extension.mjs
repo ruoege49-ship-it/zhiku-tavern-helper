@@ -1,3 +1,4 @@
+import {applyComfyCompatibility} from './comfy-compat.mjs';
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {applyMarkers} from './apply-markers.mjs';
@@ -2202,6 +2203,7 @@ patch("return s.naiMode !== 'tavern' && s.novelaimode.includes('4-5');", "return
 patch("        model,\n    };", "        model,\n        director: params.director_reference_images_cached?.length || 0,\n    };");
 patch("director: opts.director?.length || 0 };", "director: r.sent.director ?? (opts.director?.length || 0) };");
 patch(".pc-mes-gen, .pc-mes-outfit", ".pc-mes-gen, .pc-mes-outfit, .pc-mes-comic");
+s=applyComfyCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;

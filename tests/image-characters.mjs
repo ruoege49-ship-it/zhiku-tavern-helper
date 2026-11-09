@@ -127,4 +127,15 @@ for (const rating of ['sfw','nsfw']) {
     assert.equal(request.positive.startsWith('nsfw,'),rating==='nsfw');
     assert(!JSON.stringify(request.payload).includes('$'));
 }
+
+d.options.chatNoSplit=true;d=M.normalizeData(JSON.parse(JSON.stringify(d)));
+assert.equal(chars.canSplit(),true,'chat setting does not disable studio capability');
+await adapter.generate('$小红-sfw-fullbody$, standing, $小蓝-sfw-fullbody$, waving');
+assert.equal(requests.at(-1).chars.length,0);assert.match(requests.at(-1).positive,/hair_0/);assert.match(requests.at(-1).positive,/hair_1/);
+d.options.chatNoSplit=false;
+await adapter.generate('$小红-sfw-fullbody$, standing, $小蓝-sfw-fullbody$, waving');assert.equal(requests.at(-1).chars.length,2);
+sandbox.__mod_nai.chatBackend=()=> 'comfy';
+const originalRefs=engine.charRefs;engine.charRefs=async()=>assert.fail('Comfy should skip reference file loads');
+await adapter.generate('$小红-sfw-fullbody$, standing');assert.equal(requests.at(-1).backend,'comfy');assert.equal(requests.at(-1).director,null);
+engine.charRefs=originalRefs;
 console.log('Per-image cast, payload, references, story boundary, editing and reload checks passed.');
