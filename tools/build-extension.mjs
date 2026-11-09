@@ -1,3 +1,4 @@
+import {applySharingWardrobeCompatibility} from './sharing-wardrobe-compat.mjs';
 import {applyComfyCompatibility} from './comfy-compat.mjs';
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
@@ -2627,7 +2628,8 @@ patch("        model,\n    };", "        model,\n        director: params.direct
 patch("director: opts.director?.length || 0 };", "director: r.sent.director ?? (opts.director?.length || 0) };");
 patch(".pc-mes-gen, .pc-mes-outfit", ".pc-mes-gen, .pc-mes-outfit, .pc-mes-comic");
 s=applyComfyCompatibility(s);
-patch('return { AI_FNS, apiFor, aiSeen, aiCfg,', 'return { AI_FNS, stopFetch, apiFor, aiSeen, aiCfg,');
+s=applySharingWardrobeCompatibility(s);
+patch('return { AI_FNS, extractCastFromChat, apiFor, aiSeen, aiCfg,', 'return { AI_FNS, stopFetch, extractCastFromChat, apiFor, aiSeen, aiCfg,');
 
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
@@ -2640,7 +2642,7 @@ function setTimeout(fn, delay, ...args) {
 }
 function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
-fs.writeFileSync(dir+'/runtime.js',prefix+s+'\n}\n');
+fs.writeFileSync(dir+'/runtime.js',(prefix+s+'\n}\n').replace(/\r\n/g, '\n'));
 fs.copyFileSync('src/index.js',dir+'/index.js');
 fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.36',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
 fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.36',private:true,type:'module'},null,2)+'\n');

@@ -4127,20 +4127,46 @@ async function zhForTags(ens) {
     }
     return out;
 }
-/** 看图写成 NovelAI 标签（不写画师和质量词） */
+/** 看图写成 NovelAI 标签（不写画师和质量词）：分栏写，镜头语言单独一栏、必须写 */
 async function imageToPrompt(imageDataUrl) {
-    const sys = `你看图，把这张图写成 NovelAI 能直接用的英文标签（Danbooru 风格，逗号隔开）。按顺序写：人数（1girl、2boys、no humans 等）→ 每个人的外貌、衣服、动作、表情、视线 → 构图和镜头（cowboy shot、from above 等）→ 背景和场景 → 光影和色调 → 画面风格特征（watercolor、thick painting 等）。不要写画师名，不要写质量词，看不见的不要编。
-只输出 JSON：{"tags": "标签1, 标签2, ...", "zh": "一句话中文描述"}`;
-    const j = pickJson(await askVision(sys, '把这张图写成提示词。', imageDataUrl, { maxTokens: 1500, fn: 'img' }));
-    const tags = (Array.isArray(j.tags) ? j.tags.join(', ') : String(j.tags || '')).trim();
+    const sys = `你是给 NovelAI / Danbooru 打标签的专业标注员。看图，把这张图拆成英文 Danbooru 标签，按下面每一栏分别写，每栏是标签数组。看不清的不要编，但「镜头」这一栏必须写，不能空。
+1. people：人数和性别（1girl、1boy、2girls、1boy 1girl、multiple girls、no humans 等）。
+2. outfit：衣服状态，只写大类和穿脱状态（shirt、dress、open clothes、naked 等），不写颜色细节。不写长相（发色、眼睛、脸、身材都不要写）。
+3. action：动作，这一栏和镜头一样重要，写细：
+   - 全身姿势：standing、sitting、kneeling、squatting、lying on back、lying on side、on stomach、all fours、leaning forward、leaning back、bent over、arched back、crossed legs、spread legs、walking、running、jumping。
+   - 身体朝向：facing viewer、facing away、turning around、looking back、profile。
+   - 手和手臂：每只手在做什么（hand on own chest、hand on hip、hands up、arms behind back、arm support、reaching towards viewer、holding xx、covering mouth、v sign、hand in hair）。
+   - 腿和脚：knees up、legs together、one knee up、feet up、standing on one leg。
+   - 头：head tilt、chin rest、looking down、looking up。
+   - 多人时写互动和相对位置：hug、hug from behind、holding hands、carrying、lap pillow、face-to-face、back-to-back、on top、between legs，谁在谁的哪边。
+4. expression：表情和视线（smile、blush、open mouth、tears、looking at viewer、looking away、looking back、eyes closed 等）。
+5. camera：镜头语言，这一栏最重要，逐项看清再写：
+   - 景别：extreme close-up、close-up、portrait、upper body、cowboy shot、full body、wide shot、very wide shot 里选一个；脸占满画面就是 close-up。
+   - 机位角度：from above、from below、from side、from behind、straight-on、dutch angle、pov、high angle、low angle 里看到哪个写哪个。
+   - 裁切和取景：head out of frame、cropped legs、cropped torso、feet out of frame、upper body focus、ass focus、foot focus、hand focus 等。
+   - 构图：centered、off-center、symmetry、rule of thirds、negative space、split screen 等。
+   - 透视和镜头：foreshortening、perspective、fisheye、wide-angle lens、depth of field、bokeh、blurry background、blurry foreground、motion blur、lens flare、chromatic aberration。
+6. background：地点、背景、物件；纯色背景写 simple background / white background 等。
+7. lighting：光线和色调：backlighting、rim lighting、sunlight、dim lighting、night、golden hour、high contrast、monochrome、muted colors 等。
+不写画师名，不写 masterpiece 这类质量词，不写画风名（除非是明显的 monochrome、sketch、lineart 这类）。
+只输出 JSON：{"people":[],"outfit":[],"action":[],"expression":[],"camera":[],"background":[],"lighting":[],"zh":"一句话中文描述，带上镜头（比如：俯拍的半身特写……）"}`;
+    const j = pickJson(await askVision(sys, '把这张图拆成标签：镜头语言（景别、角度、裁切、构图、透视景深）和动作（姿势、朝向、手、腿、互动）一定要写细，长相不要写。', imageDataUrl, { maxTokens: 2400, fn: 'img' }));
+    const arr = v => (Array.isArray(v) ? v : String(v || '').split(',')).map(x => String(typeof x === 'object' ? x?.en || '' : x).trim()).filter(x => x && !hasChinese(x));
+    // 人数 → 镜头 → 动作 → 表情 → 衣服 → 背景光影；镜头和动作放前面权重更高；长相不写，方便套到自己的角色上
+    const order = ['people', 'camera', 'action', 'expression', 'outfit', 'background', 'lighting'];
+    let list = order.flatMap(k => arr(j[k]));
+    if (!list.length && j.tags) list = arr(j.tags);
+    const seen = new Set();
+    const tags = list.filter(t => { const k = t.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; }).join(', ');
     if (!tags) throw new Error('AI 没写出标签，换个能识图的模型试试');
-    return { positive: tags, negative: '', zh: String(j.zh || '').trim() };
+    return { positive: tags, negative: '', zh: String(j.zh || '').trim(), camera: arr(j.camera).join(', ') };
 }
+
 /** 看图只读姿势和构图（带中文） */
 async function imagePose(imageDataUrl) {
     const sys = `你看图，只写人物的姿势和画面构图，写成 NovelAI 标签。
 姿势：身体姿势（standing、sitting、leaning forward、lying on side 等）、手和手臂的动作、腿的动作、头的朝向和视线方向；多人时写互动和相对位置（hug、holding hands、back-to-back 等）；表情最多写一两个。
-构图：取景范围（full body、cowboy shot、upper body、portrait、close-up 等）、镜头角度（from above、from below、from side、from behind、dutch angle 等）、人物在画面里的位置、透视和景深。
+构图（必须写，不能空）：景别（extreme close-up、close-up、portrait、upper body、cowboy shot、full body、wide shot 选一个）、机位角度（from above、from below、from side、from behind、straight-on、dutch angle、pov）、裁切（head out of frame、cropped legs、feet out of frame、xx focus）、人物在画面里的位置（centered、off-center、rule of thirds）、透视和景深（foreshortening、fisheye、depth of field、blurry background）。
 不写长相、衣服、背景、画风、画师。看不清的不要编。
 ${PAIRS}
 只输出 JSON：{"pose": [...], "composition": [...]}`;
@@ -4206,7 +4232,9 @@ function getChar(key) {
 }
 function saveChar(c) {
     const d = getData();
+    linkSameOutfits();
     d.characters[c.key] = c;
+    try { syncOutfitsFrom(c); } catch (e) { console.warn('[智库] 同步衣服', e); }
     commit({ silent: true });
 }
 /** 角色卡描述（给 AI 读外貌用） */
@@ -4556,7 +4584,79 @@ function findOutfit(ownerKey, id) {
     const o = c?.outfits?.find(x => x.id === id);
     return o ? { o, owner: c } : null;
 }
-/** 给角色穿：衣柜里的那件挪过去；已经在别人身上的就复制一份 */
+// 同一套衣服给好几个人穿：每人身上各有一份（生图照旧按人读），用 sid 连起来，改一份其余跟着改；衣柜里只显示一张
+const outSig = o => JSON.stringify([o.name || '', (o.tags || []).map(t => [String(t.en || '').toLowerCase(), t.acc ?? null]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))]);
+/** Only migrate legacy duplicates once; preserve explicitly separate outfits afterwards. */
+function linkSameOutfits() {
+    const d = getData();
+    if (d.options.wardrobeLinkedV1) return;
+    const groups = new Map();
+    for (const c of Object.values(d.characters)) for (const o of c.outfits || []) {
+        if (!o.tags?.length) continue;
+        const key = outSig(o), list = groups.get(key) || [];
+        list.push({ c, o }); groups.set(key, list);
+    }
+    for (const list of groups.values()) {
+        if (list.length < 2 || new Set(list.map(x => x.c.key)).size !== list.length) continue;
+        const sids = new Set(list.map(x => x.o.sid).filter(Boolean));
+        if (sids.size > 1) continue;
+        const sid = sids.values().next().value || M.uid('os_');
+        for (const { o } of list) o.sid = sid;
+    }
+    d.options.wardrobeLinkedV1 = true;
+    commit({ silent: true });
+}
+/** 这套衣服的所有份：[{ o, owner }] */
+function outfitHolders(o) {
+    if (!o?.sid) return wardrobe().filter(x => x.o === o);
+    return wardrobe().filter(x => x.owner && x.o.sid === o.sid);
+}
+/** 衣柜按「同一套」分组：[{ o, owner, holders }] */
+function wardrobeGroups() {
+    linkSameOutfits();
+    const groups = new Map(), out = [];
+    for (const x of wardrobe()) {
+        const k = x.owner && x.o.sid ? 'sid:' + x.o.sid : 'one:' + (x.owner?.key || '') + ':' + x.o.id;
+        let g = groups.get(k);
+        if (!g) { g = { o: x.o, owner: x.owner, holders: [] }; groups.set(k, g); out.push(g); }
+        g.holders.push(x);
+    }
+    return out;
+}
+/** 改了某人身上的那份：同一套的其他份跟着改 */
+function syncOutfitsFrom(c) {
+    const d = getData();
+    for (const o of c.outfits || []) {
+        if (!o.sid) continue;
+        for (const other of Object.values(d.characters)) {
+            if (other === c) continue;
+            for (const x of other.outfits || []) if (x.sid === o.sid && x !== o && (x.name !== o.name || x.image !== o.image || JSON.stringify(x.tags) !== JSON.stringify(o.tags))) {
+                x.name = o.name; x.image = o.image; x.tags = structuredClone(o.tags);
+            }
+        }
+    }
+}
+/** 从某人身上拿掉：别人还穿着就只删他那份；没人穿了就放回衣柜 */
+function takeOffOutfit(ownerKey, id) {
+    const d = getData();
+    const hit = findOutfit(ownerKey, id);
+    if (!hit?.owner) return null;
+    const rest = outfitHolders(hit.o).filter(x => x.owner.key !== ownerKey);
+    const c = hit.owner;
+    c.outfits = c.outfits.filter(x => x !== hit.o);
+    if (c.outfitId === id) c.outfitId = c.outfits[0]?.id || '';
+    if (!rest.length) { const o = { ...hit.o }; delete o.sid; d.outfits ||= {}; d.outfits[o.id] = o; }
+    commit({ silent: true });
+    return rest[0] || { o: d.outfits[id], owner: null };
+}
+/** 删掉整套：所有人身上的都删 */
+function deleteOutfitGroup(ownerKey, id) {
+    const hit = findOutfit(ownerKey, id);
+    if (!hit) return;
+    const all = hit.owner ? outfitHolders(hit.o) : [hit];
+    for (const x of all) deleteOutfit(x.owner?.key || '', x.o.id);
+}
+/** 给角色穿：衣柜里的那件挪过去；已经在别人身上的，给他也挂一份（和原来那份连在一起） */
 function giveOutfit(ownerKey, id, toKey, { wear = true } = {}) {
     const d = getData();
     const hit = findOutfit(ownerKey, id);
@@ -4564,7 +4664,13 @@ function giveOutfit(ownerKey, id, toKey, { wear = true } = {}) {
     if (!hit || !to) return null;
     let o = hit.o;
     if (!hit.owner) delete d.outfits[id];
-    else if (hit.owner.key !== to.key) o = { ...structuredClone(o), id: M.uid('o_') };
+    else if (hit.owner.key !== to.key) {
+        hit.o.sid ||= hit.o.id;
+        const same = to.outfits.find(x => x.sid === hit.o.sid);
+        if (same) { if (wear) { to.outfitId = same.id; to.outfitMode = 'fixed'; } saveChar(to); saveChar(hit.owner); return same; }
+        o = { ...structuredClone(o), id: M.uid('o_'), sid: hit.o.sid };
+        saveChar(hit.owner);
+    }
     else { if (wear) { to.outfitId = o.id; to.outfitMode = 'fixed'; } saveChar(to); return o; }
     to.outfits.push(o);
     if (wear) { to.outfitId = o.id; to.outfitMode = 'fixed'; }
@@ -4608,7 +4714,7 @@ function studioCastRefs(picks) {
     return [...new Set((picks || []).map(p => p.char.charRef).filter(id => id && d.charRefGroups?.[id]))];
 }
 
-return { studioCastPrompt, studioCastRefs, namesOf, castIn, markerPrompt, avatarUrl, stCards, stPersonas, currentPersonaKey, getChar, saveChar, descOf, descOfFull, sideKicks, addSideKick, deleteChar, chatId, currentCast, removeFromCast, setCastOn, tagText, currentOutfit, fixedTags, canSplit, buildChatPrompt, previewCast, generateForMessage, insertImage, parsePairs, freeChars, saveCharacterPost, outfitFromPost, characterPayload, importZhihuijiCharacters, copyLook, wardrobe, findOutfit, giveOutfit, deleteOutfit };
+return { studioCastPrompt, wardrobeGroups, outfitHolders, takeOffOutfit, deleteOutfitGroup, studioCastRefs, namesOf, castIn, markerPrompt, avatarUrl, stCards, stPersonas, currentPersonaKey, getChar, saveChar, descOf, descOfFull, sideKicks, addSideKick, deleteChar, chatId, currentCast, removeFromCast, setCastOn, tagText, currentOutfit, fixedTags, canSplit, buildChatPrompt, previewCast, generateForMessage, insertImage, parsePairs, freeChars, saveCharacterPost, outfitFromPost, characterPayload, importZhihuijiCharacters, copyLook, wardrobe, findOutfit, giveOutfit, deleteOutfit };
 })();
 
 // ───── ui.js ─────
@@ -6582,10 +6688,10 @@ function openOmImport() {
 }
 
 function viewWardrobe(d) {
-    const all = C.wardrobe();
-    const owners = [...new Map(all.filter(x => x.owner).map(x => [x.owner.key, x.owner])).values()];
+    const all = C.wardrobeGroups();
+    const owners = [...new Map(all.flatMap(g => g.holders).filter(x => x.owner).map(x => [x.owner.key, x.owner])).values()];
     const q = ui.wardSearch.trim().toLowerCase();
-    const list = all.filter(x => (ui.wardFilter === 'all' || (ui.wardFilter === 'none' ? !x.owner : x.owner?.key === ui.wardFilter))
+    const list = all.filter(x => (ui.wardFilter === 'all' || (ui.wardFilter === 'none' ? !x.owner : x.holders.some(h => h.owner?.key === ui.wardFilter)))
         && (!q || (x.o.name + ' ' + C.tagText(x.o.tags) + ' ' + x.o.tags.map(t => t.zh).join(' ')).toLowerCase().includes(q)));
     return `${castTop()}
     <div class="pc-outmake">
@@ -6596,9 +6702,9 @@ function viewWardrobe(d) {
     </div>
     <label class="pc-search pc-mt-s"><span class="pc-sr">搜索</span>${ICON.search}<input data-bind="wardSearch" value="${esc(ui.wardSearch)}" placeholder="搜衣服名、标签"></label>
     <div class="pc-chips">${[['all', '全部'], ...owners.map(c => [c.key, c.name]), ['none', '没给谁穿']].map(([k, t]) => `<button class="pc-pill ${ui.wardFilter === k ? 'on' : 'dashed'}" data-act="wardfilter" data-v="${esc(k)}">${esc(t)}</button>`).join('')}</div>
-    <div class="pc-grid2 pc-mt-s">${list.map(({ o, owner }) => `<article class="pc-ticket" data-act="openoutfit" data-owner="${esc(owner?.key || '')}" data-id="${esc(o.id)}">
+    <div class="pc-grid2 pc-mt-s">${list.map(({ o, owner, holders }) => `<article class="pc-ticket" data-act="openoutfit" data-owner="${esc(owner?.key || '')}" data-id="${esc(o.id)}">
         <div class="pc-ticket-img">${o.image ? `<img src="${esc(o.image.startsWith('data:') ? o.image : '/' + o.image.replace(/^\/+/, ''))}" loading="lazy" alt="">` : '<span>还没有图</span>'}</div>
-        <div class="pc-ticket-text"><b>${esc(o.name)}</b><small>${o.tags.length} 个标签</small><span class="pc-state ${owner ? '' : 'todo'}">${owner ? '穿在：' + esc(owner.name) : '还没给谁穿'}</span></div></article>`).join('')
+        <div class="pc-ticket-text"><b>${esc(o.name)}</b><small>${o.tags.length} 个标签</small><span class="pc-state ${owner ? '' : 'todo'}">${owner ? '穿在：' + esc(holders.map(h => h.owner.name).join('、')) : '还没给谁穿'}</span></div></article>`).join('')
         || empty('衣柜是空的', '点上面「图片」放一张图，AI 会把衣服写成标签；也可以让 AI 设计，或者自己写。')}</div>
     <div style="height:24px"></div>`;
 }
@@ -6614,25 +6720,31 @@ function viewOutfit(d) {
     const img = o.image ? (o.image.startsWith('data:') ? o.image : '/' + o.image.replace(/^\/+/, '')) : '';
     const cast = C.currentCast().filter(x => x.char.kind !== 'user' || true).map(x => x.char);
     const people = [...new Map([...cast, ...Object.values(d.characters)].map(c => [c.key, c])).values()];
+    const holders = !u.draft && owner ? C.outfitHolders(o).map(x => x.owner) : [];
     return `
     <div class="pc-dhead"><button class="pc-round" data-act="outback" aria-label="返回">‹</button>
       <input class="pc-dtitle" data-outname value="${esc(o.name)}" placeholder="给这套衣服起个名字"></div>
     <div class="pc-outhero">${img ? `<img src="${esc(img)}" alt="" data-act="viewimg" data-src="${esc(img)}">` : '<span>还没有图</span>'}
       ${u.busy === 'read' ? '<em class="pc-outhero-busy"><span class="pc-busy">AI 正在看图</span></em>' : ''}
       <label class="pc-outhero-btn">换一张<input type="file" accept="image/*" data-outimg hidden></label></div>
+    ${u.draft ? `<div class="pc-outsteps">
+      <span class="${img || o.tags.length ? 'done' : ''}"><b>第一步</b>点图片右下「换一张」放一张衣服的图，AI 会写成标签；没图就直接在下面打字加</span>
+      <span class="${o.tags.length ? 'done' : ''}"><b>第二步</b>看看下面的标签：点一下改、× 删掉、↓↑ 在整体和配饰之间挪</span>
+      <span class="${u.dest ? 'done' : ''}"><b>第三步</b>选「存到哪里」：只进衣柜，或者直接给某个人穿，再点「保存」</span></div>` : ''}
     <section class="pc-card pc-pad pc-mt">
       <div class="pc-row-between"><b>${o.tags.length ? `${o.tags.length} 件` : '还没有标签'}</b>${o.tags.length ? `<button class="pc-pill dashed tiny" data-act="copytext" data-text="${esc(C.tagText(o.tags))}">复制整套</button>` : ''}</div>
       ${outfitSections(o.tags, 'ward', { busy: u.busy === 'add', busyKey: u.addKey })}
     </section>
     <section class="pc-card pc-pad pc-mt">
-      <b>${owner ? `穿在：${esc(owner.name)}` : u.draft ? '存到哪里' : '给谁穿'}</b>
+      <b>${u.draft ? '存到哪里' : holders.length ? '谁在穿' : '给谁穿'}</b>
+      ${holders.length ? `<div class="pc-chips wrap">${holders.map(h => `<button class="pc-pill on" data-act="outtakeoff" data-v="${esc(h.key)}" title="从${esc(h.name)}身上拿掉">${esc(h.name)} ×</button>`).join('')}</div><div class="pc-dim small">点名字 × 从他身上拿掉（衣柜里还在）。下面点名字再给别人穿，几个人穿的是同一套，改了一起变。</div>${label('再给谁穿')}` : ''}
       <div class="pc-chips wrap">${u.draft ? `<button class="pc-pill ${!u.dest ? 'on' : 'dashed'}" data-act="outdest" data-v="">只存进衣柜</button>` : ''}
-        ${people.filter(c => c.key !== owner?.key).map(c => `<button class="pc-pill ${u.dest === c.key ? 'on' : 'dashed'}" data-act="${u.draft ? 'outdest' : 'outgive'}" data-v="${esc(c.key)}">${u.draft ? '给' : ''}${esc(c.name)}${u.draft ? '穿' : ''}</button>`).join('') || '<span class="pc-dim small">「角色」里还没有角色</span>'}</div>
-      ${!u.draft ? '<div class="pc-dim small">点名字：复制一份给他，并设为他固定穿的衣服。</div>' : ''}
+        ${people.filter(c => c.key !== owner?.key && !holders.some(h => h.key === c.key)).map(c => `<button class="pc-pill ${u.dest === c.key ? 'on' : 'dashed'}" data-act="${u.draft ? 'outdest' : 'outgive'}" data-v="${esc(c.key)}">${u.draft ? '给' : ''}${esc(c.name)}${u.draft ? '穿' : ''}</button>`).join('') || '<span class="pc-dim small">「角色」里还没有角色</span>'}</div>
+      ${!u.draft && !holders.length ? '<div class="pc-dim small">点名字：给他穿，并设为他固定穿的衣服。</div>' : ''}
     </section>
-    ${u.draft ? `<button class="pc-btn dark big pc-mt" data-act="outsave" ${o.tags.length ? '' : 'disabled'}>${seal()}保存</button>` : ''}
+    ${u.draft ? `<button class="pc-btn dark big pc-mt" data-act="outsave" ${o.tags.length ? '' : 'disabled'}>${seal()}保存</button>${o.tags.length ? '' : '<div class="pc-dim small pc-center" style="margin-top:6px">至少要有一件衣服才能保存</div>'}` : ''}
     <button class="pc-btn pc-mt-s wide" data-act="outimggen" ${u.busy ? 'disabled' : ''}>${u.busy === 'gen' ? '<span class="pc-busy">生成中</span>' : u.draft ? '先生成一张看看' : '生成展示图'}</button>
-    ${!u.draft ? `<div class="pc-center pc-mt"><button class="pc-pill dashed tiny" data-act="outshare">分享</button> <button class="pc-linkdanger" style="margin:0 0 0 12px" data-act="outdel">删掉这套</button></div>` : ''}
+    ${!u.draft ? `<div class="pc-center pc-mt"><button class="pc-pill dashed tiny" data-act="outshare">分享</button> <button class="pc-linkdanger" style="margin:0 0 0 12px" data-act="outdel">${holders.length > 1 ? '删掉这套（所有人身上的都删）' : '删掉这套'}</button></div>` : ''}
     <div style="height:24px"></div>`;
 }
 
@@ -6771,8 +6883,9 @@ function viewCharEdit(d) {
         ${c.kind !== 'user' ? `<button class="pc-btn" data-act="storyout" ${busy ? 'disabled' : ''}>${busy === 'storyout' ? '<span class="pc-busy">读剧情中</span>' : '从剧情里读现在穿的'}</button>` : ''}
       </div>
       ${out ? `<div class="pc-outbox">
-        <div class="pc-row-between"><b>${esc(out.name)}</b><span class="pc-chips" style="margin:0">${out.tags.length ? `<button class="pc-pill dashed tiny" data-act="copytext" data-text="${esc(C.tagText(out.tags))}">复制整套</button>` : ''}<button class="pc-pill dashed tiny" data-act="renameout">改名</button><button class="pc-pill dashed tiny" data-act="shareout">分享</button><button class="pc-pill dashed tiny danger" data-act="delout">删掉</button></span></div>
-        ${outfitSections(out.tags, 'out', { busy: !!busy, busyKey: busy, disabled: busy ? 'disabled' : '' })}
+        <div class="pc-row-between" style="flex-wrap:wrap;gap:6px"><b>${esc(out.name)}</b><span class="pc-chips wrap" style="margin:0">${out.tags.length ? `<button class="pc-pill dashed tiny" data-act="copytext" data-text="${esc(C.tagText(out.tags))}">复制整套</button>` : ''}<button class="pc-pill dashed tiny" data-act="renameout">改名</button><button class="pc-pill dashed tiny" data-act="shareout">分享</button><button class="pc-pill dashed tiny danger" data-act="delout">删掉</button></span></div>
+        ${ui.outEditOpen || !out.tags.length ? `${outfitSections(out.tags, 'out', { busy: !!busy, busyKey: busy, disabled: busy ? 'disabled' : '' })}${out.tags.length ? '<button class="pc-pill dashed tiny pc-mt-s" data-act="outedittoggle">收起标签</button>' : ''}`
+          : `<button class="pc-outfold" data-act="outedittoggle"><span class="pc-dim small">${out.tags.length} 件：</span><span class="mono small">${esc(C.tagText(out.tags.slice(0, 8)))}${out.tags.length > 8 ? ' …' : ''}</span><em>展开编辑 ›</em></button>`}
         <button class="pc-btn pc-mt-s" data-act="outtest" ${busy ? 'disabled' : ''}>${busy === 'outtest' ? '<span class="pc-busy">生成中</span>' : '穿这套生成一张看看'}</button>
         ${ui.outTestImg ? `<img class="pc-outimg" src="${esc(ui.outTestImg)}" alt="" data-act="viewimg" data-src="${esc(ui.outTestImg)}">` : ''}
       </div>` : ''}
@@ -6883,10 +6996,20 @@ async function charAction(act, el) {
             return true;
         }
         case 'outshare': { const h = C.findOutfit(ui.outfit.owner, ui.outfit.id); if (h) await shareCharacterPost('outfit', h.owner || { name: '' }, h.o); return true; }
+        case 'outtakeoff': {
+            const key = el.dataset.v, hit = C.findOutfit(ui.outfit.owner, ui.outfit.id);
+            const mine = hit && C.outfitHolders(hit.o).find(x => x.owner.key === key);
+            if (!mine) return true;
+            const next = C.takeOffOutfit(key, mine.o.id);
+            toastr.info(`已从${C.getChar(key)?.name || ''}身上拿掉`, '衣柜', { timeOut: 1800 });
+            if (ui.outfit.owner === key && next) ui.outfit = { owner: next.owner?.key || '', id: next.o.id };
+            render(); return true;
+        }
         case 'outdel': {
             const o = curOutfit();
-            if (!o || !(await confirmBox(`删掉「${o.name}」？`))) return true;
-            C.deleteOutfit(ui.outfit.owner, ui.outfit.id);
+            const n = ui.outfit.owner && o ? C.outfitHolders(o).length : 1;
+            if (!o || !(await confirmBox(n > 1 ? `删掉「${o.name}」？${n} 个人身上的都会删掉。只想从某个人身上拿掉，点他名字旁边的 ×。` : `删掉「${o.name}」？`))) return true;
+            C.deleteOutfitGroup(ui.outfit.owner, ui.outfit.id);
             ui.view = 'cast'; ui.castTop = 'wardrobe'; ui.outfit = null; render();
             return true;
         }
@@ -6924,14 +7047,18 @@ async function charAction(act, el) {
             const cardAvatar = c.kind === 'side' ? c.card : c.avatar;
             const main = C.getChar('char:' + cardAvatar);
             if (!cardAvatar || !main) return true;
+            if (ui.charBusy) return true;
             const fromChat = act === 'readchatcast';
+            const startContext = SillyTavern.getContext(), startChat = startContext.chat, startChatId = C.chatId();
+            const startKey = ui.charKey, startMain = d.characters[main.key];
+            const stillCurrent = () => getData() === d && ui.charKey === startKey && d.characters[main.key] === startMain && C.chatId() === startChatId && SillyTavern.getContext().chat === startChat;
             ui.charBusy = fromChat ? 'chatcast' : 'cast'; render();
             try {
                 let people;
                 if (fromChat) {
                     const ctx = SillyTavern.getContext();
                     const msgs = (ctx.chat || []).filter(m => !m.is_system && m.mes).slice(-40);
-                    const text = msgs.map(m => (m.is_user ? '【' + (m.name || '用户') + '】' : '【' + (m.name || main.name) + '】') + String(m.mes).replace(/<[^>]+>/g, ' ').replace(/\n{3,}/g, '\n\n')).join('\n\n');
+                    const text = msgs.map(m => { const body = imageStoryText(m.mes); return body ? '【' + (m.name || (m.is_user ? '用户' : main.name)) + '】' + body : ''; }).filter(Boolean).join('\n\n');
                     if (!text.trim()) { toastr.warning('这个聊天还没有正文', '角色'); return true; }
                     people = await T.extractCastFromChat(main.name, text);
                     if (!people.length) { toastr.warning('AI 没在最近的正文里找到写了外貌的人', '角色'); return true; }
@@ -6941,8 +7068,10 @@ async function charAction(act, el) {
                 people = await T.extractCast(main.name, desc);
                 }
                 if (!people.length) { toastr.warning('AI 没在设定里找到写了外貌的人', '角色'); return true; }
+                if (!stillCurrent()) return true;
                 const made = [], filled = [], kept = [];
                 for (const p of people) {
+                    if (fromChat && p.name === startContext.name1) continue;
                     const all = [main, ...C.sideKicks(cardAvatar)];
                     let ch = all.find(x => x.name === p.name || C.namesOf(x).some(n => n === p.name || p.aliases.includes(n)));
                     if (!ch) { ch = C.addSideKick(cardAvatar, p.name); made.push(p.name); }
@@ -7085,7 +7214,8 @@ async function charAction(act, el) {
         case 'renameout': { const o = C.currentOutfit(c); const n = o && await promptText('新名字', o.name); if (n) { o.name = n.slice(0, 20); save(); } return true; }
         case 'delout': {
             const o = C.currentOutfit(c);
-            if (!o || !(await confirmBox(`删掉「${o.name}」这套衣服？`))) return true;
+            const others = o ? C.outfitHolders(o).filter(x => x.owner.key !== c.key) : [];
+            if (!o || !(await confirmBox(others.length ? `把「${o.name}」从${c.name}身上拿掉？${others.map(x => x.owner.name).join('、')}还穿着这套，不受影响。` : `删掉「${o.name}」这套衣服？`))) return true;
             c.outfits = c.outfits.filter(x => x !== o); c.outfitId = c.outfits[0]?.id || ''; save();
             return true;
         }
@@ -7353,6 +7483,60 @@ async function queueVibeThumbs(groups) {
 // ═════════════════════ 大堂 ═════════════════════
 
 const AUD = ['BL', 'BG', 'GB', 'GL'];
+/** 共享用的标签：只能从这里选 */
+const LOBBY_TAGS = [
+    ['性向', ['男性向', '女性向', '全性向'], true],
+    ['题材', ['BL', 'BG', 'GB', 'GL'], false],
+    ['画风', ['厚涂', '半厚涂', '平涂', '赛璐璐', '水彩', '写实', '2.5D', '古风', '日系', '韩系', '欧美', '像素', 'Q版', '线稿', '暗黑', '清新', '柔和', '华丽'], false],
+];
+const ORIENT = LOBBY_TAGS[0][1];
+const LOBBY_TAG_SET = new Set(LOBBY_TAGS.flatMap(g => g[1]));
+function lobbyTagPicker(sel = []) {
+    const on = new Set(sel);
+    return LOBBY_TAGS.map(([title, list, single]) => `<div class="pc-field"><span>${title}${single ? '（必选一个）' : '（可多选）'}</span><div class="pc-chips wrap" data-tagset="${title}" ${single ? 'data-single' : ''}>${list.map(t => `<button type="button" class="pc-pill ${on.has(t) ? 'on' : 'dashed'}" data-tagpick="${esc(t)}">${esc(t)}</button>`).join('')}</div></div>`).join('');
+}
+function wireTagPicker(root) {
+    root.addEventListener('click', ev => {
+        const b = ev.target.closest('[data-tagpick]');
+        if (!b) return;
+        const set = b.closest('[data-tagset]');
+        if (set?.hasAttribute('data-single')) set.querySelectorAll('[data-tagpick]').forEach(x => { if (x !== b) { x.classList.remove('on'); x.classList.add('dashed'); } });
+        const now = !b.classList.contains('on');
+        b.classList.toggle('on', now); b.classList.toggle('dashed', !now);
+    });
+}
+const pickedTags = root => [...root.querySelectorAll('[data-tagpick].on')].map(b => b.dataset.tagpick);
+/** 选标签的小窗：返回标签数组，取消返回 null */
+function chooseLobbyTags(sel = []) {
+    return new Promise(resolve => {
+        const box = modal(`<h3 class="pc-h3">选标签</h3>${lobbyTagPicker(sel)}<p class="pc-dim small" data-tagerr></p>
+          <div class="pc-actions"><button class="pc-btn" type="button" data-x="no">取消</button><button class="pc-btn dark" type="button" data-x="ok">好了</button></div>`);
+        wireTagPicker(box);
+        box.addEventListener('click', ev => {
+            const x = ev.target.closest('[data-x]')?.dataset.x;
+            if (x === 'no') { box.closeModal(); resolve(null); }
+            if (x === 'ok') {
+                const tags = pickedTags(box);
+                if (!tags.some(t => ORIENT.includes(t))) { box.querySelector('[data-tagerr]').textContent = '先选一个性向：男性向、女性向或全性向'; return; }
+                box.closeModal(); resolve(tags);
+            }
+        });
+    });
+}
+/**
+ * 共享只要画师串：留下 artist: 画师、带权重的画风词、质量和年份词；
+ * 人物、动作、衣服、场景这些标签去掉（权重组里的逗号不拆开）
+ */
+const KEEP_STYLE = /^(?:masterpiece|best quality|amazing quality|high quality|good quality|very aesthetic|aesthetic|absurdres|highres|ultra[- ]detailed|detailed|newest|recent|year \d{4}|\d{4}s|no text|official art|illustration|painting|sketch|lineart|flat color|watercolor.*|water color.*|oil painting.*|realistic|photorealistic|semi-realistic|anime coloring|cel shading|chiaroscuro|.*lighting|.*rendering|depth of field|bokeh|.*shading|.*texture[s]?|.*style)$/i;
+function artistOnly(text) {
+    // Expand weighted groups before filtering so weighted people/scenery cannot slip through.
+    return M.tokenize(String(text || '').replace(/\n/g, ', ')).flatMap(t => {
+        const inner = M.tokenize(t.text);
+        return inner.map(x => ({ ...x, weight: t.weight * x.weight }));
+    }).filter(t => t.isArtist || KEEP_STYLE.test(t.text.replace(/_/g, ' ').trim()))
+      .map(t => Math.abs(t.weight - 1) < 0.001 ? t.text : M.fmtWeight(t.weight) + '::' + t.text + '::').join(', ');
+}
+const lobbyBlock = () => { const o = getData().options; o.lobbyBlock ||= { users: [], posts: [] }; o.lobbyBlock.users ||= []; o.lobbyBlock.posts ||= []; return o.lobbyBlock; };
 const KIND_NAME = { artist: '单个画师', group: '画师组', character: '角色', outfit: '服装' };
 function viewLobby(d) {
     const lb = ui.lobby;
@@ -7361,8 +7545,9 @@ function viewLobby(d) {
       <button class="pc-btn dark" data-act="nav" data-view="settings">去设置</button></section>`;
     const blocked = new Set(d.blockedTags || []);
     const view = d.options.lobbyView || 'grid';
-    const items = lb.items.filter(p => (p.mine || !p.tags.some(t => blocked.has(t))) && (!lb.tag2 || p.tags.includes(lb.tag2)));
-    const tags = lb.tags.map(t => t.tag).filter(t => t !== 'NSFW' && !AUD.includes(t));
+    const blk = lobbyBlock();
+    const items = lb.items.filter(p => (p.mine || (!p.tags.some(t => blocked.has(t)) && !blk.users.includes(p.nickname) && !blk.posts.includes(p.id))) && (!lb.tag2 || p.tags.includes(lb.tag2)));
+    const tags = lb.tags.map(t => t.tag).filter(t => t !== 'NSFW' && !AUD.includes(t) && !ORIENT.includes(t));
     for (const t of blocked) if (!tags.includes(t)) tags.push(t);
     return `
     <div class="pc-row-between pc-mt-s"><h2 class="pc-h2" style="margin:0">共享</h2><button class="pc-btn dark" data-act="lobbyupload" aria-label="上传画师串">＋ 上传</button></div>
@@ -7375,7 +7560,7 @@ function viewLobby(d) {
       <button class="pc-pill ${lb.mine ? 'on' : 'dashed'}" data-act="lobbymine">我分享的</button>
     </div>
     <div class="pc-chips">
-      ${AUD.map(t => `<button class="pc-pill ${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="${t}">${t}</button>`).join('')}
+      ${[...ORIENT, ...AUD].map(t => `<button class="pc-pill ${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="${t}">${t}</button>`).join('')}
       <button class="pc-pill nsfw ${d.options.lobbyShowNsfw ? 'on' : 'dashed'}" data-act="nsfwtoggle" title="只管共享里别人的图，你自己的例图一直显示">NSFW ${d.options.lobbyShowNsfw ? '开' : '关'}</button>
     </div>
     ${tags.length ? `<div class="pc-chips">${tags.slice(0, 24).map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag2 === t ? 'on' : 'dashed'}" data-act="lobbytag2" data-tag="${esc(t)}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${esc(t)}</button>`).join('')}</div>
@@ -7409,13 +7594,13 @@ function openLobbySheet(p) {
     back.innerHTML = `<section class="pc-sheet" role="dialog">
       <div class="pc-sheet-grip" aria-hidden="true"></div>
       <div class="pc-row-between"><h3 class="pc-h3" style="margin:0">${esc(p.name)}</h3><span class="pc-dim small">${esc(p.nickname)} · ${KIND_NAME[p.kind] || p.kind}</span></div>
-      ${p.content?.artistString ? `<div class="pc-dim small mono" style="word-break:break-all">${markStr(getData(), p.content.artistString)}</div>${banWarn(getData(), p.content.artistString)}` : ''}
-      ${p.content?.negative ? `<div class="pc-dim small mono" style="word-break:break-all;margin-top:6px">负面：${esc(p.content.negative)}</div>` : ''}
-      <div class="pc-hscroll pc-mt-s">${p.images.map(i => `<img class="pc-sheet-img" src="${esc(L.lobbyImgUrl(i.url))}" alt="" data-act="viewimg" data-src="${esc(L.lobbyImgUrl(i.url))}">`).join('')}</div>
+      ${p.images.length ? `<div class="pc-hscroll pc-mt-s">${p.images.map(i => `<img class="pc-sheet-img" src="${esc(L.lobbyImgUrl(i.url))}" alt="" data-act="viewimg" data-src="${esc(L.lobbyImgUrl(i.url))}">`).join('')}</div>` : ''}
+      ${p.content?.artistString ? `<div class="pc-label">画师串</div><div class="pc-dim small mono" style="word-break:break-all;max-height:7.5em;overflow:auto;scrollbar-width:none">${markStr(getData(), p.content.artistString)}</div>${banWarn(getData(), p.content.artistString)}` : ''}
+      ${p.content?.negative ? `<details class="pc-details pc-mt-s"><summary class="pc-dim small">负面（${p.content.negative.length} 字，点开看）</summary><div class="pc-dim small mono" style="word-break:break-all">${esc(p.content.negative)}</div></details>` : ''}
       ${p.note ? `<p class="pc-quote small">${esc(p.note)}</p>` : ''}
       <div class="pc-chips wrap">${p.tags.map(t => `<span class="pc-tagchip ${t === 'NSFW' ? 'nsfw' : ''}">${esc(t)}</span>`).join('')}</div>
       <div class="pc-actions wrap">
-        ${p.mine ? `<button class="pc-btn danger" data-act="lobbydel" data-id="${p.id}">删除</button>` : `<button class="pc-btn" data-act="lobbyreport" data-id="${p.id}">举报</button>`}
+        ${p.mine ? `<button class="pc-btn danger" data-act="lobbydel" data-id="${p.id}">删除</button>` : `<button class="pc-btn" data-act="lobbyreport" data-id="${p.id}">举报</button><button class="pc-btn" data-act="lobbyblockpost" data-id="${p.id}">屏蔽这条</button><button class="pc-btn" data-act="lobbyblockuser" data-nick="${esc(p.nickname)}">屏蔽作者</button>`}
         <button class="pc-btn" data-act="lobbylike" data-id="${p.id}">♡ ${p.likes}</button>
         <button class="pc-btn dark" data-act="lobbycopy" data-id="${p.id}">${p.copied ? '已保存' : '保存到我的' + (p.kind === 'character' || p.kind === 'outfit' ? '角色' : '智库')}</button>
       </div></section>`;
@@ -7595,7 +7780,10 @@ function viewSettings(d) {
       <label class="pc-field"><span>邀请码（服务器要求时才填）</span><input data-lobby="invite" value="${esc(d.lobby.invite)}"></label>
       <div class="pc-actions wrap"><button class="pc-btn" data-act="lobbytest">测试连接</button></div>
       ${label('屏蔽的标签')}
-      <div class="pc-chips wrap">${(d.blockedTags || []).map(t => `<button class="pc-pill blocked" data-act="unblock" data-tag="${esc(t)}">⊘ ${esc(t)}</button>`).join('') || '<span class="pc-dim small">没有。在共享页长按标签就能屏蔽。</span>'}${(d.blockedTags || []).length ? '<button class="pc-pill dashed" data-act="unblockall">全部取消</button>' : ''}</div>`);
+      <div class="pc-chips wrap">${(d.blockedTags || []).map(t => `<button class="pc-pill blocked" data-act="unblock" data-tag="${esc(t)}">⊘ ${esc(t)}</button>`).join('') || '<span class="pc-dim small">没有。在共享页长按标签就能屏蔽。</span>'}${(d.blockedTags || []).length ? '<button class="pc-pill dashed" data-act="unblockall">全部取消</button>' : ''}</div>
+      ${label('屏蔽的作者')}
+      <div class="pc-chips wrap">${lobbyBlock().users.map(n => `<button class="pc-pill blocked" data-act="unblockuser" data-nick="${esc(n)}">⊘ ${esc(n)}</button>`).join('') || '<span class="pc-dim small">没有。在共享里点开一条，点「屏蔽作者」。</span>'}</div>
+      ${lobbyBlock().posts.length ? `<div class="pc-actions wrap"><span class="pc-dim small">屏蔽了 ${lobbyBlock().posts.length} 条分享</span><button class="pc-pill dashed" data-act="unblockposts">全部恢复</button></div>` : ''}`);
 
     const bl = Object.entries(d.blacklist || {});
     const ban = setFold('ban', '画师黑名单', bl.length ? `${bl.length} 位` : '没有', `
@@ -8332,6 +8520,11 @@ async function onClick(ev, outside = false) {
                 commit();
                 break;
             }
+            case 'outedittoggle': ui.outEditOpen = !ui.outEditOpen; render(); break;
+            case 'lobbyblockpost': { const b = lobbyBlock(); if (!b.posts.includes(el.dataset.id)) b.posts.push(el.dataset.id); commit(); toastr.info('这条不再显示，可以在 设置 → 共享 里恢复', '共享', { timeOut: 2500 }); break; }
+            case 'lobbyblockuser': { const n = el.dataset.nick; if (!n) break; if (!(await confirmBox(`屏蔽「${n}」？他分享的都不再显示（只在你这里，对方不会知道）。`))) break; const b = lobbyBlock(); if (!b.users.includes(n)) b.users.push(n); commit(); toastr.info(`已屏蔽「${n}」`, '共享', { timeOut: 2500 }); break; }
+            case 'unblockuser': { const b = lobbyBlock(); b.users = b.users.filter(x => x !== el.dataset.nick); commit(); break; }
+            case 'unblockposts': { lobbyBlock().posts = []; commit(); break; }
             case 'lobbyaud': ui.lobby.tag = ui.lobby.tag === el.dataset.tag ? '' : el.dataset.tag; loadLobby(); break;
             case 'lobbykind': ui.lobby.kind = el.dataset.kind; ui.lobby.mine = false; loadLobby(); break;
             case 'lobbytag2': { const t = el.dataset.tag; if ((d.blockedTags || []).includes(t)) { toggleBlockTag(t); break; } ui.lobby.tag2 = ui.lobby.tag2 === t ? '' : t; render(); break; }
@@ -8977,7 +9170,7 @@ function showImg2Prompt(r, from) {
     const st = ui.studio;
     const hasArtist = M.parseArtistString(r.positive).members.length > 0;
     const box = modal(`<h3 class="pc-h3">看图写出的提示词</h3>
-      <div class="pc-dim small">${from === 'meta' ? '这是 NovelAI 原图，直接读出了当时发的提示词' : '识图 AI 看图写的（不含画师和质量词），可以先改一改'}${r.zh ? '：' + esc(r.zh) : ''}</div>
+      <div class="pc-dim small">${from === 'meta' ? '这是 NovelAI 原图，直接读出了当时发的提示词' : '识图 AI 看图写的（不含画师和质量词），可以先改一改'}${r.zh ? '：' + esc(r.zh) : ''}</div>${r.camera ? `<div class="pc-dim small mono" style="margin-top:4px">镜头：${esc(r.camera)}</div>` : ''}
       <label class="pc-field pc-mt-s"><span>正面</span><textarea class="pc-textarea mono" data-i2p-pos>${esc(r.positive)}</textarea></label>
       ${r.negative ? `<label class="pc-field pc-mt-s"><span>负面</span><textarea class="pc-textarea small mono" data-i2p-neg>${esc(r.negative)}</textarea></label>
       <label class="pc-switch"><input type="checkbox" data-i2p-useneg checked><span></span>负面也换成这个</label>` : ''}
@@ -9145,9 +9338,9 @@ function openSharedUpload(pre = {}) {
       <div data-share-previews style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0"></div>
       <button class="pc-pill dashed" type="button" data-share-clear hidden>清空例图</button>
       <p class="pc-dim small" data-share-meta role="status" aria-live="polite"></p>
-      <label class="pc-field"><span>画师串（正面）</span><textarea class="pc-textarea mono" name="artistString" maxlength="20000" required placeholder="artist:aaa, 0.8::artist:bbb::">${esc(pre.artistString || '')}</textarea></label>
+      <label class="pc-field"><span>画师串（正面）</span><textarea class="pc-textarea mono" name="artistString" maxlength="20000" required placeholder="artist:aaa, 0.8::artist:bbb::">${esc(artistOnly(pre.artistString || ''))}</textarea><small class="pc-dim" style="display:block;margin-top:4px">只分享画师串和画风、质量词；人物、动作、衣服、场景这些标签会自动去掉。</small></label>
       <label class="pc-field"><span>负面（可选）</span><textarea class="pc-textarea mono" name="negative" maxlength="20000" placeholder="lowres, bad anatomy …">${esc(pre.negative || '')}</textarea></label>
-      <label class="pc-field"><span>标签（可选，逗号隔开）</span><input class="pc-input" name="tags" maxlength="800" placeholder="BL, 厚涂, 柔和"></label>
+      ${lobbyTagPicker(pre.tags || [])}
       <label class="pc-field"><span>说明（可选）</span><textarea class="pc-textarea" name="note" maxlength="5000" placeholder="适合的画面、使用建议或来源"></textarea></label>
       <label class="pc-switch"><input type="checkbox" name="nsfw"><span></span>含 NSFW 内容</label>
       ${(() => { const o = dlOpts(); return `<label class="pc-switch"><input type="checkbox" name="mark" ${o.on ? 'checked' : ''} ${o.text ? '' : 'disabled'}><span></span>例图打上我的水印<small>${o.text ? '「' + esc(o.text) + '」，位置和大小在 设置 →「下载和水印」' : '先到 设置 →「下载和水印」填水印文字'}</small></label>`; })()}
@@ -9161,6 +9354,7 @@ function openSharedUpload(pre = {}) {
     style.textContent = '.pc-modal:has([data-share-form])::-webkit-scrollbar,.pc-modal [data-share-form] *::-webkit-scrollbar{display:none}.pc-modal [data-share-form] *{scrollbar-width:none}.pc-modal [data-share-form] input[type=file]{max-width:100%;font-size:13px}.pc-modal [data-share-form] textarea{min-height:72px}';
     box.appendChild(style);
     const form = box.querySelector('form');
+    wireTagPicker(box);
     const status = box.querySelector('[data-share-status]');
     const files = form.elements.namedItem('images');
     const clear = box.querySelector('[data-share-clear]');
@@ -9178,9 +9372,9 @@ function openSharedUpload(pre = {}) {
         metaBox.replaceChildren();
         if (!meta?.positive) { if (files.files.length) metaBox.textContent = '例图里没读到提示词（不是 NovelAI 原图，或者被压缩、截图过）。'; return; }
         const pos = form.elements.namedItem('artistString'), neg = form.elements.namedItem('negative');
-        const apply = () => { pos.value = meta.positive; neg.value = meta.negative || ''; metaBox.textContent = `已从例图读出正面${meta.negative ? '和负面' : ''}，可以再改。`; };
+        const apply = () => { pos.value = artistOnly(meta.positive); neg.value = meta.negative || ''; metaBox.textContent = `已从例图读出正面${meta.negative ? '和负面' : ''}，可以再改。`; };
         if (!pos.value.trim() && !neg.value.trim()) { apply(); return; }
-        if (pos.value.trim() === meta.positive && neg.value.trim() === (meta.negative || '')) return;
+        if (pos.value.trim() === artistOnly(meta.positive) && neg.value.trim() === (meta.negative || '')) return;
         const b = DOC.createElement('button');
         b.type = 'button'; b.className = 'pc-pill dashed tiny'; b.textContent = '例图里有提示词，用它替换下面的';
         b.addEventListener('click', apply);
@@ -9223,7 +9417,7 @@ function openSharedUpload(pre = {}) {
         if (busy) return;
         if (preLoading && !files.files.length) { say('例图正在载入，请稍等再发布。'); return; }
         const value = name => form.elements.namedItem(name).value.trim();
-        const name = value('title'), nickname = value('signature'), artistString = value('artistString'), negative = value('negative');
+        const name = value('title'), nickname = value('signature'), artistString = artistOnly(value('artistString')), negative = value('negative');
         const { members } = M.parseArtistString(artistString);
         if (!name || !nickname) { say('请填写名称和署名。'); return; }
         if (!members.length) { say('请填写带 artist: 的画师串，例如 artist:aaa。'); return; }
@@ -9232,7 +9426,8 @@ function openSharedUpload(pre = {}) {
         if (selected.some(f => !['image/png', 'image/jpeg', 'image/webp'].includes(f.type) || f.size > 20 * 1024 * 1024)) { say('请选择 20MB 以内的 PNG、JPEG 或 WebP 图片。'); return; }
         const nsfw = form.elements.namedItem('nsfw').checked;
         const mark = !!form.elements.namedItem('mark')?.checked;
-        const tags = value('tags').split(/[,，\n]/).map(s => s.trim()).filter(Boolean);
+        const tags = pickedTags(box).filter(t => LOBBY_TAG_SET.has(t));
+        if (!tags.some(t => ORIENT.includes(t))) { say('先在标签里选一个性向：男性向、女性向或全性向。'); return; }
         const note = value('note');
         busy = true;
         Array.from(form.elements).forEach(el => { el.disabled = true; });
@@ -9247,12 +9442,7 @@ function openSharedUpload(pre = {}) {
             }
             say('正在发布…');
             const post = { nickname, name, kind: members.length === 1 ? 'artist' : 'group', note, tags, nsfw, content: { artistString, members, ...(negative ? { negative } : {}) }, images };
-            try { await L.createPost(post); }
-            catch (e) {
-                // 服务器不认负面字段时，把负面写进说明再发一次
-                if (!negative || [401, 403, 413, 429].includes(e?.status)) throw e;
-                await L.createPost({ ...post, note: [note, '负面：' + negative].filter(Boolean).join('\n\n').slice(0, 5000), content: { artistString, members } });
-            }
+            await L.createPost(post);
             d.lobby.nickname = nickname;
             if (nsfw) d.options.lobbyShowNsfw = true;
             commit();
@@ -9280,10 +9470,8 @@ async function shareToLobby(ref) {
         d.lobby.nickname = n.slice(0, 24); commit();
     }
     const t = M.resolveTicket(d, ref);
-    const ai = await chooseBox('适合哪类？', ['BL', 'BG', 'GB', 'GL', '都适合 / 不分']);
-    if (ai == null) return;
-    const tagText = await promptText('再加几个标签，方便别人搜索（逗号隔开，比如：厚涂, 男性向）', '');
-    if (tagText == null) return;
+    const picked = await chooseLobbyTags();
+    if (!picked) return;
     const images = [];
     for (const img of t.item.images.slice(0, 6)) {
         try { images.push({ data: await shrinkDataUrl(await urlToDataUrl(imgUrl(img))), nsfw: !!img.nsfw }); } catch { /* 跳过 */ }
@@ -9293,9 +9481,9 @@ async function shareToLobby(ref) {
         : [{ tag: t.item.tag, weight: 1 }];
     await L.createPost({
         kind: ref.type, name: M.ticketName(d, ref), note: t.item.note || '',
-        tags: [...(ai < 4 ? [AUD[ai]] : []), ...tagText.split(/[,，]/).map(s => s.trim()).filter(Boolean)],
+        tags: picked,
         nsfw: images.some(i => i.nsfw),
-        content: { artistString: M.ticketString(d, ref), members },
+        content: { artistString: artistOnly(M.ticketString(d, ref)), members, ...(M.ticketNeg(d, ref) ? { negative: M.ticketNeg(d, ref) } : {}) },
         images,
     });
     toastr.success('已分享', '共享');
@@ -9309,12 +9497,12 @@ async function copyFromLobby(p, btn) {
         await copyCharacterFromLobby(p);
     } else {
         let ref;
-        if (p.kind === 'artist' || (p.content?.members?.length === 1)) {
+        if ((p.kind === 'artist' || p.content?.members?.length === 1) && !p.content?.negative && !M.parseArtistString(p.content?.artistString || '').extra && (p.content?.members?.[0]?.weight ?? 1) === 1) {
             const a = M.ensureArtist(d, p.content.members?.[0]?.tag || p.content.artistString);
             if (p.note && !a.note) a.note = p.note;
             ref = { type: 'artist', id: a.id };
         } else {
-            ref = M.createFromString(d, { name: p.name, text: p.content.artistString, note: p.note, neg: p.content.negative || '' });
+            ref = M.createFromString(d, { name: p.name, text: p.content.artistString, note: p.note, neg: p.content.negative || '', forceGroup: true });
         }
         if (!ref) throw new Error('这一条里没有画师');
         for (const img of p.images) {
@@ -9361,17 +9549,15 @@ async function shareCharacterPost(kind, c, outfit) {
         if (!n) return;
         d.lobby.nickname = n.slice(0, 24); commit();
     }
-    const ai = await chooseBox('适合哪类？', ['BL', 'BG', 'GB', 'GL', '都适合 / 不分']);
-    if (ai == null) return;
-    const tagText = await promptText('再加几个标签（逗号隔开，可不填）', '');
-    if (tagText == null) return;
+    const tags = await chooseLobbyTags();
+    if (!tags) return;
     const images = [];
-    const pic = ui.charTestImg || (c.kind === 'free' ? c.image : '') || C.avatarUrl(c);
+    const pic = kind === 'outfit' ? outfit.image : ui.charTestImg || (c.kind === 'free' ? c.image : '') || C.avatarUrl(c);
     if (pic) { try { images.push({ data: await shrinkDataUrl(pic.startsWith('data:') ? pic : await urlToDataUrl(pic)), nsfw: false }); } catch { /* 没图也行 */ } }
     const payload = kind === 'character' ? C.characterPayload(c) : { outfit: { name: outfit.name, tags: outfit.tags }, owner: c.name };
     await L.createPost({
         kind, name: kind === 'character' ? c.name : outfit.name, note: kind === 'character' ? C.tagText(c.appearance) : C.tagText(outfit.tags),
-        tags: [...(ai < 4 ? [AUD[ai]] : []), ...tagText.split(/[,，]/).map(x => x.trim()).filter(Boolean)],
+        tags,
         content: { payload }, images,
     });
     toastr.success('已分享', '共享');
@@ -9694,7 +9880,16 @@ function injectCss() {
 .pc-addrow textarea:focus { box-shadow: 0 0 0 2px var(--pc-ink); }
 .pc-share-pick { display: inline-flex; align-items: center; margin-top: 6px; cursor: pointer; }
 [data-share-meta]:empty { display: none; }
-.pc-outsec { margin-top: 12px; padding: 12px; border-radius: 14px; background: rgba(255, 255, 255, .45); }
+.pc-outsec { margin-top: 12px; padding: 12px; border-radius: 14px; background: rgba(255, 255, 255, .45); background: color-mix(in srgb, var(--pc-ink) 7%, transparent); }
+.pc-outsec .pc-dim, .pc-outsec-h small { color: var(--pc-ink-soft) !important; opacity: 1 !important; }
+.pc-dhead .pc-dtitle, .pc-dhead .pc-dtitle:not([type="checkbox"]) { color: var(--pc-ink) !important; -webkit-text-fill-color: var(--pc-ink) !important; }
+.pc-dhead .pc-dtitle::placeholder { color: var(--pc-ink-soft) !important; -webkit-text-fill-color: var(--pc-ink-soft) !important; opacity: 1; }
+.pc-outfold { display: block; width: 100%; margin-top: 10px; padding: 10px 12px; border-radius: 12px; border: 1.5px dashed var(--pc-dash); background: transparent; color: var(--pc-ink); text-align: left; line-height: 1.6; cursor: pointer; font: inherit; }
+.pc-outfold em { display: block; font-style: normal; font-size: 12px; color: var(--pc-ink-soft); margin-top: 4px; }
+.pc-outsteps { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.pc-outsteps span { flex: 1 1 30%; min-width: 92px; padding: 8px 10px; border-radius: 12px; border: 1.5px dashed var(--pc-dash); font-size: 12px; line-height: 1.5; color: var(--pc-ink); }
+.pc-outsteps span.done { border-style: solid; border-color: var(--pc-ink); }
+.pc-outsteps b { display: block; font-size: 11px; letter-spacing: .15em; color: var(--pc-ink-soft); }
 .pc-outsec-h { display: flex; align-items: baseline; gap: 8px; }
 .pc-outsec-h small { color: var(--pc-ink-soft); font-size: 12px; }
 .pc-outsec .pc-pairs { margin-top: 6px; }
