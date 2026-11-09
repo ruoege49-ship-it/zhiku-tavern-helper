@@ -188,7 +188,10 @@ function captionsHtml(parsed, esc, size = 's') {
     if (!parsed?.ok || size === 'hide') return '';
     const n = Math.max(1, parsed.panelTexts.length);
     const boxes = parsed.boxes?.length === parsed.panelTexts.length ? parsed.boxes : null;
-    const box = (t, style, cls = '') => `<div class="pc-comic-cap ${cls}" style="${style}">${t.map(capLine).filter(Boolean).map(x => esc(x).replace(/\n+/g, '<br>')).join('<br>')}</div>`;
+    // 字号写在行内并加 !important：聊天楼层里美化常给正文统一设字号，样式表压不住
+    const fs = { xs: 'clamp(5px,1.9cqw,10px)', s: 'clamp(6px,2.5cqw,13px)', m: 'clamp(8px,3.2cqw,16px)', l: 'clamp(10px,4cqw,20px)' }[size] || 'clamp(6px,2.5cqw,13px)';
+    const font = `font-size:${fs} !important;line-height:1.35 !important;font-family:'Noto Serif SC','Songti SC',serif !important;font-weight:${size === 'xs' ? 500 : 600} !important;padding:.15em .6em !important;margin:0 !important;letter-spacing:0 !important;text-indent:0 !important`;
+    const box = (t, style, cls = '') => `<div class="pc-comic-cap ${cls}" style="${style};${font}">${t.map(capLine).filter(Boolean).map(x => esc(x).replace(/\n+/g, '<br>')).join('<br>')}</div>`;
     const out = [];
     if (parsed.pageTexts.length) out.push(box(parsed.pageTexts, 'top:8px', 'top'));
     parsed.panelTexts.forEach((t, i) => {
@@ -198,7 +201,7 @@ function captionsHtml(parsed, esc, size = 's') {
         // 字放在这一格底部、横向居中，宽度不超过这一格；底行让开左侧页码和右侧版本按钮
         out.push(box(t, `left:${((b.x + b.w / 2) * 100).toFixed(2)}%;top:calc(${((b.y + b.h) * 100).toFixed(2)}% - ${bottom ? 40 : 6}px);max-width:calc(${(b.w * 100).toFixed(2)}% - 10px)`));
     });
-    return out.length ? `<div class="pc-comic-caps sz-${size}">${out.join('')}</div>` : '';
+    return out.length ? `<div class="pc-comic-caps sz-${size}" style="position:absolute !important;inset:0 !important;container-type:inline-size !important;pointer-events:none;margin:0 !important;padding:0 !important">${out.join('')}</div>` : '';
 }
 /** 存下的对白没有分格位置（旧版本）时，从这一页的提示词里补上 */
 function captionSource(v, inner) {
@@ -287,12 +290,12 @@ const CSS = `
 .pc-comic{display:flex;flex-direction:column;gap:10px;margin:10px 0 4px}
 .pc-comic-page{position:relative;margin:0;border-radius:14px;overflow:hidden;border:1.5px solid var(--pc-paper,#f4efe4);background:var(--pc-paper-2,#ebe4d2);-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}
 .pc-comic-page img{display:block;width:100%;height:auto;cursor:pointer;-webkit-user-drag:none}
-.pc-comic-caps{position:absolute;inset:0;pointer-events:none}
-.pc-comic-cap{position:absolute;box-sizing:border-box;left:50%;transform:translate(-50%,-100%);width:max-content;max-width:80%;background:rgba(255,255,255,.84);color:#16120f;border:1px solid rgba(22,18,15,.7);border-radius:10px;padding:2px 8px;font:600 11px/1.45 "Noto Serif SC","Songti SC",serif;text-align:center;word-break:break-word}
-.pc-comic-caps.sz-m .pc-comic-cap{font-size:13px;padding:3px 10px;max-width:86%}
-.pc-comic-caps.sz-l .pc-comic-cap{font-size:15px;padding:4px 12px;max-width:90%}
+.pc-comic-caps{position:absolute;inset:0;pointer-events:none;container-type:inline-size}
+.pc-comic-cap{position:absolute;box-sizing:border-box;left:50%;transform:translate(-50%,-100%);width:max-content;max-width:80%;background:rgba(255,255,255,.84);color:#16120f;border:1px solid rgba(22,18,15,.7);border-radius:.8em;padding:.15em .6em;font:600 9px/1.35 "Noto Serif SC","Songti SC",serif;font-size:clamp(6px,2.5cqw,13px);text-align:center;word-break:break-word}
+.pc-comic-caps.sz-xs .pc-comic-cap{font-size:7px;font-size:clamp(5px,1.9cqw,10px);font-weight:500}
+.pc-comic-caps.sz-m .pc-comic-cap{font-size:11px;font-size:clamp(8px,3.2cqw,16px)}
+.pc-comic-caps.sz-l .pc-comic-cap{font-size:13px;font-size:clamp(10px,4cqw,20px)}
 .pc-comic-cap.top{transform:translate(-50%,0);background:#16120f;color:#f4efe4}
-.pc-cb-art .pc-comic-cap{font-size:10px;padding:1px 7px}
 .pc-comic.nocap .pc-comic-caps{display:none}
 .pc-comic-fold{display:flex;gap:8px;align-items:center;margin-top:6px}
 .pc-comic-fold button{border:1px dashed currentColor;background:transparent;color:inherit;border-radius:999px;padding:4px 14px;font-size:13px;cursor:pointer}
@@ -750,9 +753,9 @@ function createComicController(deps) {
               ${seg('comicColor', [['color', '彩色'], ['mono', '黑白网点']], 'color')}
               <div class="pc-label">对白怎么出现</div>
               ${seg('comicText', [['overlay', '插件叠字'], ['draw', 'NAI 画进图'], ['none', '不要对白']], 'overlay')}
-              <div class="pc-hint">NAI 画中文常常乱码，「插件叠字」让 NAI 只画画面，对白由浏览器显示，位置按每格开头的位置描述或 2x2 布局估算，未标位置时按顺序排列；下载的仍是未叠字原图。</div>
+              <div class="pc-hint">NAI 画中文常常乱码，「插件叠字」让 NAI 只画画面，对白由浏览器显示，位置按每格开头的位置描述或 2x2 布局估算，未标位置时按顺序排列，字号跟着图片宽度缩放；下载的仍是未叠字原图。</div>
               <div class="pc-label">叠字大小</div>
-              ${seg('comicCapSize', [['s', '小'], ['m', '中'], ['l', '大'], ['hide', '不显示']], 's')}
+              ${seg('comicCapSize', [['xs', '特小'], ['s', '小'], ['m', '中'], ['l', '大'], ['hide', '不显示']], 's')}
               <div class="pc-hint">挡图的话调小，或者在楼层里点「隐藏对白」临时收起。想少点对白，在下面「给 AI 的改编要求」里写「对白少一点」。</div>
               <div class="pc-label">页面尺寸（跨页自动横过来）</div>
               ${seg('comicSize', [['832x1216', '竖'], ['1216x832', '横'], ['1024x1024', '方']], '832x1216')}
@@ -1689,17 +1692,36 @@ const SHOTS = {
 const BASE = '1boy, solo, male focus, adult';
 const NEG = '1girl, female, multiple boys, child, text, watermark, signature';
 const BG = 'simple background, white background';
-// 正脸、正对镜头、居中：每位画师的例图构图一样，只比画风
-const FRONT = 'front view, facing viewer, looking at viewer, straight-on, centered, symmetrical composition';
-const NOT_FRONT = 'profile, from side, from above, from below, dutch angle, tilted head, head tilt, looking away, looking to the side, three-quarter view, extreme close-up, close-up of eye, cropped head, head out of frame, multiple views';
+// 正脸、居中：每位画师的例图构图一样，只比画风。
+// 不再写 symmetrical / arms at sides / feet apart 这类「人体参考图」的词，也写明穿着和上色，免得画成剪影、人台
+const FRONT = 'front view, facing viewer, looking at viewer, centered';
+const NOT_FRONT = 'profile, from side, from above, from below, dutch angle, looking away, three-quarter view, extreme close-up, cropped head, head out of frame, multiple views';
+const NOT_FLAT = 'silhouette, monochrome, greyscale, mannequin, faceless, reference sheet, character sheet, turnaround, anatomy chart, flat color, solid color, blank eyes';
+const CLOTHED = 'detailed face, detailed eyes, casual clothes, shirt, pants, full color';
 const DEFAULT_TEMPLATES = {
-    sfw_head: { id: 'sfw_head', name: 'SFW 头像', nsfw: false, shot: 'head', positive: `${BASE}, portrait, headshot, head and shoulders, ${FRONT}, neutral expression, closed mouth, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, hands` },
-    sfw_bust: { id: 'sfw_bust', name: 'SFW 胸像', nsfw: false, shot: 'bust', positive: `${BASE}, upper body, ${FRONT}, standing straight, arms at sides, neutral expression, ${BG}`, negative: `${NEG}, ${NOT_FRONT}` },
-    sfw_full: { id: 'sfw_full', name: 'SFW 立绘', nsfw: false, shot: 'full', positive: `${BASE}, full body, standing, ${FRONT}, arms at sides, feet apart, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, cropped` },
-    nsfw_head: { id: 'nsfw_head', name: 'NSFW 头像', nsfw: true, shot: 'head', positive: `nsfw, ${BASE}, portrait, headshot, head and shoulders, ${FRONT}, blush, sweat, parted lips, half-closed eyes, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, hands` },
-    nsfw_bust: { id: 'nsfw_bust', name: 'NSFW 胸像', nsfw: true, shot: 'bust', positive: `nsfw, ${BASE}, upper body, ${FRONT}, shirtless, pectorals, nipples, sweat, ${BG}`, negative: `${NEG}, ${NOT_FRONT}` },
-    nsfw_full: { id: 'nsfw_full', name: 'NSFW 立绘', nsfw: true, shot: 'full', positive: `nsfw, ${BASE}, full body, standing, ${FRONT}, completely nude, penis, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, cropped` },
+    sfw_head: { id: 'sfw_head', name: 'SFW 头像', nsfw: false, shot: 'head', positive: `${BASE}, portrait, headshot, head and shoulders, ${FRONT}, detailed face, detailed eyes, shirt, light smile, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, ${NOT_FLAT}, hands` },
+    sfw_bust: { id: 'sfw_bust', name: 'SFW 胸像', nsfw: false, shot: 'bust', positive: `${BASE}, upper body, ${FRONT}, ${CLOTHED}, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, ${NOT_FLAT}` },
+    sfw_full: { id: 'sfw_full', name: 'SFW 立绘', nsfw: false, shot: 'full', positive: `${BASE}, full body, standing, ${FRONT}, ${CLOTHED}, shoes, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, ${NOT_FLAT}, cropped` },
+    nsfw_head: { id: 'nsfw_head', name: 'NSFW 头像', nsfw: true, shot: 'head', positive: `nsfw, ${BASE}, portrait, headshot, head and shoulders, ${FRONT}, detailed face, detailed eyes, blush, sweat, parted lips, half-closed eyes, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, ${NOT_FLAT}, hands` },
+    nsfw_bust: { id: 'nsfw_bust', name: 'NSFW 胸像', nsfw: true, shot: 'bust', positive: `nsfw, ${BASE}, upper body, ${FRONT}, detailed face, shirtless, pectorals, nipples, sweat, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, ${NOT_FLAT}` },
+    nsfw_full: { id: 'nsfw_full', name: 'NSFW 立绘', nsfw: true, shot: 'full', positive: `nsfw, ${BASE}, full body, standing, ${FRONT}, detailed face, completely nude, penis, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, ${NOT_FLAT}, cropped` },
 };
+/** 0.8.x 的「证件照式」默认模板（没改过的换成上面的新版） */
+const OLD_TEMPLATE_TEXT2 = (() => {
+    // 正脸、正对镜头、居中：每位画师的例图构图一样，只比画风
+    const FRONT = 'front view, facing viewer, looking at viewer, straight-on, centered, symmetrical composition';
+    const NOT_FRONT = 'profile, from side, from above, from below, dutch angle, tilted head, head tilt, looking away, looking to the side, three-quarter view, extreme close-up, close-up of eye, cropped head, head out of frame, multiple views';
+    const T = {
+        sfw_head: { id: 'sfw_head', name: 'SFW 头像', nsfw: false, shot: 'head', positive: `${BASE}, portrait, headshot, head and shoulders, ${FRONT}, neutral expression, closed mouth, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, hands` },
+        sfw_bust: { id: 'sfw_bust', name: 'SFW 胸像', nsfw: false, shot: 'bust', positive: `${BASE}, upper body, ${FRONT}, standing straight, arms at sides, neutral expression, ${BG}`, negative: `${NEG}, ${NOT_FRONT}` },
+        sfw_full: { id: 'sfw_full', name: 'SFW 立绘', nsfw: false, shot: 'full', positive: `${BASE}, full body, standing, ${FRONT}, arms at sides, feet apart, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, cropped` },
+        nsfw_head: { id: 'nsfw_head', name: 'NSFW 头像', nsfw: true, shot: 'head', positive: `nsfw, ${BASE}, portrait, headshot, head and shoulders, ${FRONT}, blush, sweat, parted lips, half-closed eyes, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, hands` },
+        nsfw_bust: { id: 'nsfw_bust', name: 'NSFW 胸像', nsfw: true, shot: 'bust', positive: `nsfw, ${BASE}, upper body, ${FRONT}, shirtless, pectorals, nipples, sweat, ${BG}`, negative: `${NEG}, ${NOT_FRONT}` },
+        nsfw_full: { id: 'nsfw_full', name: 'NSFW 立绘', nsfw: true, shot: 'full', positive: `nsfw, ${BASE}, full body, standing, ${FRONT}, completely nude, penis, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, cropped` },
+    };
+
+    return T;
+})();
 /** 上一版的默认模板（没改过的会换成上面的新版） */
 const OLD_TEMPLATE_TEXT = (() => {
     const BASE = '1boy, solo, male focus, adult';
@@ -1776,7 +1798,7 @@ function normalizeData(raw) {
     const rawT = { ...(raw.templates || {}) };
     // 旧版的 SFW / NSFW 两个模板没改过就去掉（换成 头像/胸像/立绘），改过的留着
     for (const k of ['sfw', 'nsfw']) if (rawT[k] && OLD_DEFAULT_POS.includes(rawT[k].positive)) delete rawT[k];
-    for (const [k, old] of Object.entries(OLD_TEMPLATE_TEXT)) if (rawT[k] && rawT[k].positive === old.positive && rawT[k].negative === old.negative) delete rawT[k];
+    for (const set of [OLD_TEMPLATE_TEXT, OLD_TEMPLATE_TEXT2]) for (const [k, old] of Object.entries(set)) if (rawT[k] && rawT[k].positive === old.positive && rawT[k].negative === old.negative) rawT[k] = { ...rawT[k], positive: DEFAULT_TEMPLATES[k].positive, negative: DEFAULT_TEMPLATES[k].negative };
     for (const t of Object.values(rawT)) t.shot ||= 'bust';
     d.templates = { ...structuredClone(DEFAULT_TEMPLATES), ...rawT };
     for (const a of Object.values(d.artists)) { a.images ||= []; a.note ||= ''; a.collections ||= []; a.tag = normalizeArtistTag(a.tag); }
