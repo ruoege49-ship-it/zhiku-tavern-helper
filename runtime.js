@@ -2517,7 +2517,6 @@ const save = () => saveSettingsDebounced();
 
 function isReady() {
     const s = settings();
-    if (isComfy(s)) return !!comfyUrl(s);
     if (s.naiMode === 'tavern') return true;
     if (s.naiMode === 'site') return !!s.naiSite.trim();
     return !!s.naiKey.trim();
@@ -2673,7 +2672,8 @@ function netError(e) {
 }
 function generate(opts){return __naiGate.run(()=>generateRequest(opts)).catch(e=>{throw netError(e);});}
 // ───────────── ComfyUI ─────────────
-// 走酒馆自带的 /api/sd/comfy/* 转发（酒馆服务器去连 ComfyUI），浏览器这边不用管跨域
+// 出图走酒馆自带的 /api/sd/comfy/* 转发（酒馆服务器去连 ComfyUI）；
+// 读 ComfyUI 里存的工作流要浏览器直接去问 ComfyUI，ComfyUI 启动时得加 --enable-cors-header
 const COMFY_Q = 'masterpiece, best quality, amazing quality, very aesthetic, absurdres';
 const COMFY_UC = 'lowres, worst quality, bad quality, bad anatomy, bad hands, extra digits, fewer digits, jpeg artifacts, signature, watermark, username, text, blurry';
 const COMFY_WORKFLOW = {
@@ -2685,13 +2685,21 @@ const COMFY_WORKFLOW = {
     8: { class_type: 'VAEDecode', inputs: { samples: ['3', 0], vae: ['4', 2] } },
     9: { class_type: 'SaveImage', inputs: { filename_prefix: 'zhiku', images: ['8', 0] } },
 };
-const isComfy = (s = settings()) => s.zkBackend === 'comfy';
 const comfyUrl = (s = settings()) => String(s.comfyUrl || '').trim().replace(/\/+$/, '');
-/**
- * NovelAI 写法 → SD / ComfyUI 写法：
- * 1.2::tag:: → (tag:1.2)；{tag} → (tag:1.05)，[tag] → (tag:0.95)，可叠加；负权重的词去掉；
- * artist:xxx 按设置变成 xxx / by xxx / 原样；标签里原有的括号转义成 \( \)
- */
+const comfyReady = (s = settings()) => !!comfyUrl(s);
+const chatBackend = (s = settings()) => String(s.comfyChat) === 'true' && comfyReady(s) ? 'comfy' : 'nai';
+/** 没填过的话，从酒馆自带「图片生成」插件的 ComfyUI 设置里搬过来；那边也没有就用本机 8188 */
+function comfyAutoConfig() {
+    const s = settings();
+    const sd = extension_settings?.sd || {};
+    let changed = false;
+    const put = (k, v) => { if (v != null && String(v).trim() !== '' && !String(s[k] ?? '').trim()) { s[k] = String(v); changed = true; } };
+    put('comfyUrl', sd.comfy_url || 'http://127.0.0.1:8188');
+    if (sd.source === 'comfy') { put('comfyModel', sd.model); put('comfySampler', sd.sampler); put('comfyScheduler', sd.scheduler); put('comfySteps', sd.steps); put('comfyCfg', sd.scale); }
+    if (changed) save();
+    return changed;
+}
+/** NovelAI 写法 → SD 写法：1.2::x:: → (x:1.2)，{x} → (x:1.05)，[x] → (x:0.95)，负权重去掉，artist:x 按设置改，原有括号转义 */
 function naiToSd(text, artist = 'plain') {
     let src = String(text || '').replace(/\\?\(/g, '\u0004').replace(/\\?\)/g, '\u0005');
     src = src.replace(/(-?\d+(?:\.\d+)?)::([\s\S]*?)::/g, (m, w, body) => `\u0001${w}\u0002${body}\u0003`).replace(/::/g, '');
@@ -2704,7 +2712,7 @@ function naiToSd(text, artist = 'plain') {
         if (!t || w <= 0) return;
         let tag = t.replace(/\u0004/g, '\\(').replace(/\u0005/g, '\\)');
         if (/^artist:/i.test(tag)) { const name = tag.replace(/^artist:\s*/i, ''); tag = artist === 'keep' ? tag : artist === 'by' ? 'by ' + name : name; }
-        out.push(Math.abs(w - 1) < 0.01 ? tag : `(${tag}:${(Math.round(w * 100) / 100)})`);
+        out.push(Math.abs(w - 1) < 0.01 ? tag : `(${tag}:${Math.round(w * 100) / 100})`);
     };
     for (let i = 0; i < src.length; i++) {
         const ch = src[i];
@@ -2724,42 +2732,190 @@ async function comfyPost(path, body) {
     const r = await fetch('/api/sd/comfy/' + path, { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });
     if (!r.ok) {
         const t = await r.text().catch(() => '');
-        throw new Error(path === 'generate' ? 'ComfyUI 出图失败：' + (t || ('HTTP ' + r.status)).slice(0, 300) : `连不上 ComfyUI（${r.status}）：检查地址，ComfyUI 有没有开着；手机酒馆连电脑上的 ComfyUI 要填电脑的局域网地址，ComfyUI 启动时加 --listen`);
+        throw new Error(path === 'generate' ? 'ComfyUI 出图失败：' + (t || ('HTTP ' + r.status)).slice(0, 400) : '连不上 ComfyUI：看看 ComfyUI 开着没有、地址对不对。手机上的酒馆连电脑的 ComfyUI，要填电脑的局域网地址，ComfyUI 启动时加 --listen');
     }
     return r;
 }
-/** 测试连接，顺便拿模型、采样器、调度器列表 */
-async function comfyInfo() {
+/** 浏览器直接问 ComfyUI（读工作流、节点说明），要 ComfyUI 开 --enable-cors-header */
+async function comfyDirect(path) {
+    let r;
+    try { r = await fetch(comfyUrl() + path, { cache: 'no-store' }); }
+    catch { throw Object.assign(new Error('浏览器读不到 ComfyUI 里的工作流：ComfyUI 启动时加上 --enable-cors-header 再重连（不加也能生图，工作流可以「从电脑选文件」）'), { cors: true }); }
+    if (!r.ok) throw new Error(`ComfyUI 返回 ${r.status}`);
+    return r;
+}
+/** 连接：测通、读模型/采样器/调度器；顺手读 ComfyUI 里存的工作流和节点说明（读不到不算失败） */
+async function comfyConnect() {
     const url = comfyUrl();
     if (!url) throw new Error('先填 ComfyUI 地址');
     await comfyPost('ping', { url });
     const [models, samplers, schedulers] = await Promise.all(['models', 'samplers', 'schedulers'].map(p => comfyPost(p, { url }).then(r => r.json()).catch(() => [])));
-    return { models: (models || []).map(m => typeof m === 'string' ? { value: m, text: m } : m), samplers, schedulers };
+    const info = { models: (models || []).map(m => typeof m === 'string' ? { value: m, text: m } : m), samplers, schedulers, workflows: null, wfError: '' };
+    try {
+        let list;
+        try { list = await (await comfyDirect('/api/userdata?dir=workflows&recurse=true&split=false')).json(); }
+        catch (e) { if (e.cors) throw e; list = await (await comfyDirect('/userdata?dir=workflows&recurse=true&split=false')).json(); }
+        info.workflows = (Array.isArray(list) ? list : []).map(x => typeof x === 'string' ? x : x?.path || x?.name).filter(x => x && /\.json$/i.test(x)).sort();
+    } catch (e) { info.wfError = e.message; }
+    return info;
+}
+let objectInfo = null;
+async function comfyObjectInfo() {
+    if (objectInfo) return objectInfo;
+    try { objectInfo = await (await comfyDirect('/object_info')).json(); } catch { objectInfo = null; }
+    return objectInfo;
+}
+async function comfyLoadWorkflow(name) {
+    const r = await comfyDirect('/api/userdata/' + encodeURIComponent('workflows/' + name));
+    return await r.json();
+}
+/** 常见节点的控件顺序（读不到 ComfyUI 的节点说明时用） */
+const WIDGETS = {
+    KSampler: ['seed', 'steps', 'cfg', 'sampler_name', 'scheduler', 'denoise'],
+    KSamplerAdvanced: ['add_noise', 'noise_seed', 'steps', 'cfg', 'sampler_name', 'scheduler', 'start_at_step', 'end_at_step', 'return_with_leftover_noise'],
+    CheckpointLoaderSimple: ['ckpt_name'], CLIPTextEncode: ['text'], EmptyLatentImage: ['width', 'height', 'batch_size'],
+    VAEDecode: [], VAEEncode: [], VAELoader: ['vae_name'], SaveImage: ['filename_prefix'], PreviewImage: [],
+    LoraLoader: ['lora_name', 'strength_model', 'strength_clip'], LoraLoaderModelOnly: ['lora_name', 'strength_model'],
+    CLIPSetLastLayer: ['stop_at_clip_layer'], LatentUpscale: ['upscale_method', 'width', 'height', 'crop'], LatentUpscaleBy: ['upscale_method', 'scale_by'],
+    UpscaleModelLoader: ['model_name'], ImageUpscaleWithModel: [], ImageScale: ['upscale_method', 'width', 'height', 'crop'], ImageScaleBy: ['upscale_method', 'scale_by'],
+    ConditioningCombine: [], ConditioningConcat: [], ConditioningSetArea: ['width', 'height', 'x', 'y', 'strength'], FreeU_V2: ['b1', 'b2', 's1', 's2'],
+    ModelSamplingDiscrete: ['sampling', 'zsnr'], RescaleCFG: ['multiplier'], LoadImage: ['image'],
+};
+const NOT_RUN = new Set(['Note', 'MarkdownNote', 'Reroute', 'PrimitiveNode', 'PrimitiveString', 'PrimitiveInt', 'PrimitiveFloat']);
+function widgetNames(type, info) {
+    const def = info?.[type]?.input;
+    if (def) {
+        const names = [];
+        for (const sec of ['required', 'optional']) for (const [n, spec] of Object.entries(def[sec] || {})) {
+            const t = Array.isArray(spec) ? spec[0] : spec;
+            if (Array.isArray(t) || ['INT', 'FLOAT', 'STRING', 'BOOLEAN', 'COMBO'].includes(t)) names.push(n);
+        }
+        return names;
+    }
+    return WIDGETS[type];
+}
+/** ComfyUI 画布上存的「界面版」工作流 → 出图用的「API 版」 */
+function uiToApi(wf, info) {
+    if (!Array.isArray(wf?.nodes)) return wf; // 本来就是 API 版
+    if (wf.definitions?.subgraphs?.length || wf.nodes.some(n => /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(n.type))) throw new Error('这个工作流里有「组节点 / 子图」，智库还转不了。在 ComfyUI 里用「导出（API）」导出来，再「从电脑选文件」');
+    const byId = new Map(wf.nodes.map(n => [n.id, n]));
+    const links = new Map((wf.links || []).map(l => Array.isArray(l) ? [l[0], { from: l[1], slot: l[2] }] : [l.id, { from: l.origin_id, slot: l.origin_slot }]));
+    const resolve = linkId => {
+        let l = links.get(linkId);
+        for (let guard = 0; l && guard < 64; guard++) {
+            const src = byId.get(l.from);
+            if (!src) return null;
+            if (/^Primitive/.test(src.type)) return { value: Array.isArray(src.widgets_values) ? src.widgets_values[0] : undefined };
+            if (src.type === 'Reroute') { l = links.get(src.inputs?.[0]?.link); continue; }
+            if (src.mode === 4) { // 被「绕过」的节点：同类型的输入直接接到输出
+                const type = src.outputs?.[l.slot]?.type;
+                const inp = src.inputs?.find(i => i.link != null && i.type === type);
+                if (!inp) return null;
+                l = links.get(inp.link); continue;
+            }
+            if (src.mode === 2) return null;
+            return { ref: [String(src.id), l.slot] };
+        }
+        return null;
+    };
+    const api = {};
+    const unknown = new Set();
+    for (const n of wf.nodes) {
+        if (NOT_RUN.has(n.type) || n.mode === 2 || n.mode === 4) continue;
+        const inputs = {};
+        for (const inp of n.inputs || []) {
+            if (inp.link == null) continue;
+            const r = resolve(inp.link);
+            if (r?.ref) inputs[inp.name] = r.ref; else if (r && r.value !== undefined) inputs[inp.name] = r.value;
+        }
+        const wv = n.widgets_values;
+        if (Array.isArray(wv) && wv.length) {
+            const names = widgetNames(n.type, info);
+            if (!names) unknown.add(n.type);
+            else {
+                let i = 0;
+                for (const name of names) {
+                    if (i >= wv.length) break;
+                    const v = wv[i++];
+                    if (/^(seed|noise_seed)$/.test(name) && ['fixed', 'increment', 'decrement', 'randomize'].includes(wv[i])) i++;
+                    if (!(name in inputs)) inputs[name] = v;
+                }
+            }
+        } else if (wv && typeof wv === 'object') for (const [k, v] of Object.entries(wv)) if (!(k in inputs)) inputs[k] = v;
+        api[String(n.id)] = { class_type: n.type, inputs };
+    }
+    if (unknown.size) throw new Error(`读不到这几个节点的说明：${[...unknown].join('、')}。ComfyUI 启动时加 --enable-cors-header 再重连，或者在 ComfyUI 里「导出（API）」后从电脑选文件`);
+    return api;
+}
+/** 往工作流里填正面、负面、尺寸、种子（有 "%prompt%" 这类占位符就按占位符填） */
+function fillWorkflow(api, v, builtin) {
+    let text = JSON.stringify(api);
+    if (builtin || text.includes('"%prompt%"')) {
+        for (const [k, val] of Object.entries(v)) text = text.replaceAll(`"%${k}%"`, JSON.stringify(val));
+        return text;
+    }
+    const wf = JSON.parse(text);
+    const nodes = Object.values(wf);
+    const sampler = nodes.find(n => /KSampler|SamplerCustom/i.test(n.class_type) && n.inputs?.positive);
+    if (!sampler) throw new Error('工作流里没找到采样器（KSampler）节点，不知道把提示词填到哪');
+    const setText = (ref, val, depth = 0) => {
+        if (!Array.isArray(ref) || depth > 12) return false;
+        const ins = wf[ref[0]]?.inputs;
+        if (!ins) return false;
+        for (const k of ['text', 'text_g', 'string', 'value', 'prompt']) {
+            if (typeof ins[k] === 'string') { ins[k] = val; if (k === 'text_g' && typeof ins.text_l === 'string') ins.text_l = val; return true; }
+            if (Array.isArray(ins[k]) && setText(ins[k], val, depth + 1)) return true;
+        }
+        for (const k of ['conditioning', 'conditioning_1', 'conditioning_to', 'conditioning_from', 'positive', 'cond']) if (Array.isArray(ins[k]) && setText(ins[k], val, depth + 1)) return true;
+        return false;
+    };
+    if (!setText(sampler.inputs.positive, v.prompt)) throw new Error('顺着采样器找不到正面提示词的文字框');
+    setText(sampler.inputs.negative, v.negative_prompt);
+    for (const n of nodes) {
+        if (/Sampler/i.test(n.class_type)) { if ('seed' in n.inputs && !Array.isArray(n.inputs.seed)) n.inputs.seed = v.seed; if ('noise_seed' in n.inputs && !Array.isArray(n.inputs.noise_seed)) n.inputs.noise_seed = v.seed; }
+        if (/RandomNoise/.test(n.class_type) && 'noise_seed' in n.inputs) n.inputs.noise_seed = v.seed;
+        if (/^Empty.*Latent/i.test(n.class_type)) { if (!Array.isArray(n.inputs.width)) n.inputs.width = v.width; if (!Array.isArray(n.inputs.height)) n.inputs.height = v.height; }
+    }
+    return JSON.stringify(wf);
 }
 async function comfyGenerate(opts, s) {
     const url = comfyUrl(s);
-    if (!url) throw new Error('还没填 ComfyUI 地址，到智库「设置 → 出图方式」填');
-    if (!String(s.comfyModel || '').trim()) throw new Error('还没选 ComfyUI 模型，到智库「设置 → 出图方式」点「连接」再选一个');
+    if (!url) throw new Error('还没填 ComfyUI 地址，到智库「Comfy」页填');
+    const custom = String(s.comfyWf || '');
+    if (!custom && !String(s.comfyModel || '').trim()) throw new Error('还没选 ComfyUI 模型，到智库「Comfy」页连上后选一个');
     const artist = s.comfyArtist || 'plain';
     const cs = opts.chars || [];
-    const positive = naiToSd([opts.positive, ...cs.map(c => c.prompt)].filter(Boolean).join(', '), artist);
-    const negative = naiToSd([opts.negative, ...cs.map(c => c.uc)].filter(Boolean).join(', '), artist);
+    const positive = naiToSd([opts.positive, ...cs.map(c => c.prompt), s.comfyQuality ?? COMFY_Q].filter(Boolean).join(', '), artist);
+    const negative = naiToSd([s.comfyNeg ?? COMFY_UC, opts.negative, ...cs.map(c => c.uc)].filter(Boolean).join(', '), artist);
     const w = Math.round((Number(opts.width || s.novelai_width) || 832) / 8) * 8;
     const h = Math.round((Number(opts.height || s.novelai_height) || 1216) / 8) * 8;
-    const sd = Number(opts.seed ?? s.novelai_seed);
+    const sd = Number(opts.seed ?? s.comfySeed);
     const seed = sd > 0 ? sd : Math.floor(Math.random() * 4294967294) + 1;
-    const vals = { prompt: positive, negative_prompt: negative, model: String(s.comfyModel).trim(), width: w, height: h, seed, steps: Number(s.comfySteps) || 28, scale: Number(s.comfyCfg) || 6, sampler: s.comfySampler || 'euler_ancestral', scheduler: s.comfyScheduler || 'normal', denoise: 1, clip_skip: -2 };
-    let wf = String(s.comfyWorkflow || '').trim() || JSON.stringify(COMFY_WORKFLOW);
-    try { JSON.parse(wf); } catch { throw new Error('自定义工作流不是合法的 JSON（要用 ComfyUI 里「导出（API）」的那种）'); }
-    for (const [k, v] of Object.entries(vals)) wf = wf.replaceAll(`"%${k}%"`, JSON.stringify(v));
+    const vals = { prompt: positive, negative_prompt: negative, model: String(s.comfyModel || '').trim(), width: w, height: h, seed, steps: Number(s.comfySteps) || 28, scale: Number(s.comfyCfg) || 6, sampler: s.comfySampler || 'euler_ancestral', scheduler: s.comfyScheduler || 'normal', denoise: 1, clip_skip: -2 };
+    let api = COMFY_WORKFLOW;
+    if (custom) {
+        try { api = JSON.parse(String(s.comfyWfApi || '')); } catch { throw new Error('选的工作流没读好，到「Comfy」页重新选一次'); }
+    }
+    const wf = fillWorkflow(api, vals, !custom);
     const r = await comfyPost('generate', { url, prompt: `{"prompt": ${wf}}` });
     const { format, data } = await r.json();
-    const sent = { prompt: positive, negative, size: `${w}×${h}`, chars: [], seed, model: 'ComfyUI · ' + vals.model, director: 0 };
+    const sent = { prompt: positive, negative, size: `${w}×${h}`, chars: [], seed, model: 'ComfyUI · ' + (custom ? custom.replace(/^\w+:/, '') : vals.model), director: 0 };
     return { image: `data:image/${format || 'png'};base64,${data}`, sent };
+}
+/** 选工作流：内置 / ComfyUI 里存的 / 电脑上的文件；选的时候就转好格式存下来 */
+async function comfyUseWorkflow(kind, name = '', raw = null) {
+    const s = settings();
+    if (!kind) { s.comfyWf = ''; s.comfyWfApi = ''; save(); return; }
+    const wf = raw ?? await comfyLoadWorkflow(name);
+    const info = Array.isArray(wf?.nodes) ? await comfyObjectInfo() : null;
+    const api = uiToApi(wf, info);
+    if (!api || typeof api !== 'object' || !Object.keys(api).length) throw new Error('这个文件不像 ComfyUI 工作流');
+    fillWorkflow(api, { prompt: 'x', negative_prompt: 'x', width: 832, height: 1216, seed: 1 }, false);
+    s.comfyWf = kind + ':' + name; s.comfyWfApi = JSON.stringify(api); save();
 }
 async function generateRequest(opts) {
     const s = settings();
-    if (isComfy(s)) return comfyGenerate(opts, s);
+    if (opts.backend === 'comfy') return comfyGenerate(opts, s);
     if (!opts.comic && s.naiMode === 'site' && String(s.naiSiteSimple) === 'true') {
         const cs = opts.chars || [];
         opts = {
@@ -2944,7 +3100,6 @@ function encKey(model = settings().novelaimode) {
 }
 function vibeSupported() {
     const s = settings();
-    if (isComfy(s)) return false;
     return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3' && !String(s.novelaimode).includes('diffusion-5');
 }
 
@@ -2997,7 +3152,6 @@ function parseVibeFile(json) {
 
 function charRefSupported() {
     const s = settings();
-    if (isComfy(s)) return false;
     return s.naiMode !== 'tavern' && s.novelaimode.includes('4-5') && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');
 }
 
@@ -3013,7 +3167,6 @@ function inpaintModel(model = settings().novelaimode) {
 function inpaint(opts){return __naiGate.run(()=>inpaintRequest(opts)).catch(e=>{throw netError(e);});}
 async function inpaintRequest({ image, mask, prompt, negative, width, height, strength = 0.7 }) {
     const s = settings();
-    if (isComfy(s)) throw new Error('ComfyUI 模式暂时不能局部重绘，到设置「出图方式」切回 NovelAI');
     if (s.naiMode === 'tavern') throw new Error('「用酒馆里的 key」不能局部重绘，到设置里改成「填我的 key」');
     const key = authKey();
     const model = inpaintModel();
@@ -3041,7 +3194,7 @@ async function inpaintRequest({ image, mask, prompt, negative, width, height, st
     return imageFromResponse(buf);
 }
 
-return { isComfy, comfyInfo, naiToSd, COMFY_Q, COMFY_UC, stopQueue:()=>__naiGate.stop(), MODELS, SAMPLERS, SCHEDULES, settings, save, isReady, ucpValue, buildParameters, generate, unzipFirstImage, testConnection, importFromZhihuiji, encKey, vibeSupported, encodeVibe, parseVibeFile, charRefSupported, inpaintModel, inpaint };
+return { comfyReady, chatBackend, comfyAutoConfig, comfyConnect, comfyUseWorkflow, naiToSd, uiToApi, fillWorkflow, COMFY_Q, COMFY_UC, stopQueue:()=>__naiGate.stop(), MODELS, SAMPLERS, SCHEDULES, settings, save, isReady, ucpValue, buildParameters, generate, unzipFirstImage, testConnection, importFromZhihuiji, encKey, vibeSupported, encodeVibe, parseVibeFile, charRefSupported, inpaintModel, inpaint };
 })();
 
 // ───── engine.js ─────
@@ -3062,7 +3215,6 @@ function stSettings() { return N.settings(); }
 
 /** 正面、负面最后会被自动加上的质量词和负面预设 */
 function extras(s = N.settings()) {
-    if (N.isComfy(s)) return { aqt: String(s.comfyQuality ?? N.COMFY_Q), ucp: String(s.comfyNeg ?? N.COMFY_UC) };
     const r = qualityPresets({ ...s, UCP_novelai: N.ucpValue(s) });
     if (String(s.UCP_novelai) === 'custom') r.ucp = String(s.UCP_custom || '').trim();
     return r;
@@ -3161,7 +3313,8 @@ async function charRefs(groupIds) {
 }
 
 async function run(opts) {
-    if (!N.isReady()) throw new Error('还没填 NovelAI key，到「设置」最上面填');
+    if (opts.backend === 'comfy') { if (!N.comfyReady()) throw new Error('还没连上 ComfyUI，到智库「Comfy」页看看'); opts.noVibe = true; opts.director = null; }
+    else if (!N.isReady()) throw new Error('还没填 NovelAI key，到「设置」最上面填');
     runtime.busy++;
     try {
         if (!opts.noVibe && opts.director === undefined) opts.director = await charRefs();
@@ -3182,8 +3335,8 @@ async function generate({ pos, neg, scene = '', width, height }) {
 }
 
 /** 已经拼好的提示词（聊天生图用，可带分角色） */
-async function generateFull({ positive, negative, chars = [], width, height, director }) {
-    return run({ positive, negative, chars, width, height, director });
+async function generateFull({ positive, negative, chars = [], width, height, director, backend }) {
+    return run({ positive, negative, chars, width, height, director, backend });
 }
 
 /** 生成一张例图：画师串 + 例图模板（不带氛围和角色） */
@@ -4188,7 +4341,7 @@ function chatText(upTo, n = 6) {
 
 /** 给第 mesId 楼生一张图，插到这一楼后面。返回 dataUrl */
 async function generateForMessage(mesId, { onStep } = {}) {
-    if (!N.isReady()) throw new Error('还没填 NovelAI key，到画师库 → 设置填');
+    if ((typeof __mod_nai === 'undefined' || __mod_nai.chatBackend?.() !== 'comfy') && !N.isReady()) throw new Error('还没填 NovelAI key，到画师库 → 设置填');
     const c = ctx();
     if (!c.chat?.[mesId]) throw new Error('找不到这一楼');
     const cast = currentCast().filter(x => x.on).map(x => x.char);
@@ -4204,7 +4357,7 @@ async function generateForMessage(mesId, { onStep } = {}) {
     // 只用出场角色在角色页里绑的角色参考
     const bound = [...new Set(picks.map(p => p.char.charRef).filter(id => id && getData().charRefGroups?.[id]))];
     const director = bound.length ? await E.charRefs(bound) : null;
-    const image = await E.generateFull({ ...prompt, director });
+    const image = await E.generateFull({ ...prompt, director, backend: (typeof __mod_nai !== 'undefined' && __mod_nai.chatBackend?.()) || 'nai' });
     await insertImage(mesId, image);
     return image;
 }
@@ -4764,7 +4917,7 @@ const __mod_marker=createMarkerController({
             const hit=__mod_chars.markerPrompt(prompt,where);
             const {positive,negative,chars}=hit||__mod_engine.composeStudio({pos:__mod_model.mergeTags(d.active?__mod_model.ticketString(d,d.active):'',prompt,d.options.chatPositive||''),neg:[d.active?__mod_model.ticketNeg(d,d.active):'',d.options.chatNegative||''].filter(Boolean).join(', ')});
             const bound=[...new Set((hit?.cast||[]).map(ch=>ch.charRef).filter(id=>id&&d.charRefGroups?.[id]))];
-            const image=await __mod_engine.generateFull({positive,negative,...(chars?.length?{chars}:{}),director:bound.length?await __mod_engine.charRefs(bound):null});__mod_engine.afterChatImage();return image;},
+            const image=await __mod_engine.generateFull({positive,negative,...(chars?.length?{chars}:{}),backend:(typeof __mod_nai!=='undefined'&&__mod_nai.chatBackend?.()||'nai'),director:bound.length?await __mod_engine.charRefs(bound):null});__mod_engine.afterChatImage();return image;},
         resolveUrl:u=>pcLocal.url(u),upload:async(image,name)=>{const r=await pcStoreImage(image,name);void pcRecordImage({dataUrl:image,url:r?.url,raw:pcMarkerRaw,sent:__mod_engine.runtime.lastSent,from:'chat'}).catch(e=>console.warn('[智库] 历史生图没存上',e));return r;},notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
     });
 const __mod_ui = (() => {
@@ -4905,7 +5058,8 @@ function renderView() {
     const d = getData();
     const body = root.querySelector('.pc-body');
     const scroll = body ? body.scrollTop : 0;
-    const navs = [['studio', '生图'], ['comic', '漫画'], ['book', '画师库'], ['vibe', '氛围'], ['cast', '角色'], ['lobby', '共享']];
+    ensureCfyCss();
+    const navs = [['studio', '生图'], ['comfy', 'Comfy'], ['comic', '漫画'], ['book', '画师库'], ['vibe', '氛围'], ['cast', '角色'], ['lobby', '共享']];
     const mainView = ['artist', 'group', 'batch'].includes(ui.view) ? 'book' : ['charedit', 'outfit'].includes(ui.view) ? 'cast' : ui.view;
     root.innerHTML = `
     <div class="pc-shell">
@@ -5359,6 +5513,121 @@ function histDetail(x) {
     });
 }
 
+// ═════════════════════ ComfyUI 页 ═════════════════════
+function loadCfy() {
+    if (ui.cfy?.loaded) return ui.cfy;
+    const saved = getData().options.comfyPage || {};
+    ui.cfy = { loaded: true, pos: saved.pos ?? '', neg: saved.neg ?? '', size: saved.size || '832x1216', result: '', sent: null, busy: false };
+    return ui.cfy;
+}
+function saveCfy() {
+    const c = ui.cfy; if (!c) return;
+    getData().options.comfyPage = { pos: c.pos, neg: c.neg, size: c.size };
+    commit({ silent: true });
+}
+function comfyConnectNow(force = false) {
+    const k = ui.comfy || (ui.comfy = {});
+    if (k.busy || (k.tried && !force)) return;
+    k.busy = true; k.tried = true; k.err = '';
+    N.comfyAutoConfig();
+    N.comfyConnect().then(info => {
+        Object.assign(k, info, { busy: false, ok: true, err: '' });
+        const s = N.settings();
+        if (!s.comfyModel && info.models.length) { s.comfyModel = info.models[0].value; N.save(); }
+    }).catch(e => Object.assign(k, { busy: false, ok: false, err: e.message })).finally(() => { if (ui.view === 'comfy') render(); });
+}
+function ensureCfyCss() {
+    if (!DOC.getElementById('pc-comfy-css')) {
+        const st = DOC.createElement('style'); st.id = 'pc-comfy-css';
+        st.textContent = `.pc-nav{grid-template-columns:repeat(7,minmax(0,1fr))!important;gap:3px!important}
+.pc-nav .pc-pill{white-space:nowrap!important;font-size:12px!important;padding:0 1px!important;letter-spacing:0!important}
+.pc-cf-conn{display:flex;align-items:center;gap:12px}.pc-cf-dot{flex:none;width:12px;height:12px;border-radius:50%;background:#9a948b}
+.pc-cf-dot.ok{background:#7fae79;box-shadow:0 0 0 4px rgba(127,174,121,.18)}.pc-cf-dot.err{background:#c0675c;box-shadow:0 0 0 4px rgba(192,103,92,.18)}.pc-cf-dot.busy{background:#c9a24a;animation:pc-cf-blink 1s infinite}
+@keyframes pc-cf-blink{50%{opacity:.35}}
+.pc-cf-conn .pc-grow small{display:block;opacity:.7;font-size:12px;line-height:1.5;word-break:break-all}
+.pc-cf-kv{display:grid;grid-template-columns:1fr 1fr;gap:8px}`;
+        pcMount(st);
+    }
+}
+function viewComfy(d) {
+    ensureCfyCss();
+    const s = N.settings();
+    const k = ui.comfy || {};
+    if (!k.tried) setTimeout(() => comfyConnectNow(), 0);
+    const c = loadCfy();
+    const dot = k.busy ? 'busy' : k.ok ? 'ok' : k.err ? 'err' : '';
+    const url = String(s.comfyUrl || '').trim() || '（还没填）';
+    const custom = String(s.comfyWf || '');
+    const pick = (key, list, def = '') => {
+        const cur = String(s[key] || def);
+        const arr = (list || []).map(x => typeof x === 'string' ? { value: x, text: x } : x);
+        if (!arr.length) return `<input data-st="${key}" value="${esc(cur)}" placeholder="${esc(def || '点「重连」后可以选')}">`;
+        if (cur && !arr.some(x => x.value === cur)) arr.unshift({ value: cur, text: cur + '（列表里没有）' });
+        return `<select data-st="${key}">${cur ? '' : '<option value="">选一个</option>'}${arr.map(x => `<option value="${esc(x.value)}" ${x.value === cur ? 'selected' : ''}>${esc(x.text)}</option>`).join('')}</select>`;
+    };
+    const wfOpts = [['', '内置：基础文生图']];
+    for (const w of k.workflows || []) wfOpts.push(['cu:' + w, 'ComfyUI 里的：' + w.replace(/\.json$/i, '')]);
+    if (custom && !wfOpts.some(o => o[0] === custom)) wfOpts.push([custom, (custom.startsWith('file:') ? '电脑上的文件：' : 'ComfyUI 里的：') + custom.replace(/^\w+:/, '').replace(/\.json$/i, '')]);
+    const [w, h] = c.size.split('x').map(Number);
+    const sizeBtn = (v, t) => `<button class="pc-pill ${c.size === v ? 'on' : ''}" data-act="cfysize" data-v="${v}">${t}</button>`;
+    const sum = custom ? '用工作流自己的参数' : `${esc(s.comfySteps || 28)} 步 · CFG ${esc(s.comfyCfg || 6)} · ${esc(s.comfySampler || 'euler_ancestral')}`;
+    return `
+    <section class="pc-card pc-pad">
+      <div class="pc-label" style="margin-top:0">连接</div>
+      <div class="pc-cf-conn"><i class="pc-cf-dot ${dot}"></i><div class="pc-grow"><b>${k.busy ? '正在连接…' : k.ok ? '已连上' : k.err ? '没连上' : '还没连接'}</b>
+        <small>${esc(url)}${k.err ? ' · ' + esc(k.err) : k.ok ? ` · ${(k.models || []).length} 个模型` : ''}</small></div>
+        <button class="pc-pill dashed" data-act="cfyconnect" ${k.busy ? 'disabled' : ''}>重连</button></div>
+      <details class="pc-details pc-mt-s" ${ui.cfyUrlOpen || k.err ? 'open' : ''}><summary class="pc-dim small">改地址</summary>
+        <label class="pc-field"><span>ComfyUI 地址</span><input data-st="comfyUrl" value="${esc(s.comfyUrl || '')}" placeholder="http://127.0.0.1:8188" autocomplete="off"></label>
+        <div class="pc-hint">打开这页会自动连：先用酒馆「图片生成」里填的 ComfyUI 地址，没填就用本机 127.0.0.1:8188。手机上的酒馆连电脑的 ComfyUI，填电脑的局域网地址，ComfyUI 启动时加 --listen。</div>
+      </details>
+      <label class="pc-field"><span>工作流</span><select data-act-change="cfywf">${wfOpts.map(([v, t]) => `<option value="${esc(v)}" ${v === custom ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
+      <div class="pc-actions wrap" style="margin-top:6px"><label class="pc-pill dashed tiny" style="cursor:pointer">从电脑选文件<input type="file" accept=".json,application/json" data-cfyfile hidden></label>${k.wfError ? `<span class="pc-dim small">${esc(k.wfError)}</span>` : k.workflows ? `<span class="pc-dim small">ComfyUI 里有 ${k.workflows.length} 个工作流</span>` : ''}</div>
+      ${custom ? '<div class="pc-hint">用自己的工作流时，模型和采样参数都按工作流里设好的；智库只填正面、负面、尺寸和种子。</div>' : `
+      <label class="pc-field"><span>模型</span>${pick('comfyModel', k.models)}</label>`}
+      <details class="pc-details pc-mt-s"><summary class="pc-row-between"><span>采样参数</span><span class="pc-dim small">${sum}</span></summary>
+        ${custom ? '' : `<div class="pc-cf-kv">
+          <label class="pc-field"><span>步数</span><input data-st="comfySteps" inputmode="numeric" value="${esc(s.comfySteps || '28')}"></label>
+          <label class="pc-field"><span>CFG</span><input data-st="comfyCfg" inputmode="decimal" value="${esc(s.comfyCfg || '6')}"></label>
+          <label class="pc-field"><span>采样器</span>${pick('comfySampler', k.samplers, 'euler_ancestral')}</label>
+          <label class="pc-field"><span>调度器</span>${pick('comfyScheduler', k.schedulers, 'normal')}</label></div>`}
+        <div class="pc-cf-kv">
+          <label class="pc-field"><span>种子（空着随机）</span><input data-st="comfySeed" inputmode="numeric" value="${esc(s.comfySeed || '')}" placeholder="随机"></label>
+          <label class="pc-field"><span>画师名写法</span><select data-st="comfyArtist">${[['plain', 'xxx'], ['by', 'by xxx'], ['keep', 'artist:xxx']].map(([v, t]) => `<option value="${v}" ${(s.comfyArtist || 'plain') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label></div>
+        <label class="pc-field"><span>质量词（加在正面最后）</span><textarea class="pc-textarea mono small" data-st="comfyQuality" rows="2">${esc(s.comfyQuality ?? N.COMFY_Q)}</textarea></label>
+        <label class="pc-field"><span>负面预设（加在负面最前）</span><textarea class="pc-textarea mono small" data-st="comfyNeg" rows="3">${esc(s.comfyNeg ?? N.COMFY_UC)}</textarea></label>
+        <div class="pc-hint">二次元画师串推荐 Illustrious / NoobAI 系的 SDXL 模型。画师串照 NovelAI 写法就行：1.2::xxx::、{xxx}、[xxx]、artist:xxx 会自动换成 ComfyUI 写法。</div>
+      </details>
+    </section>
+    <section class="pc-card pc-pad pc-mt">
+      <div class="pc-row-between"><h2 class="pc-h2" style="margin:0">ComfyUI 生图</h2><span class="pc-dim small">${esc(custom ? custom.replace(/^\w+:/, '').replace(/\.json$/i, '') : String(s.comfyModel || '还没选模型').replace(/\.[^.]+$/, ''))}</span></div>
+      <label class="pc-label" for="pc-cfy-pos">正面</label>
+      <textarea id="pc-cfy-pos" class="pc-textarea mono big" data-bind="cfy.pos" placeholder="artist:xxx, 1girl, solo, white dress …">${esc(c.pos)}</textarea>
+      <div class="pc-chips" style="margin-top:6px"><button class="pc-pill dashed tiny" data-act="cfyfill" data-from="active">＋ 用正文画师串</button><button class="pc-pill dashed tiny" data-act="cfyfill" data-from="studio">＋ 用生图页的正面</button></div>
+      <label class="pc-label" for="pc-cfy-neg">负面</label>
+      <textarea id="pc-cfy-neg" class="pc-textarea small mono" data-bind="cfy.neg" placeholder="不想出现的东西">${esc(c.neg)}</textarea>
+      <div class="pc-chips" style="margin-top:10px">${sizeBtn('832x1216', '竖')}${sizeBtn('1216x832', '横')}${sizeBtn('1024x1024', '方')}<span class="pc-dim small" style="align-self:center">${w}×${h}</span></div>
+    </section>
+    <button class="pc-btn dark big pc-mt" data-act="cfygen" ${c.busy ? 'disabled' : ''}>${seal()}${c.busy ? '<span class="pc-busy">生成中</span>' : '生成'}</button>
+    ${c.result ? `
+    <section class="pc-card pc-mt pc-result">
+      <img src="${esc(c.result)}" alt="生成结果" data-act="viewimg" data-src="${esc(c.result)}">
+      <div class="pc-actions wrap">
+        <a class="pc-btn" href="${esc(c.result)}" download="zhiku_comfy_${Date.now()}.png">下载</a>
+        <button class="pc-btn" data-act="cfyinsert">插到聊天最后一楼</button>
+        <button class="pc-btn" data-act="cfygen">再来一张</button>
+        <button class="pc-btn" data-act="cfyshare">上传到共享</button>
+        <button class="pc-btn danger" data-act="cfyclear">删掉</button>
+      </div>
+      ${c.sent ? `<details class="pc-details pc-sent-box"><summary>实际发出去的内容（${esc(c.sent.size)} · 种子 ${esc(c.sent.seed)}）</summary>
+        <div class="pc-label">正面</div><p class="pc-quote small mono">${esc(c.sent.prompt)}</p>
+        <div class="pc-label">负面</div><p class="pc-quote small mono">${esc(c.sent.negative)}</p></details>` : ''}
+    </section>` : ''}
+    <section class="pc-card pc-pad pc-mt">
+      <div class="pc-label" style="margin-top:0">聊天里</div>
+      <label class="pc-switch"><input type="checkbox" data-st-check="comfyChat" ${String(s.comfyChat) === 'true' ? 'checked' : ''}><span></span>聊天插图也用 ComfyUI<small>关着就还是 NovelAI。漫画一直用 NovelAI。NovelAI 的生图页和这页互不影响。</small></label>
+    </section>`;
+}
 function viewStudio(d) {
     const s = settingsST();
     loadStudio();
@@ -7135,40 +7404,6 @@ function viewSettings(d) {
     const n = settingsST();
     const modeBtn = (v, t) => `<button class="${n.naiMode === v ? 'on' : ''}" data-act="naimode" data-mode="${v}">${t}</button>`;
     const naiStatus = ui.naiTest ? `${ui.naiTest.warn ? '!' : ui.naiTest.ok ? '✓' : '✗'} ${esc(ui.naiTest.text)}` : N.isReady() ? '已填好' : '<span class="pc-warn-text">还没填 key</span>';
-    const cf = ui.comfy || {};
-    const comfyOn = N.isComfy();
-    const pick = (key, list, ph, def = '') => {
-        const cur = String(n[key] || def);
-        const arr = (list || []).map(x => typeof x === 'string' ? { value: x, text: x } : x);
-        if (!arr.length) return `<input data-st="${key}" value="${esc(cur)}" placeholder="${esc(ph)}">`;
-        if (cur && !arr.some(x => x.value === cur)) arr.unshift({ value: cur, text: cur + '（列表里没有）' });
-        return `<select data-st="${key}">${cur ? '' : '<option value="">选一个</option>'}${arr.map(x => `<option value="${esc(x.value)}" ${x.value === cur ? 'selected' : ''}>${esc(x.text)}</option>`).join('')}</select>`;
-    };
-    const backendFold = setFold('backend', '出图方式', comfyOn ? 'ComfyUI' + (n.comfyModel ? ' · ' + esc(String(n.comfyModel).replace(/\.[^.]+$/, '').slice(0, 24)) : ' · <span class="pc-warn-text">还没选模型</span>') : 'NovelAI', `
-      <div class="pc-seg"><button class="${comfyOn ? '' : 'on'}" data-act="backend" data-v="nai">NovelAI</button><button class="${comfyOn ? 'on' : ''}" data-act="backend" data-v="comfy">ComfyUI</button></div>
-      ${comfyOn ? `
-      <div class="pc-hint">ComfyUI 由酒馆服务器去连，浏览器不用管跨域。电脑上开着 ComfyUI、酒馆也在这台电脑上，地址一般就是 http://127.0.0.1:8188；手机上的酒馆连电脑的 ComfyUI，要填电脑的局域网地址（比如 http://192.168.1.5:8188），ComfyUI 启动时加 --listen。</div>
-      <label class="pc-field"><span>ComfyUI 地址</span><input data-st="comfyUrl" value="${esc(n.comfyUrl || '')}" placeholder="http://127.0.0.1:8188" autocomplete="off"></label>
-      <div class="pc-actions wrap" style="align-items:center"><button class="pc-btn dark" data-act="comfytest" ${cf.busy ? 'disabled' : ''}>${cf.busy ? '连接中…' : '连接并读取模型'}</button><span class="pc-dim small">${cf.err ? '<span class="pc-warn-text">' + esc(cf.err) + '</span>' : cf.models ? `连上了，${cf.models.length} 个模型` : ''}</span></div>
-      <label class="pc-field"><span>模型（checkpoint）</span>${pick('comfyModel', cf.models, '点「连接并读取模型」后可以选，也能直接填文件名')}</label>
-      <div class="pc-hint">二次元画师串推荐 Illustrious / NoobAI 系的 SDXL 模型，它们认 danbooru 标签和画师名。</div>
-      <div class="pc-row" style="gap:8px;flex-wrap:wrap">
-        <label class="pc-field" style="flex:1;min-width:110px"><span>步数</span><input data-st="comfySteps" inputmode="numeric" value="${esc(n.comfySteps || '28')}"></label>
-        <label class="pc-field" style="flex:1;min-width:110px"><span>CFG</span><input data-st="comfyCfg" inputmode="decimal" value="${esc(n.comfyCfg || '6')}"></label>
-      </div>
-      <div class="pc-row" style="gap:8px;flex-wrap:wrap">
-        <label class="pc-field" style="flex:1;min-width:140px"><span>采样器</span>${pick('comfySampler', cf.samplers, 'euler_ancestral', 'euler_ancestral')}</label>
-        <label class="pc-field" style="flex:1;min-width:140px"><span>调度器</span>${pick('comfyScheduler', cf.schedulers, 'normal', 'normal')}</label>
-      </div>
-      <label class="pc-field"><span>画师名怎么写</span><select data-st="comfyArtist">${[['plain', 'xxx（Illustrious / NoobAI 常用）'], ['by', 'by xxx'], ['keep', 'artist:xxx（原样）']].map(([v, t]) => `<option value="${v}" ${(n.comfyArtist || 'plain') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
-      <div class="pc-hint">画师串照 NovelAI 的写法存就行：1.2::xxx::、{xxx}、[xxx] 会自动换成 ComfyUI 的 (xxx:1.2) 写法。</div>
-      <label class="pc-field"><span>质量词（加在正面最后）</span><textarea class="pc-textarea mono" data-st="comfyQuality" rows="2">${esc(n.comfyQuality ?? N.COMFY_Q)}</textarea></label>
-      <label class="pc-field"><span>负面预设（加在负面最前）</span><textarea class="pc-textarea mono" data-st="comfyNeg" rows="3">${esc(n.comfyNeg ?? N.COMFY_UC)}</textarea></label>
-      <details class="pc-mt"><summary class="pc-dim small">自定义工作流（高级，不懂就留空）</summary>
-        <div class="pc-hint">留空用内置的基础文生图工作流。要换成自己的：ComfyUI 里「工作流 → 导出（API）」，把 JSON 贴进来，在对应位置写占位符："%prompt%"、"%negative_prompt%"、"%model%"、"%width%"、"%height%"、"%seed%"、"%steps%"、"%scale%"、"%sampler%"、"%scheduler%"。</div>
-        <textarea class="pc-textarea mono" data-st="comfyWorkflow" rows="6" placeholder="{ &quot;3&quot;: { &quot;class_type&quot;: &quot;KSampler&quot;, … } }">${esc(n.comfyWorkflow || '')}</textarea>
-      </details>
-      <div class="pc-hint">ComfyUI 模式下用不了：氛围、角色参考图、局部重绘；分人物提示词会合并进正面。尺寸和种子用下面 NovelAI 那栏的设置。</div>` : ''}`);
     const nai = setFold('nai', 'NovelAI', naiStatus, `
       <div class="pc-seg three">${modeBtn('key', '填我的 key')}${modeBtn('tavern', '用酒馆里的')}${modeBtn('site', '第三方站点')}</div>
       ${n.naiMode === 'key' ? `
@@ -7292,7 +7527,7 @@ function viewSettings(d) {
       <div class="pc-about-note">看图提取需要能识图的模型 · 原脚本 AFPL v9，署名保留</div>
       <div class="pc-about-note">漫画模式的页面协议和玩法来自「漫画台」预设 · 作者 小鸟游星野（Discord：__takanashi_hoshino__）</div>`);
 
-    return `<h2 class="pc-pagetitle">设置</h2>${backendFold}${nai}${ai}${chat}${setFold('illprompt', '正文转生图提示词', d.options.illustPrompt ? '自己改过' : '默认', illustEditor)}${tpl}${look}${entry}${share}${ban}${data}${comic}${about}<div style="height:24px"></div>`;
+    return `<h2 class="pc-pagetitle">设置</h2>${nai}${ai}${chat}${setFold('illprompt', '正文转生图提示词', d.options.illustPrompt ? '自己改过' : '默认', illustEditor)}${tpl}${look}${entry}${share}${ban}${data}${comic}${about}<div style="height:24px"></div>`;
 }
 
 /** 漫画页：漫画设置直接摊开，外加翻看漫画书 */
@@ -7304,7 +7539,7 @@ function viewComic(d) {
       <section class="pc-card pc-pad pc-mt"><h3 class="pc-h3">漫画设置</h3><div id="pc-comic-view"></div></section>
       <div style="height:24px"></div>`;
 }
-const VIEWS = { aipreset: viewAiPreset, comic: viewComic, cast: viewCast, charedit: viewCharEdit, outfit: viewOutfit, studio: viewStudio, book: viewBook, artist: viewArtist, group: viewGroup, batch: viewBatch, vibe: viewVibe, lobby: viewLobby, settings: viewSettings };
+const VIEWS = { comfy: viewComfy, aipreset: viewAiPreset, comic: viewComic, cast: viewCast, charedit: viewCharEdit, outfit: viewOutfit, studio: viewStudio, book: viewBook, artist: viewArtist, group: viewGroup, batch: viewBatch, vibe: viewVibe, lobby: viewLobby, settings: viewSettings };
 
 // ═════════════════════ 事件 ═════════════════════
 
@@ -7376,18 +7611,6 @@ async function onClick(ev, outside = false) {
                 saveStudio(); render();
                 toastr.success('已放进正面提示词', '生成图片');
                 break;
-            }
-            case 'backend': { const n = N.settings(); n.zkBackend = el.dataset.v === 'comfy' ? 'comfy' : 'nai'; N.save(); render(); break; }
-            case 'comfytest': {
-                ui.comfy = { ...(ui.comfy || {}), busy: true, err: '' }; render();
-                try {
-                    const info = await N.comfyInfo();
-                    ui.comfy = { ...info, busy: false, err: '' };
-                    const n = N.settings();
-                    if (!n.comfyModel && info.models.length) { n.comfyModel = info.models[0].value; N.save(); }
-                    toastr.success(`连上 ComfyUI 了，读到 ${info.models.length} 个模型`, '智库');
-                } catch (e) { ui.comfy = { ...(ui.comfy || {}), busy: false, err: e.message }; }
-                render(); break;
             }
             case 'naimode': { const n = N.settings(); n.naiMode = el.dataset.mode; N.save(); ui.naiTest = null; render(); break; }
             case 'illprompt-save': case 'illprompt-default': case 'illprompt-preview': case 'illprompt-last':
@@ -7832,6 +8055,37 @@ async function onClick(ev, outside = false) {
                 break;
             }
             case 'saveresult': await saveStudioResult(); break;
+            case 'cfyconnect': comfyConnectNow(true); render(); break;
+            case 'cfysize': loadCfy().size = el.dataset.v; saveCfy(); render(); break;
+            case 'cfyfill': {
+                const c = loadCfy(), d = getData();
+                let add = '';
+                if (el.dataset.from === 'active') { add = d.active ? M.ticketString(d, d.active) : ''; if (!add) { toastr.info('还没选正文画师串', '智库'); break; } }
+                else { loadStudio(); add = ui.studio.pos || ''; if (!add.trim()) { toastr.info('生图页的正面是空的', '智库'); break; } }
+                c.pos = M.mergeTags ? M.mergeTags(add, c.pos) : [add, c.pos].filter(Boolean).join(', ');
+                saveCfy(); render(); break;
+            }
+            case 'cfygen': {
+                const c = loadCfy();
+                if (!N.comfyReady()) { toastr.warning('先连上 ComfyUI', 'ComfyUI'); break; }
+                if (!c.pos.trim()) { toastr.warning('正面是空的', 'ComfyUI'); break; }
+                saveCfy(); c.busy = true; render();
+                try {
+                    const [w, h] = c.size.split('x').map(Number);
+                    c.result = await E.generateFull({ positive: c.pos, negative: c.neg, width: w, height: h, backend: 'comfy' });
+                    c.sent = E.runtime.lastSent;
+                    const shot = { dataUrl: c.result, raw: c.pos, sent: c.sent, from: 'comfy' };
+                    pcStoreImage(shot.dataUrl, 'comfy_' + Date.now()).then(r => pcRecordImage({ ...shot, url: r.url })).catch(e => console.warn('[智库] 历史生图没存上', e));
+                } catch (e) { toastr.error(e.message, 'ComfyUI 生成失败', { timeOut: 10000 }); }
+                finally { c.busy = false; render(); }
+                break;
+            }
+            case 'cfyinsert': await E.insertIntoLastMessage(loadCfy().result); toastr.success('已插到聊天最后一楼', '智库'); break;
+            case 'cfyshare': {
+                if (!L.serverBase()) { toastr.warning('先到「设置」里填共享服务器地址', '共享'); break; }
+                const c = loadCfy(); openSharedUpload({ artistString: c.pos, negative: c.neg, image: c.result }); break;
+            }
+            case 'cfyclear': loadCfy().result = ''; ui.cfy.sent = null; render(); break;
             case 'insertresult':
                 await E.insertIntoLastMessage(ui.studio.result);
                 toastr.success('已插到聊天最后一楼', '智库');
@@ -8141,6 +8395,7 @@ function onInput(ev) {
         setPath(ui, el.dataset.bind, el.value);
         if (el.dataset.bind === 'studio.pos') { const w = root.querySelector('#pc-pos-ban'); if (w) w.innerHTML = banWarn(getData(), el.value) + lintHtml(el.value); }
         if (el.dataset.bind === 'batch.text') { const w = root.querySelector('#pc-batch-ban'); if (w) w.innerHTML = batchBanWarn(getData(), el.value); }
+        if (String(el.dataset.bind).startsWith('cfy.')) { clearTimeout(onInput.cf); onInput.cf = setTimeout(saveCfy, 600); }
         if (['studio.pos', 'studio.neg', 'studio.scene', 'studio.sceneEn'].includes(el.dataset.bind)) { updateStudioPreview(); clearTimeout(onInput.ss); onInput.ss = setTimeout(saveStudio, 600); }
         if (el.dataset.bind === 'studio.scene') { const box = root.querySelector('#pc-scene-ai'); if (box) box.hidden = !sceneZh(); const s2 = root.querySelector('#pc-scene-state'); if (s2) s2.textContent = sceneStateText(); }
         if (el.dataset.bind === 'search') { clearTimeout(onInput.t); onInput.t = setTimeout(() => { render(); const i = root.querySelector('[data-bind="search"]'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }, 250); }
@@ -8171,6 +8426,20 @@ function onInput(ev) {
 async function onChangeEv(ev) {
     const el = ev.target;
     const d = getData();
+    if (el.dataset?.actChange === 'cfywf') {
+        const v = el.value;
+        if (v.startsWith('file:')) return;
+        try { await N.comfyUseWorkflow(v ? 'cu' : '', v.slice(3)); toastr.success(v ? '工作流读好了' : '换回内置工作流', 'ComfyUI', { timeOut: 1800 }); }
+        catch (e) { toastr.error(e.message, 'ComfyUI 工作流', { timeOut: 10000 }); }
+        render(); return;
+    }
+    if (el.dataset?.cfyfile !== undefined) {
+        const f = el.files?.[0]; if (!f) return;
+        try { let j; try { j = JSON.parse(await f.text()); } catch { throw new Error('这个文件不是 JSON'); } await N.comfyUseWorkflow('file', f.name, j); toastr.success('工作流读好了：' + f.name, 'ComfyUI', { timeOut: 1800 }); }
+        catch (e) { toastr.error(e.message, 'ComfyUI 工作流', { timeOut: 10000 }); }
+        render(); return;
+    }
+    if (el.dataset?.st === 'comfyUrl') { N.settings().comfyUrl = el.value.trim(); N.save(); comfyConnectNow(true); render(); return; }
     if (el.matches?.('[data-aipst]')) { T.aiCfg().active = 'tavern:' + el.value; commit(); render(); return; }
     if (el.matches?.('[data-aipapi]')) { const f = (T.aiCfg().fn[el.dataset.k] ||= { extra: [] }); if (f.api !== el.value) { f.model = ''; if (ui.aipModels) delete ui.aipModels[el.dataset.k]; (ui.aipModelSeq ||= {})[el.dataset.k] = (ui.aipModelSeq[el.dataset.k] || 0) + 1; if (ui.aipModelsBusy === el.dataset.k) ui.aipModelsBusy = ''; } f.api = el.value; commit(); render(); return; }
     if (el.matches?.('[data-aipmodel]')) { const f = (T.aiCfg().fn[el.dataset.k] ||= { extra: [] }); f.model = el.value.trim(); commit(); return; }
