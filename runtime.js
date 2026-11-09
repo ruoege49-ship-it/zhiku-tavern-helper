@@ -1630,20 +1630,21 @@ const stToastr = P.toastr || window.toastr;
 /** 智库开着的时候，提示显示在智库自己的界面里（不跑到酒馆那边、不被美化改样子）；关着就交给酒馆 */
 const zkPanelOpen = () => !!DOC.querySelector('.pc-overlay.open, .pc-comic-book, .pc-modal-backdrop, .pc-viewer');
 function zkToast(type, msg, title, opt = {}) {
-    if (!zkPanelOpen() && stToastr) return stToastr[type](msg, title, opt);
+    if (!zkPanelOpen() && typeof stToastr?.[type] === 'function') return stToastr[type](msg, title, opt);
+    opt ||= {};
     let host = DOC.getElementById('pc-toasts');
     if (!host) {
         host = DOC.createElement('div'); host.id = 'pc-toasts';
-        host.setAttribute('style', 'position:fixed;left:0;right:0;top:max(14px,env(safe-area-inset-top));z-index:2147483646;display:flex;flex-direction:column;align-items:center;gap:8px;padding:0 12px;pointer-events:none');
+        host.setAttribute('style', 'position:fixed;left:0;right:0;top:max(14px,env(safe-area-inset-top));z-index:2147483646;display:flex;flex-direction:column;align-items:center;gap:8px;padding:0 12px;box-sizing:border-box;max-height:calc(100dvh - 28px);overflow-y:auto;scrollbar-width:none;pointer-events:none');
         pcMount(host);
     }
     const color = { success: '#5f7d5a', info: '#7ea29c', warning: '#c98a3e', error: '#9b4f45' }[type] || '#7ea29c';
     const el = DOC.createElement('div');
     el.setAttribute('role', type === 'error' ? 'alert' : 'status');
-    el.setAttribute('style', 'pointer-events:auto;display:flex;gap:10px;align-items:flex-start;max-width:min(520px,100%);padding:10px 14px;border-radius:14px;background:#f4efe4;color:#3a2a22;border:1.5px solid #3a2a22;box-shadow:0 4px 0 rgba(26,22,18,.22);font:14px/1.55 "Noto Serif SC","Songti SC",serif;word-break:break-word;cursor:pointer;transition:opacity .2s,transform .2s;opacity:0;transform:translateY(-6px)');
+    el.setAttribute('style', 'pointer-events:auto;box-sizing:border-box;flex-shrink:0;display:flex;gap:10px;align-items:flex-start;max-width:min(520px,100%);padding:10px 14px;border-radius:14px;background:#f4efe4;color:#3a2a22;border:1.5px solid #3a2a22;box-shadow:0 4px 0 rgba(26,22,18,.22);font:14px/1.55 "Noto Serif SC","Songti SC",serif;word-break:break-word;cursor:pointer;transition:opacity .2s,transform .2s;opacity:0;transform:translateY(-6px)');
     const dot = DOC.createElement('i');
     dot.setAttribute('style', `flex-shrink:0;width:12px;height:12px;margin-top:5px;border-radius:50%;background:${color}`);
-    const body = DOC.createElement('div');
+    const body = DOC.createElement('div'); body.style.minWidth = '0';
     if (title) { const b = DOC.createElement('b'); b.textContent = title; b.setAttribute('style', `display:block;font-size:12px;letter-spacing:.1em;color:${color}`); body.appendChild(b); }
     const t = DOC.createElement('div'); t.textContent = String(msg ?? ''); body.appendChild(t);
     el.append(dot, body);
@@ -1656,7 +1657,7 @@ function zkToast(type, msg, title, opt = {}) {
     if (ms > 0) setTimeout(close, ms);
     return el;
 }
-const toastr = { success: (...a) => zkToast('success', ...a), info: (...a) => zkToast('info', ...a), warning: (...a) => zkToast('warning', ...a), error: (...a) => zkToast('error', ...a), clear: (...a) => stToastr?.clear?.(...a) };
+const toastr = { success: (...a) => zkToast('success', ...a), info: (...a) => zkToast('info', ...a), warning: (...a) => zkToast('warning', ...a), error: (...a) => zkToast('error', ...a), clear: (el, ...a) => { const host = DOC.getElementById('pc-toasts'); if (el?.nodeType && host?.contains(el)) { el.remove(); return; } if (!el) host?.remove(); return stToastr?.clear?.(el, ...a); } };
 const SillyTavern = P.SillyTavern || window.SillyTavern;
 globalThis.__pcFetch = (...a) => P.fetch(...a);
 const __ctx = () => SillyTavern.getContext();
@@ -2996,7 +2997,7 @@ async function vibeRefs() {
     if (!g?.vibes?.length) return null;
     if (!N.vibeSupported()) {
         const m = N.settings().novelaimode;
-        if (String(m).includes('diffusion-5') && !globalThis.__zkV5VibeTold) { globalThis.__zkV5VibeTold = 1; toastr.info('NAI 5 还不支持氛围，用 5 的时候不带氛围出图（也不会扣点）。想带氛围请换回 4.5。', '氛围', { timeOut: 6000 }); }
+        if (String(m).includes('diffusion-5') && !globalThis.__zkV5VibeTold) { globalThis.__zkV5VibeTold = 1; toastr.info('NAI 5 还不支持氛围，用 5 的时候不带氛围出图（不会产生氛围编码费用）。想带氛围请换回 4.5。', '氛围', { timeOut: 6000 }); }
         return null;
     }
     const key = N.encKey();
@@ -6731,9 +6732,9 @@ function viewVibe(d) {
       <div class="pc-chips wrap pc-mt-s"><button class="pc-pill dashed tiny" data-act="viberename" data-id="${show.id}">改名</button><button class="pc-pill dashed tiny danger" data-act="vibegdel" data-id="${show.id}">删除这一组</button></div>
       ${show.vibes.map((v, i) => `<div class="pc-vrow">
         <div class="pc-vthumb">${v.path || v.thumb ? `<img src="${esc(v.path ? '/' + v.path : v.thumb)}" alt="">` : ''}</div>
-        <div class="pc-grow"><div class="pc-row-between"><small class="pc-dim">${esc(v.name || '参考图 ' + (i + 1))}<br><span style="font-size:10px">${(() => { const ks = Object.keys(v.encodings || {}).filter(k => v.encodings[k]); const nm = { 'v4-5full': '4.5 Full', 'v4-5curated': '4.5 Curated', v4full: '4 Full', v4curated: '4 Curated' }; return ks.length ? '已编码：' + ks.map(k => nm[k] || k).join('、') : (v.path ? '还没编码（第一次用时扣约 2 点 Anlas）' : '官网文件，没有原图'); })()}</span></small><button class="pc-x" data-act="vibedel" data-g="${show.id}" data-i="${i}" aria-label="删掉">×</button></div>
+        <div class="pc-grow"><div class="pc-row-between"><small class="pc-dim">${esc(v.name || '参考图 ' + (i + 1))}<br><span style="font-size:10px">${(() => { const ks = Object.keys(v.encodings || {}).filter(k => v.encodings[k]); const nm = { 'v4-5full': '4.5 Full', 'v4-5curated': '4.5 Curated', v4full: '4 Full', v4curated: '4 Curated' }; return ks.length ? '已编码：' + ks.map(k => esc(nm[k] || k)).join('、') : (v.path ? '还没编码（第一次用时扣约 2 点 Anlas）' : '官网文件，没有原图'); })()}</span></small><button class="pc-x" data-act="vibedel" data-g="${show.id}" data-i="${i}" aria-label="删掉">×</button></div>
           <label class="pc-slider"><span>强度</span><input type="range" min="0" max="1" step="0.01" value="${Number(v.strength ?? 0.6)}" data-vibestr="${show.id}:${i}"><b>${Number(v.strength ?? 0.6).toFixed(2)}</b></label></div></div>`).join('') || '<div class="pc-dim small pc-mt-s">点「＋ 加图」放几张参考图。也可以放 NovelAI 官网导出的 .naiv4vibe 文件。</div>'}
-      <div class="pc-hint">强度一般 0.3 到 0.6。太大会盖过提示词。第一次用某张图时 NovelAI 会扣一点点数来编码，之后就不扣了。</div>
+      <div class="pc-hint">强度一般 0.3 到 0.6。太大会盖过提示词。首次为当前模型编码会收取编码费；复用已保存的编码不再收取编码费。</div>
     </section>
     <details class="pc-fold"><summary><b>更多</b><i>强度归一化 ${show.normalize ? '开' : '关'}</i></summary><div class="pc-fold-in">
       <label class="pc-switch"><input type="checkbox" data-vibenorm="${show.id}" ${show.normalize ? 'checked' : ''}><span></span>强度归一化（Normalize，只对 4.5 有用）</label></div></details>` : ''}
@@ -9474,7 +9475,7 @@ return {
     start: () => __mod_script_entry.start(),
     async stop() {
         try { await __mod_script_entry.stop(); }
-        finally { for (const id of timers) window.clearTimeout(id); timers.clear(); stopped = true; }
+        finally { DOC.getElementById('pc-toasts')?.remove(); for (const id of timers) window.clearTimeout(id); timers.clear(); stopped = true; }
     }
 };
 
