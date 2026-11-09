@@ -3745,6 +3745,26 @@ function apiFor(fn) {
     const model = String(f.model || '').trim() || (p.model || '').trim();
     return { url: (p.url || '').trim().replace(/\/+$/, ''), key: (p.key || '').trim(), model, bypass: !!p.bypass, from: p.name + (f.model ? ' · ' + f.model : '') };
 }
+let zkCleanFetch = null;
+/** 从一个隐藏的空白 iframe 借 fetch：不经过别的插件对 window.fetch 的改写 */
+function zkFetch(...args) {
+    try {
+        if (!zkCleanFetch) {
+            const f = DOC.createElement('iframe');
+            f.setAttribute('aria-hidden', 'true'); f.tabIndex = -1;
+            f.style.cssText = 'display:none!important';
+            (DOC.body || DOC.documentElement).appendChild(f);
+            const w = f.contentWindow;
+            if (!w?.fetch) throw new Error('no fetch');
+            zkCleanFetch = w.fetch.bind(w);
+        }
+        return zkCleanFetch(...args);
+    } catch { return fetch(...args); }
+}
+async function readBody(res) {
+    try { return await res.text(); }
+    catch (e) { throw new Error('AI 的回复被别的插件或脚本抢先读走了（' + (e.message || e) + '）。多半是某个改写了网络请求的扩展或酒馆助手脚本，先关掉它们试试'); }
+}
 async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {
     const api = apiFor(fn);
     const messages = await aiMessages(fn, system, user);
@@ -3761,13 +3781,13 @@ async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {
     if (!res && !api.model) throw new Error('单独填的 AI 没选模型');
     if (res) { /* 上面已经照预设发给酒馆了 */ }
     else if (api.bypass) {
-        res = await fetch(`${api.url}/chat/completions`, {
+        res = await zkFetch(`${api.url}/chat/completions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...(api.key ? { Authorization: `Bearer ${api.key}` } : {}) },
             body: JSON.stringify({ model: api.model, messages, temperature: 0.3, stream: false, max_tokens: maxTokens }),
         });
     } else {
-        res = await fetch('/api/backends/chat-completions/generate', {
+        res = await zkFetch('/api/backends/chat-completions/generate', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
@@ -3778,7 +3798,7 @@ async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {
             }),
         });
     }
-    const raw = await res.text();
+    const raw = await readBody(res);
     if (!res.ok) throw new Error(`AI 请求失败（${res.status}）：${raw.slice(0, 160)}`);
     let json;
     try { json = JSON.parse(raw); } catch { throw new Error('AI 返回的不是正常格式：' + raw.slice(0, 120)); }
@@ -4004,7 +4024,7 @@ async function askVision(system, text, imageDataUrl, { maxTokens = 800, fn = '' 
     } else {
         if (!api.url || !api.model) throw new Error('这个 AI 接口没填地址或模型');
         if (api.bypass) {
-            const r = await fetch(`${api.url}/chat/completions`, {
+            const r = await zkFetch(`${api.url}/chat/completions`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...(api.key ? { Authorization: `Bearer ${api.key}` } : {}) },
                 body: JSON.stringify({ model: api.model, messages, temperature: 0.3, stream: false, max_tokens: maxTokens }),
@@ -4017,7 +4037,7 @@ async function askVision(system, text, imageDataUrl, { maxTokens = 800, fn = '' 
             model: api.model, messages, temperature: 0.3, stream: false, max_tokens: maxTokens,
         };
     }
-    const r = await fetch('/api/backends/chat-completions/generate', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });
+    const r = await zkFetch('/api/backends/chat-completions/generate', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });
     return readChat(r);
 }
 async function readChat(r) {

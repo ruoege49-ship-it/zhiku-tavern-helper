@@ -2043,6 +2043,51 @@ patch(`        <div class="pc-label">负面</div><p class="pc-quote small mono">
 // 聊天插图可以不分人物：人物描写合并进正面（开关），canSplit 的改动在后面
 patch(`      <label class="pc-field"><span>聊天生图额外正面词 · 每张都加在场景后面</span>`,`      \${sw('chatNoSplit', '聊天插图不分人物', '打开：几个人的描写都合并进正面（和生图页一样），画师串和质量词作用到所有内容，画风更稳；代价是人物特征可能串（比如发色互换）。关闭：用 NovelAI 4.5 的分人物提示词，人物更不容易混，但画风可能变弱。')}
       <label class="pc-field"><span>聊天生图额外正面词 · 每张都加在场景后面</span>`);
+// AI 请求用「干净的」fetch：别的插件改写了 window.fetch 并抢先读走回复时，会报 body stream already read
+patch(`async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {`,`let zkCleanFetch = null;
+/** 从一个隐藏的空白 iframe 借 fetch：不经过别的插件对 window.fetch 的改写 */
+function zkFetch(...args) {
+    try {
+        if (!zkCleanFetch) {
+            const f = DOC.createElement('iframe');
+            f.setAttribute('aria-hidden', 'true'); f.tabIndex = -1;
+            f.style.cssText = 'display:none!important';
+            (DOC.body || DOC.documentElement).appendChild(f);
+            const w = f.contentWindow;
+            if (!w?.fetch) throw new Error('no fetch');
+            zkCleanFetch = w.fetch.bind(w);
+        }
+        return zkCleanFetch(...args);
+    } catch { return fetch(...args); }
+}
+async function readBody(res) {
+    try { return await res.text(); }
+    catch (e) { throw new Error('AI 的回复被别的插件或脚本抢先读走了（' + (e.message || e) + '）。多半是某个改写了网络请求的扩展或酒馆助手脚本，先关掉它们试试'); }
+}
+async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {`);
+patch(`        res = await fetch(\`\${api.url}/chat/completions\`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(api.key ? { Authorization: \`Bearer \${api.key}\` } : {}) },
+            body: JSON.stringify({ model: api.model, messages, temperature: 0.3, stream: false, max_tokens: maxTokens }),`,`        res = await zkFetch(\`\${api.url}/chat/completions\`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(api.key ? { Authorization: \`Bearer \${api.key}\` } : {}) },
+            body: JSON.stringify({ model: api.model, messages, temperature: 0.3, stream: false, max_tokens: maxTokens }),`);
+patch(`        res = await fetch('/api/backends/chat-completions/generate', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                chat_completion_source: 'custom',
+                custom_url: api.url,`,`        res = await zkFetch('/api/backends/chat-completions/generate', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                chat_completion_source: 'custom',
+                custom_url: api.url,`);
+patch(`    const raw = await res.text();
+    if (!res.ok) throw new Error(\`AI 请求失败（\${res.status}）：\${raw.slice(0, 160)}\`);`,`    const raw = await readBody(res);
+    if (!res.ok) throw new Error(\`AI 请求失败（\${res.status}）：\${raw.slice(0, 160)}\`);`);
+patch(`            const r = await fetch(\`\${api.url}/chat/completions\`, {`,`            const r = await zkFetch(\`\${api.url}/chat/completions\`, {`);
+patch(`    const r = await fetch('/api/backends/chat-completions/generate', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });`,`    const r = await zkFetch('/api/backends/chat-completions/generate', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });`);
 // 0.8.36：设置里单独的 AI 预设、下载和水印、先存后改名、一键上传到共享
 patch(`    const ai = setFold('ai', '翻译和 AI',`,`    const ai0 = setFold('ai', '翻译和 AI',`);
 patch(`    const tpl = setFold('tpl', '例图提示词',`,`    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), \`
