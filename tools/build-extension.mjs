@@ -2235,6 +2235,130 @@ patch(`            case 'lobbyaud':`,`            case 'outedittoggle': ui.outEd
 patch(`.pc-outsteps { display: flex;`,`.pc-outfold { display: block; width: 100%; margin-top: 10px; padding: 10px 12px; border-radius: 12px; border: 1.5px dashed var(--pc-dash); background: transparent; color: var(--pc-ink); text-align: left; line-height: 1.6; cursor: pointer; font: inherit; }
 .pc-outfold em { display: block; font-style: normal; font-size: 12px; color: var(--pc-ink-soft); margin-top: 4px; }
 .pc-outsteps { display: flex;`);
+// 衣柜：一套衣服给几个人穿不再复制出几张，衣柜里只显示一张，改了大家一起变
+patch(`function saveChar(c) {
+    const d = getData();
+    d.characters[c.key] = c;`,`function saveChar(c) {
+    const d = getData();
+    d.characters[c.key] = c;
+    try { syncOutfitsFrom(c); } catch (e) { console.warn('[智库] 同步衣服', e); }`);
+patch(`/** 给角色穿：衣柜里的那件挪过去；已经在别人身上的就复制一份 */`,`// 同一套衣服给好几个人穿：每人身上各有一份（生图照旧按人读），用 sid 连起来，改一份其余跟着改；衣柜里只显示一张
+const outSig = o => String(o.name || '') + '|' + (o.tags || []).map(t => String(t.en || '').toLowerCase()).sort().join(',');
+/** 旧数据里名字和标签都一样的几份，认成同一套 */
+function linkSameOutfits() {
+    const d = getData(), rep = new Map();
+    let changed = false;
+    for (const c of Object.values(d.characters)) for (const o of c.outfits || []) {
+        if (!(o.tags || []).length) continue;
+        const k = outSig(o), r = rep.get(k);
+        if (!r) { rep.set(k, o); continue; }
+        if (!r.sid) { r.sid = r.id; changed = true; }
+        if (o.sid !== r.sid && !o.sid) { o.sid = r.sid; changed = true; }
+    }
+    if (changed) commit({ silent: true });
+}
+/** 这套衣服的所有份：[{ o, owner }] */
+function outfitHolders(o) {
+    if (!o?.sid) return wardrobe().filter(x => x.o === o);
+    return wardrobe().filter(x => x.owner && x.o.sid === o.sid);
+}
+/** 衣柜按「同一套」分组：[{ o, owner, holders }] */
+function wardrobeGroups() {
+    linkSameOutfits();
+    const groups = new Map(), out = [];
+    for (const x of wardrobe()) {
+        const k = x.owner && x.o.sid ? 'sid:' + x.o.sid : 'one:' + (x.owner?.key || '') + ':' + x.o.id;
+        let g = groups.get(k);
+        if (!g) { g = { o: x.o, owner: x.owner, holders: [] }; groups.set(k, g); out.push(g); }
+        g.holders.push(x);
+    }
+    return out;
+}
+/** 改了某人身上的那份：同一套的其他份跟着改 */
+function syncOutfitsFrom(c) {
+    const d = getData();
+    for (const o of c.outfits || []) {
+        if (!o.sid) continue;
+        for (const other of Object.values(d.characters)) {
+            if (other === c) continue;
+            for (const x of other.outfits || []) if (x.sid === o.sid && x !== o && (x.name !== o.name || x.image !== o.image || JSON.stringify(x.tags) !== JSON.stringify(o.tags))) {
+                x.name = o.name; x.image = o.image; x.tags = structuredClone(o.tags);
+            }
+        }
+    }
+}
+/** 从某人身上拿掉：别人还穿着就只删他那份；没人穿了就放回衣柜 */
+function takeOffOutfit(ownerKey, id) {
+    const d = getData();
+    const hit = findOutfit(ownerKey, id);
+    if (!hit?.owner) return null;
+    const rest = outfitHolders(hit.o).filter(x => x.owner.key !== ownerKey);
+    const c = hit.owner;
+    c.outfits = c.outfits.filter(x => x !== hit.o);
+    if (c.outfitId === id) c.outfitId = c.outfits[0]?.id || '';
+    if (!rest.length) { const o = { ...hit.o }; delete o.sid; d.outfits ||= {}; d.outfits[o.id] = o; }
+    commit({ silent: true });
+    return rest[0] || { o: d.outfits[id], owner: null };
+}
+/** 删掉整套：所有人身上的都删 */
+function deleteOutfitGroup(ownerKey, id) {
+    const hit = findOutfit(ownerKey, id);
+    if (!hit) return;
+    const all = hit.owner ? outfitHolders(hit.o) : [hit];
+    for (const x of all) deleteOutfit(x.owner?.key || '', x.o.id);
+}
+/** 给角色穿：衣柜里的那件挪过去；已经在别人身上的，给他也挂一份（和原来那份连在一起） */`);
+patch(`    if (!hit.owner) delete d.outfits[id];
+    else if (hit.owner.key !== to.key) o = { ...structuredClone(o), id: M.uid('o_') };`,`    if (!hit.owner) delete d.outfits[id];
+    else if (hit.owner.key !== to.key) {
+        hit.o.sid ||= hit.o.id;
+        const same = to.outfits.find(x => x.sid === hit.o.sid);
+        if (same) { if (wear) { to.outfitId = same.id; to.outfitMode = 'fixed'; } saveChar(to); saveChar(hit.owner); return same; }
+        o = { ...structuredClone(o), id: M.uid('o_'), sid: hit.o.sid };
+        saveChar(hit.owner);
+    }`);
+patch(`return { studioCastPrompt,`,`return { studioCastPrompt, wardrobeGroups, outfitHolders, takeOffOutfit, deleteOutfitGroup,`);
+patch(`    const all = C.wardrobe();
+    const owners = [...new Map(all.filter(x => x.owner).map(x => [x.owner.key, x.owner])).values()];
+    const q = ui.wardSearch.trim().toLowerCase();
+    const list = all.filter(x => (ui.wardFilter === 'all' || (ui.wardFilter === 'none' ? !x.owner : x.owner?.key === ui.wardFilter))`,`    const all = C.wardrobeGroups();
+    const owners = [...new Map(all.flatMap(g => g.holders).filter(x => x.owner).map(x => [x.owner.key, x.owner])).values()];
+    const q = ui.wardSearch.trim().toLowerCase();
+    const list = all.filter(x => (ui.wardFilter === 'all' || (ui.wardFilter === 'none' ? !x.owner : x.holders.some(h => h.owner?.key === ui.wardFilter)))`);
+patch(`    <div class="pc-grid2 pc-mt-s">\${list.map(({ o, owner }) => \`<article`,`    <div class="pc-grid2 pc-mt-s">\${list.map(({ o, owner, holders }) => \`<article`);
+patch(`<span class="pc-state \${owner ? '' : 'todo'}">\${owner ? '穿在：' + esc(owner.name) : '还没给谁穿'}</span></div></article>\`).join('')
+        || empty('衣柜是空的'`,`<span class="pc-state \${owner ? '' : 'todo'}">\${owner ? '穿在：' + esc(holders.map(h => h.owner.name).join('、')) : '还没给谁穿'}</span></div></article>\`).join('')
+        || empty('衣柜是空的'`);
+patch(`    const people = [...new Map([...cast, ...Object.values(d.characters)].map(c => [c.key, c])).values()];`,`    const people = [...new Map([...cast, ...Object.values(d.characters)].map(c => [c.key, c])).values()];
+    const holders = !u.draft && owner ? C.outfitHolders(o).map(x => x.owner) : [];`);
+patch(`      <b>\${owner ? \`穿在：\${esc(owner.name)}\` : u.draft ? '存到哪里' : '给谁穿'}</b>`,`      <b>\${u.draft ? '存到哪里' : holders.length ? '谁在穿' : '给谁穿'}</b>
+      \${holders.length ? \`<div class="pc-chips wrap">\${holders.map(h => \`<button class="pc-pill on" data-act="outtakeoff" data-v="\${esc(h.key)}" title="从\${esc(h.name)}身上拿掉">\${esc(h.name)} ×</button>\`).join('')}</div><div class="pc-dim small">点名字 × 从他身上拿掉（衣柜里还在）。下面点名字再给别人穿，几个人穿的是同一套，改了一起变。</div>\${label('再给谁穿')}\` : ''}`);
+patch(`        \${people.filter(c => c.key !== owner?.key).map(c =>`,`        \${people.filter(c => c.key !== owner?.key && !holders.some(h => h.key === c.key)).map(c =>`);
+patch(`      \${!u.draft ? '<div class="pc-dim small">点名字：复制一份给他，并设为他固定穿的衣服。</div>' : ''}`,`      \${!u.draft && !holders.length ? '<div class="pc-dim small">点名字：给他穿，并设为他固定穿的衣服。</div>' : ''}`);
+patch(`<button class="pc-linkdanger" style="margin:0 0 0 12px" data-act="outdel">删掉这套</button>`,`<button class="pc-linkdanger" style="margin:0 0 0 12px" data-act="outdel">\${holders.length > 1 ? '删掉这套（所有人身上的都删）' : '删掉这套'}</button>`);
+patch(`        case 'outdel': {
+            const o = curOutfit();
+            if (!o || !(await confirmBox(\`删掉「\${o.name}」？\`))) return true;
+            C.deleteOutfit(ui.outfit.owner, ui.outfit.id);`,`        case 'outtakeoff': {
+            const key = el.dataset.v, hit = C.findOutfit(ui.outfit.owner, ui.outfit.id);
+            const mine = hit && C.outfitHolders(hit.o).find(x => x.owner.key === key);
+            if (!mine) return true;
+            const next = C.takeOffOutfit(key, mine.o.id);
+            toastr.info(\`已从\${C.getChar(key)?.name || ''}身上拿掉\`, '衣柜', { timeOut: 1800 });
+            if (ui.outfit.owner === key && next) ui.outfit = { owner: next.owner?.key || '', id: next.o.id };
+            render(); return true;
+        }
+        case 'outdel': {
+            const o = curOutfit();
+            const n = ui.outfit.owner && o ? C.outfitHolders(o).length : 1;
+            if (!o || !(await confirmBox(n > 1 ? \`删掉「\${o.name}」？\${n} 个人身上的都会删掉。只想从某个人身上拿掉，点他名字旁边的 ×。\` : \`删掉「\${o.name}」？\`))) return true;
+            C.deleteOutfitGroup(ui.outfit.owner, ui.outfit.id);`);
+patch(`            const o = C.currentOutfit(c);
+            if (!o || !(await confirmBox(\`删掉「\${o.name}」这套衣服？\`))) return true;
+            c.outfits = c.outfits.filter(x => x !== o); c.outfitId = c.outfits[0]?.id || ''; save();`,`            const o = C.currentOutfit(c);
+            const others = o ? C.outfitHolders(o).filter(x => x.owner.key !== c.key) : [];
+            if (!o || !(await confirmBox(others.length ? \`把「\${o.name}」从\${c.name}身上拿掉？\${others.map(x => x.owner.name).join('、')}还穿着这套，不受影响。\` : \`删掉「\${o.name}」这套衣服？\`))) return true;
+            c.outfits = c.outfits.filter(x => x !== o); c.outfitId = c.outfits[0]?.id || ''; save();`);
 // 0.8.36：设置里单独的 AI 预设、下载和水印、先存后改名、一键上传到共享
 patch(`    const ai = setFold('ai', '翻译和 AI',`,`    const ai0 = setFold('ai', '翻译和 AI',`);
 patch(`    const tpl = setFold('tpl', '例图提示词',`,`    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), \`
