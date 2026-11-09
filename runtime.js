@@ -188,7 +188,10 @@ function captionsHtml(parsed, esc, size = 's') {
     if (!parsed?.ok || size === 'hide') return '';
     const n = Math.max(1, parsed.panelTexts.length);
     const boxes = parsed.boxes?.length === parsed.panelTexts.length ? parsed.boxes : null;
-    const box = (t, style, cls = '') => `<div class="pc-comic-cap ${cls}" style="${style}">${t.map(capLine).filter(Boolean).map(x => esc(x).replace(/\n+/g, '<br>')).join('<br>')}</div>`;
+    // 字号写在行内并加 !important：聊天楼层里美化常给正文统一设字号，样式表压不住
+    const fs = { xs: 'clamp(5px,1.9cqw,10px)', s: 'clamp(6px,2.5cqw,13px)', m: 'clamp(8px,3.2cqw,16px)', l: 'clamp(10px,4cqw,20px)' }[size] || 'clamp(6px,2.5cqw,13px)';
+    const font = `font-size:${fs} !important;line-height:1.35 !important;font-family:'Noto Serif SC','Songti SC',serif !important;font-weight:${size === 'xs' ? 500 : 600} !important;padding:.15em .6em !important;margin:0 !important;letter-spacing:0 !important;text-indent:0 !important`;
+    const box = (t, style, cls = '') => `<div class="pc-comic-cap ${cls}" style="${style};${font}">${t.map(capLine).filter(Boolean).map(x => esc(x).replace(/\n+/g, '<br>')).join('<br>')}</div>`;
     const out = [];
     if (parsed.pageTexts.length) out.push(box(parsed.pageTexts, 'top:8px', 'top'));
     parsed.panelTexts.forEach((t, i) => {
@@ -198,7 +201,7 @@ function captionsHtml(parsed, esc, size = 's') {
         // 字放在这一格底部、横向居中，宽度不超过这一格；底行让开左侧页码和右侧版本按钮
         out.push(box(t, `left:${((b.x + b.w / 2) * 100).toFixed(2)}%;top:calc(${((b.y + b.h) * 100).toFixed(2)}% - ${bottom ? 40 : 6}px);max-width:calc(${(b.w * 100).toFixed(2)}% - 10px)`));
     });
-    return out.length ? `<div class="pc-comic-caps sz-${size}">${out.join('')}</div>` : '';
+    return out.length ? `<div class="pc-comic-caps sz-${size}" style="position:absolute !important;inset:0 !important;container-type:inline-size !important;pointer-events:none;margin:0 !important;padding:0 !important">${out.join('')}</div>` : '';
 }
 /** 存下的对白没有分格位置（旧版本）时，从这一页的提示词里补上 */
 function captionSource(v, inner) {
