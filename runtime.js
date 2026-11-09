@@ -3745,25 +3745,48 @@ function apiFor(fn) {
     const model = String(f.model || '').trim() || (p.model || '').trim();
     return { url: (p.url || '').trim().replace(/\/+$/, ''), key: (p.key || '').trim(), model, bypass: !!p.bypass, from: p.name + (f.model ? ' · ' + f.model : '') };
 }
-let zkCleanFetch = null;
-/** 从一个隐藏的空白 iframe 借 fetch：不经过别的插件对 window.fetch 的改写 */
+let zkCleanFetch = null, zkFetchFrame = null, zkFetchStopped = false;
+/** 从隐藏的同源空白 iframe 借 fetch，隔离父窗口的 fetch 改写。 */
+function stopFetch() {
+    zkFetchStopped = true;
+    zkCleanFetch = null;
+    zkFetchFrame?.remove();
+    zkFetchFrame = null;
+}
 function zkFetch(...args) {
-    try {
-        if (!zkCleanFetch) {
-            const f = DOC.createElement('iframe');
-            f.setAttribute('aria-hidden', 'true'); f.tabIndex = -1;
-            f.style.cssText = 'display:none!important';
-            (DOC.body || DOC.documentElement).appendChild(f);
-            const w = f.contentWindow;
+    if (zkFetchStopped) throw new Error('智库已关闭');
+    if (zkFetchFrame && !zkFetchFrame.isConnected) {
+        zkFetchFrame = null;
+        zkCleanFetch = null;
+    }
+    if (!zkCleanFetch) {
+        let frame;
+        try {
+            frame = DOC.createElement('iframe');
+            frame.setAttribute('aria-hidden', 'true'); frame.tabIndex = -1;
+            frame.style.cssText = 'display:none!important';
+            (DOC.body || DOC.documentElement).appendChild(frame);
+            const w = frame.contentWindow;
             if (!w?.fetch) throw new Error('no fetch');
             zkCleanFetch = w.fetch.bind(w);
+            zkFetchFrame = frame;
+        } catch {
+            frame?.remove();
         }
-        return zkCleanFetch(...args);
-    } catch { return fetch(...args); }
+    }
+    // 只在隔离通道创建失败时退回；请求本身失败不能自动重发。
+    return (zkCleanFetch || fetch)(...args);
 }
 async function readBody(res) {
+    const unavailable = res.bodyUsed || res.body?.locked;
     try { return await res.text(); }
-    catch (e) { throw new Error('AI 的回复被别的插件或脚本抢先读走了（' + (e.message || e) + '）。多半是某个改写了网络请求的扩展或酒馆助手脚本，先关掉它们试试'); }
+    catch (e) {
+        if (e?.name === 'AbortError') throw e;
+        if (unavailable || /body.*(already.*(read|used)|unusable|locked)|body stream already read/i.test(String(e?.message || e))) {
+            throw new Error('AI 回复正文已被读取或锁定，可能有扩展或脚本提前读取了回复：' + (e?.message || e), { cause: e });
+        }
+        throw e;
+    }
 }
 async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {
     const api = apiFor(fn);
@@ -4041,7 +4064,7 @@ async function askVision(system, text, imageDataUrl, { maxTokens = 800, fn = '' 
     return readChat(r);
 }
 async function readChat(r) {
-    const raw = await r.text();
+    const raw = await readBody(r);
     if (!r.ok) throw new Error(`AI 请求失败（${r.status}）：${raw.slice(0, 160)}。如果这个模型不能看图，到设置 → 翻译和 AI 换一个`);
     let json;
     try { json = JSON.parse(raw); } catch { throw new Error('AI 返回的不是正常格式：' + raw.slice(0, 120)); }
@@ -4113,7 +4136,7 @@ ${PAIRS}
     if (!pose.length && !composition.length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
     return { pose, composition };
 }
-return { AI_FNS, apiFor, aiSeen, aiCfg, splitFormat, stToEntries, tavernPresets, entriesFor, currentTavernPreset, imagePose, imageToPrompt, zhForTags, extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
+return { AI_FNS, stopFetch, apiFor, aiSeen, aiCfg, splitFormat, stToEntries, tavernPresets, entriesFor, currentTavernPreset, imagePose, imageToPrompt, zhForTags, extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
 })();
 
 // ───── chars.js ─────
@@ -9988,7 +10011,7 @@ return {
     start: () => __mod_script_entry.start(),
     async stop() {
         try { await __mod_script_entry.stop(); }
-        finally { globalThis.__zhikuInputCleanup?.(); delete globalThis.__zhikuInputCleanup; DOC.getElementById('pc-comfy-css')?.remove(); DOC.getElementById('pc-toasts')?.remove(); for (const id of timers) window.clearTimeout(id); timers.clear(); stopped = true; }
+        finally { globalThis.__zhikuInputCleanup?.(); delete globalThis.__zhikuInputCleanup; DOC.getElementById('pc-comfy-css')?.remove(); DOC.getElementById('pc-toasts')?.remove(); for (const id of timers) window.clearTimeout(id); timers.clear(); stopped = true; __mod_translate.stopFetch(); }
     }
 };
 
