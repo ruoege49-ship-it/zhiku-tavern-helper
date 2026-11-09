@@ -1,3 +1,4 @@
+import {applySharingWardrobeCompatibility} from './sharing-wardrobe-compat.mjs';
 import {applyComfyCompatibility} from './comfy-compat.mjs';
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
@@ -2113,6 +2114,252 @@ patch(`            const r = await fetch(\`\${api.url}/chat/completions\`, {`,` 
 patch(`    const r = await fetch('/api/backends/chat-completions/generate', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });`,`    const r = await zkFetch('/api/backends/chat-completions/generate', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });`);
 patch('async function readChat(r) {\n    const raw = await r.text();', 'async function readChat(r) {\n    const raw = await readBody(r);');
 patch('timers.clear(); stopped = true; }', 'timers.clear(); stopped = true; __mod_translate.stopFetch(); }');
+// 角色：从聊天正文读出人物和外貌（AI 回复里出现、卡里没写的人也能加进来）
+patch(`async function extractCast(cardName, description) {`,`async function extractCastFromChat(cardName, chatText) {
+    const sys = \`你从聊天正文里找出所有出场过、并且写到了外貌的角色（主角、配角、路人都算，{{user}} / 玩家本人不要），每人挑画图用的外貌标签。
+外貌只挑不会变的：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身、角尾巴翅膀等。最近一次写到的衣服另外放。正文没写到的不要编；同一个人前后写法不同时以较新的为准。
+\${PAIRS}
+只输出 JSON：{"people": [{"name": "正文里的名字", "aliases": ["昵称、称呼、别的叫法"], "appearance": [...], "outfit": [...]}]}\`;
+    const j = await askShrinking(sys, limit => \`卡名：\${cardName}\\n聊天正文（从旧到新）：\\n\${String(chatText || '').slice(-limit)}\`, { maxTokens: 8000, fn: 'look' });
+    const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
+    return (Array.isArray(j.people) ? j.people : []).map(p => ({
+        name: String(p?.name || '').trim().slice(0, 30),
+        aliases: (Array.isArray(p?.aliases) ? p.aliases : []).map(a => String(a || '').trim()).filter(Boolean).slice(0, 6),
+        appearance: norm(p?.appearance), outfit: norm(p?.outfit),
+    })).filter(p => p.name && !/^\\{\\{?user\\}?\\}$|^user$/i.test(p.name) && p.appearance.length);
+}
+async function extractCast(cardName, description) {`);
+patch(`return { AI_FNS, apiFor,`,`return { AI_FNS, extractCastFromChat, apiFor,`);
+patch(`        case 'readcast': {
+            const cardAvatar = c.kind === 'side' ? c.card : c.avatar;
+            const main = C.getChar('char:' + cardAvatar);
+            if (!cardAvatar || !main) return true;
+            ui.charBusy = 'cast'; render();
+            try {
+                const desc = await C.descOfFull(main);
+                if (!desc.trim()) { toastr.warning('描述、性格、场景、世界书里都没找到设定', '角色'); return true; }
+                const people = await T.extractCast(main.name, desc);`,`        case 'readchatcast':
+        case 'readcast': {
+            const cardAvatar = c.kind === 'side' ? c.card : c.avatar;
+            const main = C.getChar('char:' + cardAvatar);
+            if (!cardAvatar || !main) return true;
+            const fromChat = act === 'readchatcast';
+            ui.charBusy = fromChat ? 'chatcast' : 'cast'; render();
+            try {
+                let people;
+                if (fromChat) {
+                    const ctx = SillyTavern.getContext();
+                    const msgs = (ctx.chat || []).filter(m => !m.is_system && m.mes).slice(-40);
+                    const text = msgs.map(m => (m.is_user ? '【' + (m.name || '用户') + '】' : '【' + (m.name || main.name) + '】') + String(m.mes).replace(/<[^>]+>/g, ' ').replace(/\\n{3,}/g, '\\n\\n')).join('\\n\\n');
+                    if (!text.trim()) { toastr.warning('这个聊天还没有正文', '角色'); return true; }
+                    people = await T.extractCastFromChat(main.name, text);
+                    if (!people.length) { toastr.warning('AI 没在最近的正文里找到写了外貌的人', '角色'); return true; }
+                } else {
+                const desc = await C.descOfFull(main);
+                if (!desc.trim()) { toastr.warning('描述、性格、场景、世界书里都没找到设定', '角色'); return true; }
+                people = await T.extractCast(main.name, desc);
+                }`);
+patch(`'读出这张卡里所有人（含世界书）'}</button>\` : ''}`,`'读出这张卡里所有人（含世界书）'}</button><button class="pc-pill dashed tiny pc-mt-s" style="margin-left:6px" data-act="readchatcast" \${busy ? 'disabled' : ''}>\${busy === 'chatcast' ? '<span class="pc-busy">读取中</span>' : '从聊天正文读出人物（最近 40 楼）'}</button>\` : ''}`);
+// 衣柜单套页：深色主题下看得清；新建时写清楚三步
+patch(`.pc-outsec { margin-top: 12px; padding: 12px; border-radius: 14px; background: rgba(255, 255, 255, .45); }`,`.pc-outsec { margin-top: 12px; padding: 12px; border-radius: 14px; background: rgba(255, 255, 255, .45); background: color-mix(in srgb, var(--pc-ink) 7%, transparent); }
+.pc-outsec .pc-dim, .pc-outsec-h small { color: var(--pc-ink-soft) !important; opacity: 1 !important; }
+.pc-dhead .pc-dtitle, .pc-dhead .pc-dtitle:not([type="checkbox"]) { color: var(--pc-ink) !important; -webkit-text-fill-color: var(--pc-ink) !important; }
+.pc-dhead .pc-dtitle::placeholder { color: var(--pc-ink-soft) !important; -webkit-text-fill-color: var(--pc-ink-soft) !important; opacity: 1; }
+.pc-outsteps { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.pc-outsteps span { flex: 1 1 30%; min-width: 92px; padding: 8px 10px; border-radius: 12px; border: 1.5px dashed var(--pc-dash); font-size: 12px; line-height: 1.5; color: var(--pc-ink); }
+.pc-outsteps span.done { border-style: solid; border-color: var(--pc-ink); }
+.pc-outsteps b { display: block; font-size: 11px; letter-spacing: .15em; color: var(--pc-ink-soft); }`);
+patch(`    <section class="pc-card pc-pad pc-mt">
+      <div class="pc-row-between"><b>\${o.tags.length ? \`\${o.tags.length} 件\` : '还没有标签'}</b>`,`    \${u.draft ? \`<div class="pc-outsteps">
+      <span class="\${img || o.tags.length ? 'done' : ''}"><b>第一步</b>点图片右下「换一张」放一张衣服的图，AI 会写成标签；没图就直接在下面打字加</span>
+      <span class="\${o.tags.length ? 'done' : ''}"><b>第二步</b>看看下面的标签：点一下改、× 删掉、↓↑ 在整体和配饰之间挪</span>
+      <span class="\${u.dest ? 'done' : ''}"><b>第三步</b>选「存到哪里」：只进衣柜，或者直接给某个人穿，再点「保存」</span></div>\` : ''}
+    <section class="pc-card pc-pad pc-mt">
+      <div class="pc-row-between"><b>\${o.tags.length ? \`\${o.tags.length} 件\` : '还没有标签'}</b>`);
+patch(`    \${u.draft ? \`<button class="pc-btn dark big pc-mt" data-act="outsave" \${o.tags.length ? '' : 'disabled'}>\${seal()}保存</button>\` : ''}`,`    \${u.draft ? \`<button class="pc-btn dark big pc-mt" data-act="outsave" \${o.tags.length ? '' : 'disabled'}>\${seal()}保存</button>\${o.tags.length ? '' : '<div class="pc-dim small pc-center" style="margin-top:6px">至少要有一件衣服才能保存</div>'}\` : ''}`);
+// 看图写提示词：分栏写，镜头语言（景别、角度、裁切、构图、透视景深）单独一栏必须写
+patch(`/** 看图写成 NovelAI 标签（不写画师和质量词） */
+async function imageToPrompt(imageDataUrl) {
+    const sys = \`你看图，把这张图写成 NovelAI 能直接用的英文标签（Danbooru 风格，逗号隔开）。按顺序写：人数（1girl、2boys、no humans 等）→ 每个人的外貌、衣服、动作、表情、视线 → 构图和镜头（cowboy shot、from above 等）→ 背景和场景 → 光影和色调 → 画面风格特征（watercolor、thick painting 等）。不要写画师名，不要写质量词，看不见的不要编。
+只输出 JSON：{"tags": "标签1, 标签2, ...", "zh": "一句话中文描述"}\`;
+    const j = pickJson(await askVision(sys, '把这张图写成提示词。', imageDataUrl, { maxTokens: 1500, fn: 'img' }));
+    const tags = (Array.isArray(j.tags) ? j.tags.join(', ') : String(j.tags || '')).trim();
+    if (!tags) throw new Error('AI 没写出标签，换个能识图的模型试试');
+    return { positive: tags, negative: '', zh: String(j.zh || '').trim() };
+}
+`,`/** 看图写成 NovelAI 标签（不写画师和质量词）：分栏写，镜头语言单独一栏、必须写 */
+async function imageToPrompt(imageDataUrl) {
+    const sys = \`你是给 NovelAI / Danbooru 打标签的专业标注员。看图，把这张图拆成英文 Danbooru 标签，按下面每一栏分别写，每栏是标签数组。看不清的不要编，但「镜头」这一栏必须写，不能空。
+1. people：人数和性别（1girl、1boy、2girls、1boy 1girl、multiple girls、no humans 等）。
+2. outfit：衣服状态，只写大类和穿脱状态（shirt、dress、open clothes、naked 等），不写颜色细节。不写长相（发色、眼睛、脸、身材都不要写）。
+3. action：动作，这一栏和镜头一样重要，写细：
+   - 全身姿势：standing、sitting、kneeling、squatting、lying on back、lying on side、on stomach、all fours、leaning forward、leaning back、bent over、arched back、crossed legs、spread legs、walking、running、jumping。
+   - 身体朝向：facing viewer、facing away、turning around、looking back、profile。
+   - 手和手臂：每只手在做什么（hand on own chest、hand on hip、hands up、arms behind back、arm support、reaching towards viewer、holding xx、covering mouth、v sign、hand in hair）。
+   - 腿和脚：knees up、legs together、one knee up、feet up、standing on one leg。
+   - 头：head tilt、chin rest、looking down、looking up。
+   - 多人时写互动和相对位置：hug、hug from behind、holding hands、carrying、lap pillow、face-to-face、back-to-back、on top、between legs，谁在谁的哪边。
+4. expression：表情和视线（smile、blush、open mouth、tears、looking at viewer、looking away、looking back、eyes closed 等）。
+5. camera：镜头语言，这一栏最重要，逐项看清再写：
+   - 景别：extreme close-up、close-up、portrait、upper body、cowboy shot、full body、wide shot、very wide shot 里选一个；脸占满画面就是 close-up。
+   - 机位角度：from above、from below、from side、from behind、straight-on、dutch angle、pov、high angle、low angle 里看到哪个写哪个。
+   - 裁切和取景：head out of frame、cropped legs、cropped torso、feet out of frame、upper body focus、ass focus、foot focus、hand focus 等。
+   - 构图：centered、off-center、symmetry、rule of thirds、negative space、split screen 等。
+   - 透视和镜头：foreshortening、perspective、fisheye、wide-angle lens、depth of field、bokeh、blurry background、blurry foreground、motion blur、lens flare、chromatic aberration。
+6. background：地点、背景、物件；纯色背景写 simple background / white background 等。
+7. lighting：光线和色调：backlighting、rim lighting、sunlight、dim lighting、night、golden hour、high contrast、monochrome、muted colors 等。
+不写画师名，不写 masterpiece 这类质量词，不写画风名（除非是明显的 monochrome、sketch、lineart 这类）。
+只输出 JSON：{"people":[],"outfit":[],"action":[],"expression":[],"camera":[],"background":[],"lighting":[],"zh":"一句话中文描述，带上镜头（比如：俯拍的半身特写……）"}\`;
+    const j = pickJson(await askVision(sys, '把这张图拆成标签：镜头语言（景别、角度、裁切、构图、透视景深）和动作（姿势、朝向、手、腿、互动）一定要写细，长相不要写。', imageDataUrl, { maxTokens: 2400, fn: 'img' }));
+    const arr = v => (Array.isArray(v) ? v : String(v || '').split(',')).map(x => String(typeof x === 'object' ? x?.en || '' : x).trim()).filter(x => x && !hasChinese(x));
+    // 人数 → 镜头 → 动作 → 表情 → 衣服 → 背景光影；镜头和动作放前面权重更高；长相不写，方便套到自己的角色上
+    const order = ['people', 'camera', 'action', 'expression', 'outfit', 'background', 'lighting'];
+    let list = order.flatMap(k => arr(j[k]));
+    if (!list.length && j.tags) list = arr(j.tags);
+    const seen = new Set();
+    const tags = list.filter(t => { const k = t.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; }).join(', ');
+    if (!tags) throw new Error('AI 没写出标签，换个能识图的模型试试');
+    return { positive: tags, negative: '', zh: String(j.zh || '').trim(), camera: arr(j.camera).join(', ') };
+}
+
+`);
+patch(`构图：取景范围（full body、cowboy shot、upper body、portrait、close-up 等）、镜头角度（from above、from below、from side、from behind、dutch angle 等）、人物在画面里的位置、透视和景深。`,`构图（必须写，不能空）：景别（extreme close-up、close-up、portrait、upper body、cowboy shot、full body、wide shot 选一个）、机位角度（from above、from below、from side、from behind、straight-on、dutch angle、pov）、裁切（head out of frame、cropped legs、feet out of frame、xx focus）、人物在画面里的位置（centered、off-center、rule of thirds）、透视和景深（foreshortening、fisheye、depth of field、blurry background）。`);
+patch(`'识图 AI 看图写的（不含画师和质量词），可以先改一改'}\${r.zh ? '：' + esc(r.zh) : ''}</div>`,`'识图 AI 看图写的（不含画师和质量词），可以先改一改'}\${r.zh ? '：' + esc(r.zh) : ''}</div>\${r.camera ? \`<div class="pc-dim small mono" style="margin-top:4px">镜头：\${esc(r.camera)}</div>\` : ''}`);
+// 角色页的衣服标签可以折叠；按钮一行放不下时换行
+patch(`        <div class="pc-row-between"><b>\${esc(out.name)}</b><span class="pc-chips" style="margin:0">\${out.tags.length ?`,`        <div class="pc-row-between" style="flex-wrap:wrap;gap:6px"><b>\${esc(out.name)}</b><span class="pc-chips wrap" style="margin:0">\${out.tags.length ?`);
+patch(`        \${outfitSections(out.tags, 'out', { busy: !!busy, busyKey: busy, disabled: busy ? 'disabled' : '' })}
+        <button class="pc-btn pc-mt-s" data-act="outtest"`,`        \${ui.outEditOpen || !out.tags.length ? \`\${outfitSections(out.tags, 'out', { busy: !!busy, busyKey: busy, disabled: busy ? 'disabled' : '' })}\${out.tags.length ? '<button class="pc-pill dashed tiny pc-mt-s" data-act="outedittoggle">收起标签</button>' : ''}\`
+          : \`<button class="pc-outfold" data-act="outedittoggle"><span class="pc-dim small">\${out.tags.length} 件：</span><span class="mono small">\${esc(C.tagText(out.tags.slice(0, 8)))}\${out.tags.length > 8 ? ' …' : ''}</span><em>展开编辑 ›</em></button>\`}
+        <button class="pc-btn pc-mt-s" data-act="outtest"`);
+patch(`            case 'lobbyaud':`,`            case 'outedittoggle': ui.outEditOpen = !ui.outEditOpen; render(); break;
+            case 'lobbyaud':`);
+patch(`.pc-outsteps { display: flex;`,`.pc-outfold { display: block; width: 100%; margin-top: 10px; padding: 10px 12px; border-radius: 12px; border: 1.5px dashed var(--pc-dash); background: transparent; color: var(--pc-ink); text-align: left; line-height: 1.6; cursor: pointer; font: inherit; }
+.pc-outfold em { display: block; font-style: normal; font-size: 12px; color: var(--pc-ink-soft); margin-top: 4px; }
+.pc-outsteps { display: flex;`);
+// 衣柜：一套衣服给几个人穿不再复制出几张，衣柜里只显示一张，改了大家一起变
+patch(`function saveChar(c) {
+    const d = getData();
+    d.characters[c.key] = c;`,`function saveChar(c) {
+    const d = getData();
+    d.characters[c.key] = c;
+    try { syncOutfitsFrom(c); } catch (e) { console.warn('[智库] 同步衣服', e); }`);
+patch(`/** 给角色穿：衣柜里的那件挪过去；已经在别人身上的就复制一份 */`,`// 同一套衣服给好几个人穿：每人身上各有一份（生图照旧按人读），用 sid 连起来，改一份其余跟着改；衣柜里只显示一张
+const outSig = o => String(o.name || '') + '|' + (o.tags || []).map(t => String(t.en || '').toLowerCase()).sort().join(',');
+/** 旧数据里名字和标签都一样的几份，认成同一套 */
+function linkSameOutfits() {
+    const d = getData(), rep = new Map();
+    let changed = false;
+    for (const c of Object.values(d.characters)) for (const o of c.outfits || []) {
+        if (!(o.tags || []).length) continue;
+        const k = outSig(o), r = rep.get(k);
+        if (!r) { rep.set(k, o); continue; }
+        if (!r.sid) { r.sid = r.id; changed = true; }
+        if (o.sid !== r.sid && !o.sid) { o.sid = r.sid; changed = true; }
+    }
+    if (changed) commit({ silent: true });
+}
+/** 这套衣服的所有份：[{ o, owner }] */
+function outfitHolders(o) {
+    if (!o?.sid) return wardrobe().filter(x => x.o === o);
+    return wardrobe().filter(x => x.owner && x.o.sid === o.sid);
+}
+/** 衣柜按「同一套」分组：[{ o, owner, holders }] */
+function wardrobeGroups() {
+    linkSameOutfits();
+    const groups = new Map(), out = [];
+    for (const x of wardrobe()) {
+        const k = x.owner && x.o.sid ? 'sid:' + x.o.sid : 'one:' + (x.owner?.key || '') + ':' + x.o.id;
+        let g = groups.get(k);
+        if (!g) { g = { o: x.o, owner: x.owner, holders: [] }; groups.set(k, g); out.push(g); }
+        g.holders.push(x);
+    }
+    return out;
+}
+/** 改了某人身上的那份：同一套的其他份跟着改 */
+function syncOutfitsFrom(c) {
+    const d = getData();
+    for (const o of c.outfits || []) {
+        if (!o.sid) continue;
+        for (const other of Object.values(d.characters)) {
+            if (other === c) continue;
+            for (const x of other.outfits || []) if (x.sid === o.sid && x !== o && (x.name !== o.name || x.image !== o.image || JSON.stringify(x.tags) !== JSON.stringify(o.tags))) {
+                x.name = o.name; x.image = o.image; x.tags = structuredClone(o.tags);
+            }
+        }
+    }
+}
+/** 从某人身上拿掉：别人还穿着就只删他那份；没人穿了就放回衣柜 */
+function takeOffOutfit(ownerKey, id) {
+    const d = getData();
+    const hit = findOutfit(ownerKey, id);
+    if (!hit?.owner) return null;
+    const rest = outfitHolders(hit.o).filter(x => x.owner.key !== ownerKey);
+    const c = hit.owner;
+    c.outfits = c.outfits.filter(x => x !== hit.o);
+    if (c.outfitId === id) c.outfitId = c.outfits[0]?.id || '';
+    if (!rest.length) { const o = { ...hit.o }; delete o.sid; d.outfits ||= {}; d.outfits[o.id] = o; }
+    commit({ silent: true });
+    return rest[0] || { o: d.outfits[id], owner: null };
+}
+/** 删掉整套：所有人身上的都删 */
+function deleteOutfitGroup(ownerKey, id) {
+    const hit = findOutfit(ownerKey, id);
+    if (!hit) return;
+    const all = hit.owner ? outfitHolders(hit.o) : [hit];
+    for (const x of all) deleteOutfit(x.owner?.key || '', x.o.id);
+}
+/** 给角色穿：衣柜里的那件挪过去；已经在别人身上的，给他也挂一份（和原来那份连在一起） */`);
+patch(`    if (!hit.owner) delete d.outfits[id];
+    else if (hit.owner.key !== to.key) o = { ...structuredClone(o), id: M.uid('o_') };`,`    if (!hit.owner) delete d.outfits[id];
+    else if (hit.owner.key !== to.key) {
+        hit.o.sid ||= hit.o.id;
+        const same = to.outfits.find(x => x.sid === hit.o.sid);
+        if (same) { if (wear) { to.outfitId = same.id; to.outfitMode = 'fixed'; } saveChar(to); saveChar(hit.owner); return same; }
+        o = { ...structuredClone(o), id: M.uid('o_'), sid: hit.o.sid };
+        saveChar(hit.owner);
+    }`);
+patch(`return { studioCastPrompt,`,`return { studioCastPrompt, wardrobeGroups, outfitHolders, takeOffOutfit, deleteOutfitGroup,`);
+patch(`    const all = C.wardrobe();
+    const owners = [...new Map(all.filter(x => x.owner).map(x => [x.owner.key, x.owner])).values()];
+    const q = ui.wardSearch.trim().toLowerCase();
+    const list = all.filter(x => (ui.wardFilter === 'all' || (ui.wardFilter === 'none' ? !x.owner : x.owner?.key === ui.wardFilter))`,`    const all = C.wardrobeGroups();
+    const owners = [...new Map(all.flatMap(g => g.holders).filter(x => x.owner).map(x => [x.owner.key, x.owner])).values()];
+    const q = ui.wardSearch.trim().toLowerCase();
+    const list = all.filter(x => (ui.wardFilter === 'all' || (ui.wardFilter === 'none' ? !x.owner : x.holders.some(h => h.owner?.key === ui.wardFilter)))`);
+patch(`    <div class="pc-grid2 pc-mt-s">\${list.map(({ o, owner }) => \`<article`,`    <div class="pc-grid2 pc-mt-s">\${list.map(({ o, owner, holders }) => \`<article`);
+patch(`<span class="pc-state \${owner ? '' : 'todo'}">\${owner ? '穿在：' + esc(owner.name) : '还没给谁穿'}</span></div></article>\`).join('')
+        || empty('衣柜是空的'`,`<span class="pc-state \${owner ? '' : 'todo'}">\${owner ? '穿在：' + esc(holders.map(h => h.owner.name).join('、')) : '还没给谁穿'}</span></div></article>\`).join('')
+        || empty('衣柜是空的'`);
+patch(`    const people = [...new Map([...cast, ...Object.values(d.characters)].map(c => [c.key, c])).values()];`,`    const people = [...new Map([...cast, ...Object.values(d.characters)].map(c => [c.key, c])).values()];
+    const holders = !u.draft && owner ? C.outfitHolders(o).map(x => x.owner) : [];`);
+patch(`      <b>\${owner ? \`穿在：\${esc(owner.name)}\` : u.draft ? '存到哪里' : '给谁穿'}</b>`,`      <b>\${u.draft ? '存到哪里' : holders.length ? '谁在穿' : '给谁穿'}</b>
+      \${holders.length ? \`<div class="pc-chips wrap">\${holders.map(h => \`<button class="pc-pill on" data-act="outtakeoff" data-v="\${esc(h.key)}" title="从\${esc(h.name)}身上拿掉">\${esc(h.name)} ×</button>\`).join('')}</div><div class="pc-dim small">点名字 × 从他身上拿掉（衣柜里还在）。下面点名字再给别人穿，几个人穿的是同一套，改了一起变。</div>\${label('再给谁穿')}\` : ''}`);
+patch(`        \${people.filter(c => c.key !== owner?.key).map(c =>`,`        \${people.filter(c => c.key !== owner?.key && !holders.some(h => h.key === c.key)).map(c =>`);
+patch(`      \${!u.draft ? '<div class="pc-dim small">点名字：复制一份给他，并设为他固定穿的衣服。</div>' : ''}`,`      \${!u.draft && !holders.length ? '<div class="pc-dim small">点名字：给他穿，并设为他固定穿的衣服。</div>' : ''}`);
+patch(`<button class="pc-linkdanger" style="margin:0 0 0 12px" data-act="outdel">删掉这套</button>`,`<button class="pc-linkdanger" style="margin:0 0 0 12px" data-act="outdel">\${holders.length > 1 ? '删掉这套（所有人身上的都删）' : '删掉这套'}</button>`);
+patch(`        case 'outdel': {
+            const o = curOutfit();
+            if (!o || !(await confirmBox(\`删掉「\${o.name}」？\`))) return true;
+            C.deleteOutfit(ui.outfit.owner, ui.outfit.id);`,`        case 'outtakeoff': {
+            const key = el.dataset.v, hit = C.findOutfit(ui.outfit.owner, ui.outfit.id);
+            const mine = hit && C.outfitHolders(hit.o).find(x => x.owner.key === key);
+            if (!mine) return true;
+            const next = C.takeOffOutfit(key, mine.o.id);
+            toastr.info(\`已从\${C.getChar(key)?.name || ''}身上拿掉\`, '衣柜', { timeOut: 1800 });
+            if (ui.outfit.owner === key && next) ui.outfit = { owner: next.owner?.key || '', id: next.o.id };
+            render(); return true;
+        }
+        case 'outdel': {
+            const o = curOutfit();
+            const n = ui.outfit.owner && o ? C.outfitHolders(o).length : 1;
+            if (!o || !(await confirmBox(n > 1 ? \`删掉「\${o.name}」？\${n} 个人身上的都会删掉。只想从某个人身上拿掉，点他名字旁边的 ×。\` : \`删掉「\${o.name}」？\`))) return true;
+            C.deleteOutfitGroup(ui.outfit.owner, ui.outfit.id);`);
+patch(`            const o = C.currentOutfit(c);
+            if (!o || !(await confirmBox(\`删掉「\${o.name}」这套衣服？\`))) return true;
+            c.outfits = c.outfits.filter(x => x !== o); c.outfitId = c.outfits[0]?.id || ''; save();`,`            const o = C.currentOutfit(c);
+            const others = o ? C.outfitHolders(o).filter(x => x.owner.key !== c.key) : [];
+            if (!o || !(await confirmBox(others.length ? \`把「\${o.name}」从\${c.name}身上拿掉？\${others.map(x => x.owner.name).join('、')}还穿着这套，不受影响。\` : \`删掉「\${o.name}」这套衣服？\`))) return true;
+            c.outfits = c.outfits.filter(x => x !== o); c.outfitId = c.outfits[0]?.id || ''; save();`);
 // 0.8.36：设置里单独的 AI 预设、下载和水印、先存后改名、一键上传到共享
 patch(`    const ai = setFold('ai', '翻译和 AI',`,`    const ai0 = setFold('ai', '翻译和 AI',`);
 patch(`    const tpl = setFold('tpl', '例图提示词',`,`    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), \`
@@ -2213,6 +2460,113 @@ patch(`        const nsfw = form.elements.namedItem('nsfw').checked;`,`        c
         const mark = !!form.elements.namedItem('mark')?.checked;`);
 patch(`                const data = await shrinkDataUrl(await fileToDataUrl(selected[i]), 1024, 0.85);`,`                const src = mark ? await processImage(selected[i], { ...dlOpts(), strip: false, on: true }) : selected[i];
                 const data = await shrinkDataUrl(await fileToDataUrl(src), 1024, 0.85);`);
+// 共享：性向标签（男性向/女性向/全性向）+ 只能从标签表里选；只分享画师串和负面；屏蔽作者/单条；详情先看图
+patch(`const AUD = ['BL', 'BG', 'GB', 'GL'];`,`const AUD = ['BL', 'BG', 'GB', 'GL'];
+/** 共享用的标签：只能从这里选 */
+const LOBBY_TAGS = [
+    ['性向', ['男性向', '女性向', '全性向'], true],
+    ['题材', ['BL', 'BG', 'GB', 'GL'], false],
+    ['画风', ['厚涂', '半厚涂', '平涂', '赛璐璐', '水彩', '写实', '2.5D', '古风', '日系', '韩系', '欧美', '像素', 'Q版', '线稿', '暗黑', '清新', '柔和', '华丽'], false],
+];
+const ORIENT = LOBBY_TAGS[0][1];
+const LOBBY_TAG_SET = new Set(LOBBY_TAGS.flatMap(g => g[1]));
+function lobbyTagPicker(sel = []) {
+    const on = new Set(sel);
+    return LOBBY_TAGS.map(([title, list, single]) => \`<div class="pc-field"><span>\${title}\${single ? '（必选一个）' : '（可多选）'}</span><div class="pc-chips wrap" data-tagset="\${title}" \${single ? 'data-single' : ''}>\${list.map(t => \`<button type="button" class="pc-pill \${on.has(t) ? 'on' : 'dashed'}" data-tagpick="\${esc(t)}">\${esc(t)}</button>\`).join('')}</div></div>\`).join('');
+}
+function wireTagPicker(root) {
+    root.addEventListener('click', ev => {
+        const b = ev.target.closest('[data-tagpick]');
+        if (!b) return;
+        const set = b.closest('[data-tagset]');
+        if (set?.hasAttribute('data-single')) set.querySelectorAll('[data-tagpick]').forEach(x => { if (x !== b) { x.classList.remove('on'); x.classList.add('dashed'); } });
+        const now = !b.classList.contains('on');
+        b.classList.toggle('on', now); b.classList.toggle('dashed', !now);
+    });
+}
+const pickedTags = root => [...root.querySelectorAll('[data-tagpick].on')].map(b => b.dataset.tagpick);
+/** 选标签的小窗：返回标签数组，取消返回 null */
+function chooseLobbyTags(sel = []) {
+    return new Promise(resolve => {
+        const box = modal(\`<h3 class="pc-h3">选标签</h3>\${lobbyTagPicker(sel)}<p class="pc-dim small" data-tagerr></p>
+          <div class="pc-actions"><button class="pc-btn" type="button" data-x="no">取消</button><button class="pc-btn dark" type="button" data-x="ok">好了</button></div>\`);
+        wireTagPicker(box);
+        box.addEventListener('click', ev => {
+            const x = ev.target.closest('[data-x]')?.dataset.x;
+            if (x === 'no') { box.closeModal(); resolve(null); }
+            if (x === 'ok') {
+                const tags = pickedTags(box);
+                if (!tags.some(t => ORIENT.includes(t))) { box.querySelector('[data-tagerr]').textContent = '先选一个性向：男性向、女性向或全性向'; return; }
+                box.closeModal(); resolve(tags);
+            }
+        });
+    });
+}
+/**
+ * 共享只要画师串：留下 artist: 画师、带权重的画风词、质量和年份词；
+ * 人物、动作、衣服、场景这些标签去掉（权重组里的逗号不拆开）
+ */
+const KEEP_STYLE = /^(?:masterpiece|best quality|amazing quality|high quality|good quality|very aesthetic|aesthetic|absurdres|highres|ultra[- ]detailed|detailed|newest|recent|year \\d{4}|\\d{4}s|no text|official art|illustration|painting|sketch|lineart|flat color|watercolor.*|water color.*|oil painting.*|realistic|photorealistic|semi-realistic|anime coloring|cel shading|chiaroscuro|.*lighting|.*rendering|depth of field|bokeh|.*shading|.*texture[s]?|.*style)$/i;
+function artistOnly(text) {
+    const src = String(text || '');
+    const parts = [];
+    let cur = '', open = false;
+    for (const seg of src.split(/(,|\\n)/)) {
+        if ((seg === ',' || seg === '\\n') && !open) { parts.push(cur); cur = ''; continue; }
+        cur += seg;
+        const n = (seg.match(/::/g) || []).length;
+        if (n % 2) open = !open;
+    }
+    parts.push(cur);
+    const keep = parts.map(p => p.trim()).filter(Boolean).filter(p => {
+        if (/artist:/i.test(p) || /::/.test(p)) return true;
+        const bare = p.replace(/^[{[(]+|[}\\])]+$/g, '').replace(/:[\\d.]+$/, '').trim();
+        return KEEP_STYLE.test(bare);
+    });
+    return keep.join(', ');
+}
+const lobbyBlock = () => { const o = getData().options; o.lobbyBlock ||= { users: [], posts: [] }; o.lobbyBlock.users ||= []; o.lobbyBlock.posts ||= []; return o.lobbyBlock; };`);
+patch(`    const items = lb.items.filter(p => (p.mine || !p.tags.some(t => blocked.has(t))) && (!lb.tag2 || p.tags.includes(lb.tag2)));
+    const tags = lb.tags.map(t => t.tag).filter(t => t !== 'NSFW' && !AUD.includes(t));`,`    const blk = lobbyBlock();
+    const items = lb.items.filter(p => (p.mine || (!p.tags.some(t => blocked.has(t)) && !blk.users.includes(p.nickname) && !blk.posts.includes(p.id))) && (!lb.tag2 || p.tags.includes(lb.tag2)));
+    const tags = lb.tags.map(t => t.tag).filter(t => t !== 'NSFW' && !AUD.includes(t) && !ORIENT.includes(t));`);
+patch(`      \${AUD.map(t => \`<button class="pc-pill \${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}">\${t}</button>\`).join('')}`,`      \${[...ORIENT, ...AUD].map(t => \`<button class="pc-pill \${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}">\${t}</button>\`).join('')}`);
+patch(`      \${p.content?.artistString ? \`<div class="pc-dim small mono" style="word-break:break-all">\${markStr(getData(), p.content.artistString)}</div>\${banWarn(getData(), p.content.artistString)}\` : ''}
+      \${p.content?.negative ? \`<div class="pc-dim small mono" style="word-break:break-all;margin-top:6px">负面：\${esc(p.content.negative)}</div>\` : ''}
+      <div class="pc-hscroll pc-mt-s">\${p.images.map(i => \`<img class="pc-sheet-img" src="\${esc(L.lobbyImgUrl(i.url))}" alt="" data-act="viewimg" data-src="\${esc(L.lobbyImgUrl(i.url))}">\`).join('')}</div>`,`      \${p.images.length ? \`<div class="pc-hscroll pc-mt-s">\${p.images.map(i => \`<img class="pc-sheet-img" src="\${esc(L.lobbyImgUrl(i.url))}" alt="" data-act="viewimg" data-src="\${esc(L.lobbyImgUrl(i.url))}">\`).join('')}</div>\` : ''}
+      \${p.content?.artistString ? \`<div class="pc-label">画师串</div><div class="pc-dim small mono" style="word-break:break-all;max-height:7.5em;overflow:auto;scrollbar-width:none">\${markStr(getData(), p.content.artistString)}</div>\${banWarn(getData(), p.content.artistString)}\` : ''}
+      \${p.content?.negative ? \`<details class="pc-details pc-mt-s"><summary class="pc-dim small">负面（\${p.content.negative.length} 字，点开看）</summary><div class="pc-dim small mono" style="word-break:break-all">\${esc(p.content.negative)}</div></details>\` : ''}`);
+patch(`        \${p.mine ? \`<button class="pc-btn danger" data-act="lobbydel" data-id="\${p.id}">删除</button>\` : \`<button class="pc-btn" data-act="lobbyreport" data-id="\${p.id}">举报</button>\`}`,`        \${p.mine ? \`<button class="pc-btn danger" data-act="lobbydel" data-id="\${p.id}">删除</button>\` : \`<button class="pc-btn" data-act="lobbyreport" data-id="\${p.id}">举报</button><button class="pc-btn" data-act="lobbyblockpost" data-id="\${p.id}">屏蔽这条</button><button class="pc-btn" data-act="lobbyblockuser" data-nick="\${esc(p.nickname)}">屏蔽作者</button>\`}`);
+patch(`            case 'lobbyaud':`,`            case 'lobbyblockpost': { const b = lobbyBlock(); if (!b.posts.includes(el.dataset.id)) b.posts.push(el.dataset.id); commit(); toastr.info('这条不再显示，可以在 设置 → 共享 里恢复', '共享', { timeOut: 2500 }); break; }
+            case 'lobbyblockuser': { const n = el.dataset.nick; if (!n) break; if (!(await confirmBox(\`屏蔽「\${n}」？他分享的都不再显示（只在你这里，对方不会知道）。\`))) break; const b = lobbyBlock(); if (!b.users.includes(n)) b.users.push(n); commit(); toastr.info(\`已屏蔽「\${n}」\`, '共享', { timeOut: 2500 }); break; }
+            case 'unblockuser': { const b = lobbyBlock(); b.users = b.users.filter(x => x !== el.dataset.nick); commit(); break; }
+            case 'unblockposts': { lobbyBlock().posts = []; commit(); break; }
+            case 'lobbyaud':`);
+patch(`'<button class="pc-pill dashed" data-act="unblockall">全部取消</button>' : ''}</div>\`);`,`'<button class="pc-pill dashed" data-act="unblockall">全部取消</button>' : ''}</div>
+      \${label('屏蔽的作者')}
+      <div class="pc-chips wrap">\${lobbyBlock().users.map(n => \`<button class="pc-pill blocked" data-act="unblockuser" data-nick="\${esc(n)}">⊘ \${esc(n)}</button>\`).join('') || '<span class="pc-dim small">没有。在共享里点开一条，点「屏蔽作者」。</span>'}</div>
+      \${lobbyBlock().posts.length ? \`<div class="pc-actions wrap"><span class="pc-dim small">屏蔽了 \${lobbyBlock().posts.length} 条分享</span><button class="pc-pill dashed" data-act="unblockposts">全部恢复</button></div>\` : ''}\`);`);
+patch(`      <label class="pc-field"><span>标签（可选，逗号隔开）</span><input class="pc-input" name="tags" maxlength="800" placeholder="BL, 厚涂, 柔和"></label>`,`      \${lobbyTagPicker(pre.tags || [])}`);
+patch(`required placeholder="artist:aaa, 0.8::artist:bbb::">\${esc(pre.artistString || '')}</textarea></label>`,`required placeholder="artist:aaa, 0.8::artist:bbb::">\${esc(artistOnly(pre.artistString || ''))}</textarea><small class="pc-dim" style="display:block;margin-top:4px">只分享画师串和画风、质量词；人物、动作、衣服、场景这些标签会自动去掉。</small></label>`);
+patch(`        const apply = () => { pos.value = meta.positive; neg.value`,`        const apply = () => { pos.value = artistOnly(meta.positive); neg.value`);
+patch(`        if (pos.value.trim() === meta.positive && neg.value.trim()`,`        if (pos.value.trim() === artistOnly(meta.positive) && neg.value.trim()`);
+patch(`        const name = value('title'), nickname = value('signature'), artistString = value('artistString'), negative = value('negative');`,`        const name = value('title'), nickname = value('signature'), artistString = artistOnly(value('artistString')), negative = value('negative');`);
+patch(`        const tags = value('tags').split(/[,，\\n]/).map(s => s.trim()).filter(Boolean);`,`        const tags = pickedTags(box).filter(t => LOBBY_TAG_SET.has(t));
+        if (!tags.some(t => ORIENT.includes(t))) { say('先在标签里选一个性向：男性向、女性向或全性向。'); return; }`);
+patch(`    const form = box.querySelector('form');
+    const status = box.querySelector('[data-share-status]');`,`    const form = box.querySelector('form');
+    wireTagPicker(box);
+    const status = box.querySelector('[data-share-status]');`);
+patch(`    const ai = await chooseBox('适合哪类？', ['BL', 'BG', 'GB', 'GL', '都适合 / 不分']);
+    if (ai == null) return;
+    const tagText = await promptText('再加几个标签，方便别人搜索（逗号隔开，比如：厚涂, 男性向）', '');
+    if (tagText == null) return;`,`    const picked = await chooseLobbyTags();
+    if (!picked) return;`);
+patch(`        tags: [...(ai < 4 ? [AUD[ai]] : []), ...tagText.split(/[,，]/).map(s => s.trim()).filter(Boolean)],
+        nsfw: images.some(i => i.nsfw),
+        content: { artistString: M.ticketString(d, ref), members },`,`        tags: picked,
+        nsfw: images.some(i => i.nsfw),
+        content: { artistString: M.ticketString(d, ref), members, ...(M.ticketNeg(d, ref) ? { negative: M.ticketNeg(d, ref) } : {}) },`);
 // 提示词体检：多出来的 ::、权重前面混进的下划线、没关上的权重、SD 括号权重
 patch(`function banWarn(d, str) {`,`/** 找出会让 NovelAI 把后面一大段都按错权重读的写法；fixed 是能自动改好的版本 */
 function lintPrompt(text) {
@@ -2274,7 +2628,8 @@ patch("        model,\n    };", "        model,\n        director: params.direct
 patch("director: opts.director?.length || 0 };", "director: r.sent.director ?? (opts.director?.length || 0) };");
 patch(".pc-mes-gen, .pc-mes-outfit", ".pc-mes-gen, .pc-mes-outfit, .pc-mes-comic");
 s=applyComfyCompatibility(s);
-patch('return { AI_FNS, apiFor, aiSeen, aiCfg,', 'return { AI_FNS, stopFetch, apiFor, aiSeen, aiCfg,');
+s=applySharingWardrobeCompatibility(s);
+patch('return { AI_FNS, extractCastFromChat, apiFor, aiSeen, aiCfg,', 'return { AI_FNS, stopFetch, extractCastFromChat, apiFor, aiSeen, aiCfg,');
 
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
@@ -2287,7 +2642,7 @@ function setTimeout(fn, delay, ...args) {
 }
 function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
-fs.writeFileSync(dir+'/runtime.js',prefix+s+'\n}\n');
+fs.writeFileSync(dir+'/runtime.js',(prefix+s+'\n}\n').replace(/\r\n/g, '\n'));
 fs.copyFileSync('src/index.js',dir+'/index.js');
 fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.36',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
 fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.36',private:true,type:'module'},null,2)+'\n');
