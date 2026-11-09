@@ -4783,7 +4783,33 @@ function closeWindow() {
     DOC.body.classList.remove('pc-lock');
 }
 
+/** 重画界面时记住正在打字的框，画完放回去：后台有东西触发重画时，手机键盘不会被收掉 */
+let tapOutAt = 0;
+DOC.addEventListener('pointerdown', ev => { if (!ev.target?.closest?.('input, textarea')) tapOutAt = Date.now(); }, true);
+function keepFocus() {
+    if (Date.now() - tapOutAt < 1200) return null; // 刚点了按钮之类：是自己操作引起的重画，不把键盘拉回来
+    const ae = DOC.activeElement;
+    if (!root || !ae || !root.contains(ae) || !/^(INPUT|TEXTAREA)$/.test(ae.tagName) || /^(checkbox|radio|range|file|button|submit|color)$/i.test(ae.type || '')) return null;
+    const attrs = ['data-bind', 'data-optstr', 'data-enter', 'data-field', 'data-k', 'data-i', 'data-where', 'name', 'placeholder'];
+    const q = v => String(v).replace(/["\\]/g, '\\$&');
+    const sel = ae.tagName.toLowerCase() + (ae.id ? '#' + CSS.escape(ae.id) : attrs.filter(a => ae.hasAttribute(a)).map(a => `[${a}="${q(ae.getAttribute(a))}"]`).join(''));
+    if (sel === ae.tagName.toLowerCase()) return null;
+    return { sel, s: ae.selectionStart, e: ae.selectionEnd, top: ae.scrollTop };
+}
+function restoreFocus(k) {
+    if (!k || !root) return;
+    const n = root.querySelector(k.sel);
+    if (!n || DOC.activeElement === n) return;
+    try { n.focus({ preventScroll: true }); } catch { n.focus(); }
+    try { const L = n.value.length; n.setSelectionRange(Math.min(k.s ?? L, L), Math.min(k.e ?? L, L)); } catch { /* 有的输入框不支持 */ }
+    n.scrollTop = k.top;
+}
 function render() {
+    const kept = keepFocus();
+    renderView();
+    restoreFocus(kept);
+}
+function renderView() {
     if (!root) return;
     const d = getData();
     const body = root.querySelector('.pc-body');
