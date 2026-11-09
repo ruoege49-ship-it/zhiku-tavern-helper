@@ -4905,7 +4905,7 @@ async function pcRecordImage({ dataUrl, url, raw = '', sent = null, from }) {
     try { thumb = await pcLocal.put(await pcMakeThumb(dataUrl)); } catch (e) { console.warn('[智库] 缩略图没存上', e); }
     const d = __mod_store.getData();
     const cut = (v, n) => String(v || '').slice(0, n);
-    const entry = { id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), url: String(url), thumb, raw: cut(raw, 800), prompt: cut(sent?.prompt, 800), negative: cut(sent?.negative, 400), seed: sent?.seed ?? '', size: cut(sent?.size, 20), model: cut(sent?.model, 40), from, at: Date.now() };
+    const entry = { id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), url: String(url), thumb, raw: cut(raw, 4000), prompt: cut(sent?.prompt, 6000), negative: cut(sent?.negative, 6000), chars: (sent?.chars || []).slice(0, 6).map(c => typeof c === 'string' ? cut(c, 2000) : cut(c?.prompt, 2000)).filter(Boolean), seed: sent?.seed ?? '', size: cut(sent?.size, 20), model: cut(sent?.model, 40), from, at: Date.now() };
     d.history = [entry, ...(Array.isArray(d.history) ? d.history : []).filter(h => h.url !== entry.url)].slice(0, 300);
     __mod_store.commit({ silent: !DOC.querySelector('#pc-root.open') });
 }
@@ -5481,7 +5481,7 @@ function histDetail(x) {
     const box = modal(`<div class="pc-hist-detail">${HIST_CSS}<img data-pc-src="${esc(x.url)}" alt="">
       <dl class="pc-hist-meta">${row('来源', x.from === 'chat' ? '聊天标记' : '生图页')}${row('时间', new Date(x.at).toLocaleString())}${row('种子', x.seed)}${row('尺寸', x.size)}${row('模型', x.model)}</dl>
       ${x.raw ? `<div class="pc-label">${x.from === 'chat' ? '标记里的提示词' : '正面提示词'}</div><p class="pc-quote small mono">${esc(x.raw)}</p>` : ''}
-      ${x.prompt ? `<details class="pc-details"><summary>实际发出去的内容</summary><div class="pc-label">正面</div><p class="pc-quote small mono">${esc(x.prompt)}</p>${x.negative ? `<div class="pc-label">负面</div><p class="pc-quote small mono">${esc(x.negative)}</p>` : ''}</details>` : ''}
+      ${x.prompt ? `<details class="pc-details"><summary>实际发出去的内容</summary><div class="pc-label">正面</div><p class="pc-quote small mono">${esc(x.prompt)}</p>${x.negative ? `<div class="pc-label">负面</div><p class="pc-quote small mono">${esc(x.negative)}</p>` : ''}${(x.chars || []).map((c, i) => `<div class="pc-label">人物 ${i + 1}</div><p class="pc-quote small mono">${esc(c)}</p>`).join('')}</details>` : ''}
       <div class="pc-actions wrap pc-mt-s">
         <button class="pc-btn dark" type="button" data-h="reuse">用这组参数再生成</button>
         <a class="pc-btn" data-pc-href="${esc(x.url)}" download="zhiku_${x.at}.png">下载</a>
@@ -5682,6 +5682,7 @@ function viewStudio(d) {
       ${st.sent ? `<details class="pc-details pc-sent-box"><summary>这张图实际发出去的内容（${esc(st.sent.size)} · 种子 ${esc(st.sent.seed)}）</summary>
         <div class="pc-label">正面</div><p class="pc-quote small mono">${esc(st.sent.prompt)}</p>
         <div class="pc-label">负面</div><p class="pc-quote small mono">${esc(st.sent.negative)}</p>
+        ${(st.sent.chars || []).map((c, i) => `<div class="pc-label">人物 ${i + 1}</div><p class="pc-quote small mono">${esc(typeof c === 'string' ? c : c?.prompt || '')}</p>`).join('')}
         ${st.sent.vibes ? `<div class="pc-banwarn">还带了氛围「${esc(st.sent.vibes.name)}」${st.sent.vibes.n} 张参考图：画面会往这几张图的色调、构图、质感靠。不想要就到「氛围」选「不用氛围」。</div>` : ''}
         ${st.sent.director ? `<div class="pc-banwarn">还带了角色参考 ${st.sent.director} 张：人物长相会往参考图靠。</div>` : ''}</details>` : ''}
     </section>` : ''}

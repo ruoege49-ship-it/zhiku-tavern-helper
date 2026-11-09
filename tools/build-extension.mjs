@@ -2034,6 +2034,11 @@ patch(`async function onChangeEv(ev) {
     if (el.dataset?.st === 'comfyUrl') { N.settings().comfyUrl = el.value.trim(); N.save(); comfyConnectNow(true); render(); return; }`);
 patch(`        if (['studio.pos', 'studio.neg', 'studio.scene', 'studio.sceneEn'].includes(el.dataset.bind)) {`,`        if (String(el.dataset.bind).startsWith('cfy.')) { clearTimeout(onInput.cf); onInput.cf = setTimeout(saveCfy, 600); }
         if (['studio.pos', 'studio.neg', 'studio.scene', 'studio.sceneEn'].includes(el.dataset.bind)) {`);
+// 历史生图：存完整的正面/负面和分人物提示词，详情里都能看到
+patch(`raw: cut(raw, 800), prompt: cut(sent?.prompt, 800), negative: cut(sent?.negative, 400),`,`raw: cut(raw, 4000), prompt: cut(sent?.prompt, 6000), negative: cut(sent?.negative, 6000), chars: (sent?.chars || []).slice(0, 6).map(c => typeof c === 'string' ? cut(c, 2000) : cut(c?.prompt, 2000)).filter(Boolean),`);
+patch(`<div class="pc-label">负面</div><p class="pc-quote small mono">\${esc(x.negative)}</p>\` : ''}</details>\` : ''}`,`<div class="pc-label">负面</div><p class="pc-quote small mono">\${esc(x.negative)}</p>\` : ''}\${(x.chars || []).map((c, i) => \`<div class="pc-label">人物 \${i + 1}</div><p class="pc-quote small mono">\${esc(c)}</p>\`).join('')}</details>\` : ''}`);
+patch(`        <div class="pc-label">负面</div><p class="pc-quote small mono">\${esc(st.sent.negative)}</p>`,`        <div class="pc-label">负面</div><p class="pc-quote small mono">\${esc(st.sent.negative)}</p>
+        \${(st.sent.chars || []).map((c, i) => \`<div class="pc-label">人物 \${i + 1}</div><p class="pc-quote small mono">\${esc(typeof c === 'string' ? c : c?.prompt || '')}</p>\`).join('')}`);
 // 0.8.36：设置里单独的 AI 预设、下载和水印、先存后改名、一键上传到共享
 patch(`    const ai = setFold('ai', '翻译和 AI',`,`    const ai0 = setFold('ai', '翻译和 AI',`);
 patch(`    const tpl = setFold('tpl', '例图提示词',`,`    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), \`
