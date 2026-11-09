@@ -2159,6 +2159,23 @@ patch(`        case 'readcast': {
                 people = await T.extractCast(main.name, desc);
                 }`);
 patch(`'读出这张卡里所有人（含世界书）'}</button>\` : ''}`,`'读出这张卡里所有人（含世界书）'}</button><button class="pc-pill dashed tiny pc-mt-s" style="margin-left:6px" data-act="readchatcast" \${busy ? 'disabled' : ''}>\${busy === 'chatcast' ? '<span class="pc-busy">读取中</span>' : '从聊天正文读出人物（最近 40 楼）'}</button>\` : ''}`);
+// 衣柜单套页：深色主题下看得清；新建时写清楚三步
+patch(`.pc-outsec { margin-top: 12px; padding: 12px; border-radius: 14px; background: rgba(255, 255, 255, .45); }`,`.pc-outsec { margin-top: 12px; padding: 12px; border-radius: 14px; background: rgba(255, 255, 255, .45); background: color-mix(in srgb, var(--pc-ink) 7%, transparent); }
+.pc-outsec .pc-dim, .pc-outsec-h small { color: var(--pc-ink-soft) !important; opacity: 1 !important; }
+.pc-dhead .pc-dtitle, .pc-dhead .pc-dtitle:not([type="checkbox"]) { color: var(--pc-ink) !important; -webkit-text-fill-color: var(--pc-ink) !important; }
+.pc-dhead .pc-dtitle::placeholder { color: var(--pc-ink-soft) !important; -webkit-text-fill-color: var(--pc-ink-soft) !important; opacity: 1; }
+.pc-outsteps { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.pc-outsteps span { flex: 1 1 30%; min-width: 92px; padding: 8px 10px; border-radius: 12px; border: 1.5px dashed var(--pc-dash); font-size: 12px; line-height: 1.5; color: var(--pc-ink); }
+.pc-outsteps span.done { border-style: solid; border-color: var(--pc-ink); }
+.pc-outsteps b { display: block; font-size: 11px; letter-spacing: .15em; color: var(--pc-ink-soft); }`);
+patch(`    <section class="pc-card pc-pad pc-mt">
+      <div class="pc-row-between"><b>\${o.tags.length ? \`\${o.tags.length} 件\` : '还没有标签'}</b>`,`    \${u.draft ? \`<div class="pc-outsteps">
+      <span class="\${img || o.tags.length ? 'done' : ''}"><b>第一步</b>点图片右下「换一张」放一张衣服的图，AI 会写成标签；没图就直接在下面打字加</span>
+      <span class="\${o.tags.length ? 'done' : ''}"><b>第二步</b>看看下面的标签：点一下改、× 删掉、↓↑ 在整体和配饰之间挪</span>
+      <span class="\${u.dest ? 'done' : ''}"><b>第三步</b>选「存到哪里」：只进衣柜，或者直接给某个人穿，再点「保存」</span></div>\` : ''}
+    <section class="pc-card pc-pad pc-mt">
+      <div class="pc-row-between"><b>\${o.tags.length ? \`\${o.tags.length} 件\` : '还没有标签'}</b>`);
+patch(`    \${u.draft ? \`<button class="pc-btn dark big pc-mt" data-act="outsave" \${o.tags.length ? '' : 'disabled'}>\${seal()}保存</button>\` : ''}`,`    \${u.draft ? \`<button class="pc-btn dark big pc-mt" data-act="outsave" \${o.tags.length ? '' : 'disabled'}>\${seal()}保存</button>\${o.tags.length ? '' : '<div class="pc-dim small pc-center" style="margin-top:6px">至少要有一件衣服才能保存</div>'}\` : ''}`);
 // 0.8.36：设置里单独的 AI 预设、下载和水印、先存后改名、一键上传到共享
 patch(`    const ai = setFold('ai', '翻译和 AI',`,`    const ai0 = setFold('ai', '翻译和 AI',`);
 patch(`    const tpl = setFold('tpl', '例图提示词',`,`    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), \`
