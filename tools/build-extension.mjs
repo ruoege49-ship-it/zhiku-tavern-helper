@@ -2190,24 +2190,29 @@ async function imageToPrompt(imageDataUrl) {
 async function imageToPrompt(imageDataUrl) {
     const sys = \`你是给 NovelAI / Danbooru 打标签的专业标注员。看图，把这张图拆成英文 Danbooru 标签，按下面每一栏分别写，每栏是标签数组。看不清的不要编，但「镜头」这一栏必须写，不能空。
 1. people：人数和性别（1girl、1boy、2girls、1boy 1girl、multiple girls、no humans 等）。
-2. appearance：每个人的长相：发型发色、眼睛、脸部特征、身材、肤色、动物耳尾翅膀等。多人时用 girl / boy 区分写清谁是谁。
-3. outfit：衣服、鞋袜、配饰，写颜色和款式；没穿或半脱也照实写。
-4. action：姿势（standing、sitting、kneeling、lying、leaning forward 等）、手和手臂（hand on own chest、arms behind back、reaching towards viewer 等）、腿、多人互动（hug from behind、holding hands、face-to-face 等）。
-5. expression：表情和视线（smile、blush、open mouth、tears、looking at viewer、looking away、looking back、eyes closed 等）。
-6. camera：镜头语言，这一栏最重要，逐项看清再写：
+2. outfit：衣服状态，只写大类和穿脱状态（shirt、dress、open clothes、naked 等），不写颜色细节。不写长相（发色、眼睛、脸、身材都不要写）。
+3. action：动作，这一栏和镜头一样重要，写细：
+   - 全身姿势：standing、sitting、kneeling、squatting、lying on back、lying on side、on stomach、all fours、leaning forward、leaning back、bent over、arched back、crossed legs、spread legs、walking、running、jumping。
+   - 身体朝向：facing viewer、facing away、turning around、looking back、profile。
+   - 手和手臂：每只手在做什么（hand on own chest、hand on hip、hands up、arms behind back、arm support、reaching towards viewer、holding xx、covering mouth、v sign、hand in hair）。
+   - 腿和脚：knees up、legs together、one knee up、feet up、standing on one leg。
+   - 头：head tilt、chin rest、looking down、looking up。
+   - 多人时写互动和相对位置：hug、hug from behind、holding hands、carrying、lap pillow、face-to-face、back-to-back、on top、between legs，谁在谁的哪边。
+4. expression：表情和视线（smile、blush、open mouth、tears、looking at viewer、looking away、looking back、eyes closed 等）。
+5. camera：镜头语言，这一栏最重要，逐项看清再写：
    - 景别：extreme close-up、close-up、portrait、upper body、cowboy shot、full body、wide shot、very wide shot 里选一个；脸占满画面就是 close-up。
    - 机位角度：from above、from below、from side、from behind、straight-on、dutch angle、pov、high angle、low angle 里看到哪个写哪个。
    - 裁切和取景：head out of frame、cropped legs、cropped torso、feet out of frame、upper body focus、ass focus、foot focus、hand focus 等。
    - 构图：centered、off-center、symmetry、rule of thirds、negative space、split screen 等。
    - 透视和镜头：foreshortening、perspective、fisheye、wide-angle lens、depth of field、bokeh、blurry background、blurry foreground、motion blur、lens flare、chromatic aberration。
-7. background：地点、背景、物件；纯色背景写 simple background / white background 等。
-8. lighting：光线和色调：backlighting、rim lighting、sunlight、dim lighting、night、golden hour、high contrast、monochrome、muted colors 等。
+6. background：地点、背景、物件；纯色背景写 simple background / white background 等。
+7. lighting：光线和色调：backlighting、rim lighting、sunlight、dim lighting、night、golden hour、high contrast、monochrome、muted colors 等。
 不写画师名，不写 masterpiece 这类质量词，不写画风名（除非是明显的 monochrome、sketch、lineart 这类）。
-只输出 JSON：{"people":[],"appearance":[],"outfit":[],"action":[],"expression":[],"camera":[],"background":[],"lighting":[],"zh":"一句话中文描述，带上镜头（比如：俯拍的半身特写……）"}\`;
-    const j = pickJson(await askVision(sys, '把这张图拆成标签，镜头语言（景别、角度、裁切、构图、透视景深）一定要写。', imageDataUrl, { maxTokens: 2400, fn: 'img' }));
+只输出 JSON：{"people":[],"outfit":[],"action":[],"expression":[],"camera":[],"background":[],"lighting":[],"zh":"一句话中文描述，带上镜头（比如：俯拍的半身特写……）"}\`;
+    const j = pickJson(await askVision(sys, '把这张图拆成标签：镜头语言（景别、角度、裁切、构图、透视景深）和动作（姿势、朝向、手、腿、互动）一定要写细，长相不要写。', imageDataUrl, { maxTokens: 2400, fn: 'img' }));
     const arr = v => (Array.isArray(v) ? v : String(v || '').split(',')).map(x => String(typeof x === 'object' ? x?.en || '' : x).trim()).filter(x => x && !hasChinese(x));
-    // 按 NovelAI 习惯：人数 → 镜头 → 人物 → 背景光影；镜头放前面权重更高
-    const order = ['people', 'camera', 'appearance', 'outfit', 'action', 'expression', 'background', 'lighting'];
+    // 人数 → 镜头 → 动作 → 表情 → 衣服 → 背景光影；镜头和动作放前面权重更高；长相不写，方便套到自己的角色上
+    const order = ['people', 'camera', 'action', 'expression', 'outfit', 'background', 'lighting'];
     let list = order.flatMap(k => arr(j[k]));
     if (!list.length && j.tags) list = arr(j.tags);
     const seen = new Set();
@@ -2219,6 +2224,17 @@ async function imageToPrompt(imageDataUrl) {
 `);
 patch(`构图：取景范围（full body、cowboy shot、upper body、portrait、close-up 等）、镜头角度（from above、from below、from side、from behind、dutch angle 等）、人物在画面里的位置、透视和景深。`,`构图（必须写，不能空）：景别（extreme close-up、close-up、portrait、upper body、cowboy shot、full body、wide shot 选一个）、机位角度（from above、from below、from side、from behind、straight-on、dutch angle、pov）、裁切（head out of frame、cropped legs、feet out of frame、xx focus）、人物在画面里的位置（centered、off-center、rule of thirds）、透视和景深（foreshortening、fisheye、depth of field、blurry background）。`);
 patch(`'识图 AI 看图写的（不含画师和质量词），可以先改一改'}\${r.zh ? '：' + esc(r.zh) : ''}</div>`,`'识图 AI 看图写的（不含画师和质量词），可以先改一改'}\${r.zh ? '：' + esc(r.zh) : ''}</div>\${r.camera ? \`<div class="pc-dim small mono" style="margin-top:4px">镜头：\${esc(r.camera)}</div>\` : ''}`);
+// 角色页的衣服标签可以折叠；按钮一行放不下时换行
+patch(`        <div class="pc-row-between"><b>\${esc(out.name)}</b><span class="pc-chips" style="margin:0">\${out.tags.length ?`,`        <div class="pc-row-between" style="flex-wrap:wrap;gap:6px"><b>\${esc(out.name)}</b><span class="pc-chips wrap" style="margin:0">\${out.tags.length ?`);
+patch(`        \${outfitSections(out.tags, 'out', { busy: !!busy, busyKey: busy, disabled: busy ? 'disabled' : '' })}
+        <button class="pc-btn pc-mt-s" data-act="outtest"`,`        \${ui.outEditOpen || !out.tags.length ? \`\${outfitSections(out.tags, 'out', { busy: !!busy, busyKey: busy, disabled: busy ? 'disabled' : '' })}\${out.tags.length ? '<button class="pc-pill dashed tiny pc-mt-s" data-act="outedittoggle">收起标签</button>' : ''}\`
+          : \`<button class="pc-outfold" data-act="outedittoggle"><span class="pc-dim small">\${out.tags.length} 件：</span><span class="mono small">\${esc(C.tagText(out.tags.slice(0, 8)))}\${out.tags.length > 8 ? ' …' : ''}</span><em>展开编辑 ›</em></button>\`}
+        <button class="pc-btn pc-mt-s" data-act="outtest"`);
+patch(`            case 'lobbyaud':`,`            case 'outedittoggle': ui.outEditOpen = !ui.outEditOpen; render(); break;
+            case 'lobbyaud':`);
+patch(`.pc-outsteps { display: flex;`,`.pc-outfold { display: block; width: 100%; margin-top: 10px; padding: 10px 12px; border-radius: 12px; border: 1.5px dashed var(--pc-dash); background: transparent; color: var(--pc-ink); text-align: left; line-height: 1.6; cursor: pointer; font: inherit; }
+.pc-outfold em { display: block; font-style: normal; font-size: 12px; color: var(--pc-ink-soft); margin-top: 4px; }
+.pc-outsteps { display: flex;`);
 // 0.8.36：设置里单独的 AI 预设、下载和水印、先存后改名、一键上传到共享
 patch(`    const ai = setFold('ai', '翻译和 AI',`,`    const ai0 = setFold('ai', '翻译和 AI',`);
 patch(`    const tpl = setFold('tpl', '例图提示词',`,`    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), \`
