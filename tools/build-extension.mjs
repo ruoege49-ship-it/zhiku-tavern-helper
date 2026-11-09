@@ -2259,6 +2259,113 @@ patch(`        const nsfw = form.elements.namedItem('nsfw').checked;`,`        c
         const mark = !!form.elements.namedItem('mark')?.checked;`);
 patch(`                const data = await shrinkDataUrl(await fileToDataUrl(selected[i]), 1024, 0.85);`,`                const src = mark ? await processImage(selected[i], { ...dlOpts(), strip: false, on: true }) : selected[i];
                 const data = await shrinkDataUrl(await fileToDataUrl(src), 1024, 0.85);`);
+// 共享：性向标签（男性向/女性向/全性向）+ 只能从标签表里选；只分享画师串和负面；屏蔽作者/单条；详情先看图
+patch(`const AUD = ['BL', 'BG', 'GB', 'GL'];`,`const AUD = ['BL', 'BG', 'GB', 'GL'];
+/** 共享用的标签：只能从这里选 */
+const LOBBY_TAGS = [
+    ['性向', ['男性向', '女性向', '全性向'], true],
+    ['题材', ['BL', 'BG', 'GB', 'GL'], false],
+    ['画风', ['厚涂', '半厚涂', '平涂', '赛璐璐', '水彩', '写实', '2.5D', '古风', '日系', '韩系', '欧美', '像素', 'Q版', '线稿', '暗黑', '清新', '柔和', '华丽'], false],
+];
+const ORIENT = LOBBY_TAGS[0][1];
+const LOBBY_TAG_SET = new Set(LOBBY_TAGS.flatMap(g => g[1]));
+function lobbyTagPicker(sel = []) {
+    const on = new Set(sel);
+    return LOBBY_TAGS.map(([title, list, single]) => \`<div class="pc-field"><span>\${title}\${single ? '（必选一个）' : '（可多选）'}</span><div class="pc-chips wrap" data-tagset="\${title}" \${single ? 'data-single' : ''}>\${list.map(t => \`<button type="button" class="pc-pill \${on.has(t) ? 'on' : 'dashed'}" data-tagpick="\${esc(t)}">\${esc(t)}</button>\`).join('')}</div></div>\`).join('');
+}
+function wireTagPicker(root) {
+    root.addEventListener('click', ev => {
+        const b = ev.target.closest('[data-tagpick]');
+        if (!b) return;
+        const set = b.closest('[data-tagset]');
+        if (set?.hasAttribute('data-single')) set.querySelectorAll('[data-tagpick]').forEach(x => { if (x !== b) { x.classList.remove('on'); x.classList.add('dashed'); } });
+        const now = !b.classList.contains('on');
+        b.classList.toggle('on', now); b.classList.toggle('dashed', !now);
+    });
+}
+const pickedTags = root => [...root.querySelectorAll('[data-tagpick].on')].map(b => b.dataset.tagpick);
+/** 选标签的小窗：返回标签数组，取消返回 null */
+function chooseLobbyTags(sel = []) {
+    return new Promise(resolve => {
+        const box = modal(\`<h3 class="pc-h3">选标签</h3>\${lobbyTagPicker(sel)}<p class="pc-dim small" data-tagerr></p>
+          <div class="pc-actions"><button class="pc-btn" type="button" data-x="no">取消</button><button class="pc-btn dark" type="button" data-x="ok">好了</button></div>\`);
+        wireTagPicker(box);
+        box.addEventListener('click', ev => {
+            const x = ev.target.closest('[data-x]')?.dataset.x;
+            if (x === 'no') { box.closeModal(); resolve(null); }
+            if (x === 'ok') {
+                const tags = pickedTags(box);
+                if (!tags.some(t => ORIENT.includes(t))) { box.querySelector('[data-tagerr]').textContent = '先选一个性向：男性向、女性向或全性向'; return; }
+                box.closeModal(); resolve(tags);
+            }
+        });
+    });
+}
+/**
+ * 共享只要画师串：留下 artist: 画师、带权重的画风词、质量和年份词；
+ * 人物、动作、衣服、场景这些标签去掉（权重组里的逗号不拆开）
+ */
+const KEEP_STYLE = /^(?:masterpiece|best quality|amazing quality|high quality|good quality|very aesthetic|aesthetic|absurdres|highres|ultra[- ]detailed|detailed|newest|recent|year \\d{4}|\\d{4}s|no text|official art|illustration|painting|sketch|lineart|flat color|watercolor.*|water color.*|oil painting.*|realistic|photorealistic|semi-realistic|anime coloring|cel shading|chiaroscuro|.*lighting|.*rendering|depth of field|bokeh|.*shading|.*texture[s]?|.*style)$/i;
+function artistOnly(text) {
+    const src = String(text || '');
+    const parts = [];
+    let cur = '', open = false;
+    for (const seg of src.split(/(,|\\n)/)) {
+        if ((seg === ',' || seg === '\\n') && !open) { parts.push(cur); cur = ''; continue; }
+        cur += seg;
+        const n = (seg.match(/::/g) || []).length;
+        if (n % 2) open = !open;
+    }
+    parts.push(cur);
+    const keep = parts.map(p => p.trim()).filter(Boolean).filter(p => {
+        if (/artist:/i.test(p) || /::/.test(p)) return true;
+        const bare = p.replace(/^[{[(]+|[}\\])]+$/g, '').replace(/:[\\d.]+$/, '').trim();
+        return KEEP_STYLE.test(bare);
+    });
+    return keep.join(', ');
+}
+const lobbyBlock = () => { const o = getData().options; o.lobbyBlock ||= { users: [], posts: [] }; o.lobbyBlock.users ||= []; o.lobbyBlock.posts ||= []; return o.lobbyBlock; };`);
+patch(`    const items = lb.items.filter(p => (p.mine || !p.tags.some(t => blocked.has(t))) && (!lb.tag2 || p.tags.includes(lb.tag2)));
+    const tags = lb.tags.map(t => t.tag).filter(t => t !== 'NSFW' && !AUD.includes(t));`,`    const blk = lobbyBlock();
+    const items = lb.items.filter(p => (p.mine || (!p.tags.some(t => blocked.has(t)) && !blk.users.includes(p.nickname) && !blk.posts.includes(p.id))) && (!lb.tag2 || p.tags.includes(lb.tag2)));
+    const tags = lb.tags.map(t => t.tag).filter(t => t !== 'NSFW' && !AUD.includes(t) && !ORIENT.includes(t));`);
+patch(`      \${AUD.map(t => \`<button class="pc-pill \${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}">\${t}</button>\`).join('')}`,`      \${[...ORIENT, ...AUD].map(t => \`<button class="pc-pill \${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}">\${t}</button>\`).join('')}`);
+patch(`      \${p.content?.artistString ? \`<div class="pc-dim small mono" style="word-break:break-all">\${markStr(getData(), p.content.artistString)}</div>\${banWarn(getData(), p.content.artistString)}\` : ''}
+      \${p.content?.negative ? \`<div class="pc-dim small mono" style="word-break:break-all;margin-top:6px">负面：\${esc(p.content.negative)}</div>\` : ''}
+      <div class="pc-hscroll pc-mt-s">\${p.images.map(i => \`<img class="pc-sheet-img" src="\${esc(L.lobbyImgUrl(i.url))}" alt="" data-act="viewimg" data-src="\${esc(L.lobbyImgUrl(i.url))}">\`).join('')}</div>`,`      \${p.images.length ? \`<div class="pc-hscroll pc-mt-s">\${p.images.map(i => \`<img class="pc-sheet-img" src="\${esc(L.lobbyImgUrl(i.url))}" alt="" data-act="viewimg" data-src="\${esc(L.lobbyImgUrl(i.url))}">\`).join('')}</div>\` : ''}
+      \${p.content?.artistString ? \`<div class="pc-label">画师串</div><div class="pc-dim small mono" style="word-break:break-all;max-height:7.5em;overflow:auto;scrollbar-width:none">\${markStr(getData(), p.content.artistString)}</div>\${banWarn(getData(), p.content.artistString)}\` : ''}
+      \${p.content?.negative ? \`<details class="pc-details pc-mt-s"><summary class="pc-dim small">负面（\${p.content.negative.length} 字，点开看）</summary><div class="pc-dim small mono" style="word-break:break-all">\${esc(p.content.negative)}</div></details>\` : ''}`);
+patch(`        \${p.mine ? \`<button class="pc-btn danger" data-act="lobbydel" data-id="\${p.id}">删除</button>\` : \`<button class="pc-btn" data-act="lobbyreport" data-id="\${p.id}">举报</button>\`}`,`        \${p.mine ? \`<button class="pc-btn danger" data-act="lobbydel" data-id="\${p.id}">删除</button>\` : \`<button class="pc-btn" data-act="lobbyreport" data-id="\${p.id}">举报</button><button class="pc-btn" data-act="lobbyblockpost" data-id="\${p.id}">屏蔽这条</button><button class="pc-btn" data-act="lobbyblockuser" data-nick="\${esc(p.nickname)}">屏蔽作者</button>\`}`);
+patch(`            case 'lobbyaud':`,`            case 'lobbyblockpost': { const b = lobbyBlock(); if (!b.posts.includes(el.dataset.id)) b.posts.push(el.dataset.id); commit(); toastr.info('这条不再显示，可以在 设置 → 共享 里恢复', '共享', { timeOut: 2500 }); break; }
+            case 'lobbyblockuser': { const n = el.dataset.nick; if (!n) break; if (!(await confirmBox(\`屏蔽「\${n}」？他分享的都不再显示（只在你这里，对方不会知道）。\`))) break; const b = lobbyBlock(); if (!b.users.includes(n)) b.users.push(n); commit(); toastr.info(\`已屏蔽「\${n}」\`, '共享', { timeOut: 2500 }); break; }
+            case 'unblockuser': { const b = lobbyBlock(); b.users = b.users.filter(x => x !== el.dataset.nick); commit(); break; }
+            case 'unblockposts': { lobbyBlock().posts = []; commit(); break; }
+            case 'lobbyaud':`);
+patch(`'<button class="pc-pill dashed" data-act="unblockall">全部取消</button>' : ''}</div>\`);`,`'<button class="pc-pill dashed" data-act="unblockall">全部取消</button>' : ''}</div>
+      \${label('屏蔽的作者')}
+      <div class="pc-chips wrap">\${lobbyBlock().users.map(n => \`<button class="pc-pill blocked" data-act="unblockuser" data-nick="\${esc(n)}">⊘ \${esc(n)}</button>\`).join('') || '<span class="pc-dim small">没有。在共享里点开一条，点「屏蔽作者」。</span>'}</div>
+      \${lobbyBlock().posts.length ? \`<div class="pc-actions wrap"><span class="pc-dim small">屏蔽了 \${lobbyBlock().posts.length} 条分享</span><button class="pc-pill dashed" data-act="unblockposts">全部恢复</button></div>\` : ''}\`);`);
+patch(`      <label class="pc-field"><span>标签（可选，逗号隔开）</span><input class="pc-input" name="tags" maxlength="800" placeholder="BL, 厚涂, 柔和"></label>`,`      \${lobbyTagPicker(pre.tags || [])}`);
+patch(`required placeholder="artist:aaa, 0.8::artist:bbb::">\${esc(pre.artistString || '')}</textarea></label>`,`required placeholder="artist:aaa, 0.8::artist:bbb::">\${esc(artistOnly(pre.artistString || ''))}</textarea><small class="pc-dim" style="display:block;margin-top:4px">只分享画师串和画风、质量词；人物、动作、衣服、场景这些标签会自动去掉。</small></label>`);
+patch(`        const apply = () => { pos.value = meta.positive; neg.value`,`        const apply = () => { pos.value = artistOnly(meta.positive); neg.value`);
+patch(`        if (pos.value.trim() === meta.positive && neg.value.trim()`,`        if (pos.value.trim() === artistOnly(meta.positive) && neg.value.trim()`);
+patch(`        const name = value('title'), nickname = value('signature'), artistString = value('artistString'), negative = value('negative');`,`        const name = value('title'), nickname = value('signature'), artistString = artistOnly(value('artistString')), negative = value('negative');`);
+patch(`        const tags = value('tags').split(/[,，\\n]/).map(s => s.trim()).filter(Boolean);`,`        const tags = pickedTags(box).filter(t => LOBBY_TAG_SET.has(t));
+        if (!tags.some(t => ORIENT.includes(t))) { say('先在标签里选一个性向：男性向、女性向或全性向。'); return; }`);
+patch(`    const form = box.querySelector('form');
+    const status = box.querySelector('[data-share-status]');`,`    const form = box.querySelector('form');
+    wireTagPicker(box);
+    const status = box.querySelector('[data-share-status]');`);
+patch(`    const ai = await chooseBox('适合哪类？', ['BL', 'BG', 'GB', 'GL', '都适合 / 不分']);
+    if (ai == null) return;
+    const tagText = await promptText('再加几个标签，方便别人搜索（逗号隔开，比如：厚涂, 男性向）', '');
+    if (tagText == null) return;`,`    const picked = await chooseLobbyTags();
+    if (!picked) return;`);
+patch(`        tags: [...(ai < 4 ? [AUD[ai]] : []), ...tagText.split(/[,，]/).map(s => s.trim()).filter(Boolean)],
+        nsfw: images.some(i => i.nsfw),
+        content: { artistString: M.ticketString(d, ref), members },`,`        tags: picked,
+        nsfw: images.some(i => i.nsfw),
+        content: { artistString: M.ticketString(d, ref), members, ...(M.ticketNeg(d, ref) ? { negative: M.ticketNeg(d, ref) } : {}) },`);
 // 提示词体检：多出来的 ::、权重前面混进的下划线、没关上的权重、SD 括号权重
 patch(`function banWarn(d, str) {`,`/** 找出会让 NovelAI 把后面一大段都按错权重读的写法；fixed 是能自动改好的版本 */
 function lintPrompt(text) {
