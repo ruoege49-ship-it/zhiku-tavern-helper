@@ -20,9 +20,21 @@ assert.equal(resolveImageCharacters('$小红-sfw-upperbody$, $红红-sfw-upperbo
 assert.deepEqual(resolveImageCharacters('$小-sfw-upperbody$, waving', roster).unknown, ['小'], 'unknown name still draws');
 assert.equal(resolveImageCharacters('$小-sfw-upperbody$, waving', []).cast.length, 0);
 assert.equal(resolveImageCharacters('$小红$, smile', roster).picks[0].char.name, '小红');
-{ const r = resolveImageCharacters('$小红-nsfw-fullbody$, lying', roster); assert.equal(r.picks[0].char.name, '小红'); assert.equal(r.picks[0].nsfw ?? r.picks[0].token?.nsfw ?? true, true); }
+{ const r = resolveImageCharacters('$小红-nsfw-fullbody$, lying', roster); assert.equal(r.picks[0].char.name, '小红'); assert.match(r.scene, /^nsfw(?:,|$)/); assert.deepEqual(r.unknown, []); }
 assert.equal(resolveImageCharacters('$小红-sfw-fullbody$', roster).picks[0].char.name, '小红');
 assert.equal(resolveImageCharacters('$小红-nsfw-lowerbody$', roster).picks[0].char.name, '小红');
+// Every body-position suffix and ordering resolves aliases and preserves rating/camera metadata.
+for (const rating of ['sfw','nsfw']) for (const body of ['upperbody','lowerbody','fullbody']) {
+    for (const suffix of ['', '-sfw-upperbody', '-nsfw-lowerbody', '-sfw-fullbody']) {
+        const token=`$Red Rose-from side-${rating}-${body}${suffix}$`;
+        const r=resolveImageCharacters(token.toUpperCase()+', standing',roster);
+        assert.equal(r.cast[0].key,people[0].key);assert.deepEqual(r.unknown,[]);
+        assert.match(r.picks[0].tags,/from side/i);
+        assert.equal(/^nsfw(?:,|$)/.test(r.scene),rating==='nsfw'||suffix.includes('nsfw'));
+    }
+}
+assert.deepEqual(resolveImageCharacters('$未登记-sfw-fullbody$',roster).unknown,['未登记']);
+
 assert.equal(resolveImageCharacters('$小红-sfw-upperbody, smile', roster).picks.length, 0);
 { const r = resolveImageCharacters('1girl, $\{"upperBody":"白衬衫","lowerBody":"短裙"\}$, smile', roster); assert.equal(r.picks.length, 0); assert.ok(!r.scene.includes('$') && !r.scene.includes('白衬衫')); }
 { const r = resolveImageCharacters('$\{"name":"小红"\}$ sitting', roster); assert.equal(r.picks[0].char.name, '小红'); }
@@ -106,4 +118,13 @@ await assert.rejects(adapter.generate(JSON.stringify(plan),{story:'正文没有�
 await adapter.generate('$小红-nsfw-upperbody$, standing');assert(requests.at(-1).positive.startsWith('nsfw,'),'legacy rating metadata survives character expansion');
 await adapter.generate('${"name":"小红","angle":"from front","upperBody":"nsfw","lowerBody":"hidden"}$, standing');assert(requests.at(-1).positive.startsWith('nsfw,'),'JSON body rating metadata survives');
 await adapter.generate('Scene Composition: sfw, library; Character 1 Prompt: $小红-sfw-upperbody$, standing; Character 1 UC: nsfw;');assert(!requests.at(-1).positive.startsWith('nsfw,'),'negative tags do not change positive content rating');
+for (const rating of ['sfw','nsfw']) {
+    await adapter.generate(`$红红-from side-${rating}-fullbody$, standing`);
+    const request=requests.at(-1);
+    assert.match(request.payload.characterPrompts[0].prompt,/hair_0/);
+    assert.match(request.payload.characterPrompts[0].prompt,/from side/);
+    assert.equal(request.director[0].key,'ref_0');
+    assert.equal(request.positive.startsWith('nsfw,'),rating==='nsfw');
+    assert(!JSON.stringify(request.payload).includes('$'));
+}
 console.log('Per-image cast, payload, references, story boundary, editing and reload checks passed.');
