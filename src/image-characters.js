@@ -14,7 +14,7 @@ export function parseCharacterToken(value) {
         if (!data || typeof data.name !== 'string' || !data.name.trim()) return null;
         return { name: data.name.trim(), angle: typeof data.angle === 'string' ? data.angle.trim() : '', nsfw: [data.upperBody, data.lowerBody].some(v => String(v).toLowerCase() === 'nsfw') };
     }
-    const match = text.match(/^(.+?)-(?:sfw|nsfw)-(?:upperbody|lowerbody)(?:-(?:sfw|nsfw)-(?:lowerbody|fullbody))?$/i);
+    const match = text.match(/^(.+?)-(?:sfw|nsfw)-(?:upperbody|lowerbody|fullbody)(?:-(?:sfw|nsfw)-(?:upperbody|lowerbody|fullbody))?$/i);
     if (!match) return { name: text, angle: '', nsfw: false };
     const angle = match[1].match(/(?:[,，\s-]+)(from (?:front|behind|side))$/i);
     return { name: (angle ? match[1].slice(0, angle.index) : match[1]).trim(), angle: angle?.[1] || '', nsfw: /-nsfw-/i.test(text.slice(match[1].length)) };
