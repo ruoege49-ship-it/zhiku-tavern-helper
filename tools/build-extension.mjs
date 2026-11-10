@@ -3105,6 +3105,18 @@ patch(`    return \`<div class="pc-chips wrap">\${ratings.map(([k, t]) => \`<but
     return sceneRow + \`<div class="pc-chips wrap">\${ratings.map(([k, t]) => \`<button class="pc-pill tiny \${o.rating === k ? 'on' : 'dashed'} \${k === 'nsfw' ? 'nsfw' : ''}" data-act="pickrating" data-scope="\${scope}" data-v="\${k}">\${t}</button>\`).`);
 patch(`            case 'pickshot': (el.dataset.scope === 'batch' ? ui.batch : ui.sample).shot = el.dataset.v; render(); break;`,`            case 'pickshot': (el.dataset.scope === 'batch' ? ui.batch : ui.sample).shot = el.dataset.v; render(); break;
             case 'batchscene': ui.batch.sceneSig = el.dataset.v || ''; render(); break;`);
+// 0.8.36：批量例图用固定提示词时负面自己写
+patch(`negative: 'text, watermark, signature, multiple views, lowres, bad anatomy', fromScene: true };`,`negative: batchSceneNeg(), fromScene: true };`);
+patch(`/** 批量例图用生图页存下的固定提示词：按选的构图尺寸临时做成例图模板 */`,`const BATCH_SCENE_NEG = 'text, watermark, signature, multiple views, lowres, bad anatomy';
+const batchSceneNeg = () => { const v = getData().options.batchSceneNeg; return typeof v === 'string' ? v : BATCH_SCENE_NEG; };
+/** 批量例图用生图页存下的固定提示词：按选的构图尺寸临时做成例图模板 */`);
+patch(`\${o.sceneSig ? '<div class="pc-dim small" style="margin:6px 0">用生图页存下的这条固定提示词当例图提示词；下面选尺寸。</div>' : ''}`,`\${o.sceneSig ? \`<div class="pc-dim small" style="margin:6px 0">用生图页存下的这条固定提示词当例图提示词；下面选尺寸。</div>
+      <label class="pc-field"><span>负面（自己写，所有画师共用）</span><textarea class="pc-textarea mono" rows="2" data-bsneg placeholder="\${esc(BATCH_SCENE_NEG)}">\${esc(batchSceneNeg())}</textarea></label>
+      <div class="pc-chips wrap" style="margin-bottom:6px"><button class="pc-pill dashed tiny" data-act="bsneg" data-v="studio">用生图页的负面</button><button class="pc-pill dashed tiny" data-act="bsneg" data-v="base">恢复通用的</button></div>\` : ''}`);
+patch(`            case 'batchscene': ui.batch.sceneSig = el.dataset.v || ''; render(); break;`,`            case 'batchscene': ui.batch.sceneSig = el.dataset.v || ''; render(); break;
+            case 'bsneg': d.options.batchSceneNeg = el.dataset.v === 'studio' ? String(ui.studio.neg ?? d.studio?.neg ?? '') : BATCH_SCENE_NEG; commit({ silent: true }); render(); break;`);
+patch(`    if (el.dataset.ucpCustom !== undefined) {`,`    if (el.dataset.bsneg !== undefined) { d.options.batchSceneNeg = el.value; clearTimeout(onInput.bn); onInput.bn = setTimeout(() => commit({ silent: true }), 500); return; }
+    if (el.dataset.ucpCustom !== undefined) {`);
 s=applyImg2imgCompatibility(s);
 s=applyWardrobeCanonCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.

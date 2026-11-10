@@ -6376,7 +6376,9 @@ function sampleChooser(scope) {
     const ratings = scope === 'batch' ? [['sfw', 'SFW'], ['nsfw', 'NSFW'], ['both', '两种']] : [['sfw', 'SFW'], ['nsfw', 'NSFW']];
     const shots = [...Object.entries(M.SHOTS).map(([k, v]) => [k, `${v.name} ${v.ratio}`]), ['all', '三种都要']];
     const saved = scope === 'batch' ? (ui.studio.scenes?.length ? ui.studio.scenes : (getData().studio?.scenes || [])) : [];
-    const sceneRow = saved.length ? `<div class="pc-dim small" style="margin:4px 0 6px">提示词用：</div><div class="pc-chips wrap"><button class="pc-pill tiny ${!o.sceneSig ? 'on' : 'dashed'}" data-act="batchscene" data-v="">例图模板</button>${saved.map(p => `<button class="pc-pill tiny ${o.sceneSig === sceneSig(p) ? 'on' : 'dashed'}" data-act="batchscene" data-v="${esc(sceneSig(p))}">${esc(p.name || '没起名')}</button>`).join('')}</div>${o.sceneSig ? '<div class="pc-dim small" style="margin:6px 0">用生图页存下的这条固定提示词当例图提示词；下面选尺寸。</div>' : ''}` : '';
+    const sceneRow = saved.length ? `<div class="pc-dim small" style="margin:4px 0 6px">提示词用：</div><div class="pc-chips wrap"><button class="pc-pill tiny ${!o.sceneSig ? 'on' : 'dashed'}" data-act="batchscene" data-v="">例图模板</button>${saved.map(p => `<button class="pc-pill tiny ${o.sceneSig === sceneSig(p) ? 'on' : 'dashed'}" data-act="batchscene" data-v="${esc(sceneSig(p))}">${esc(p.name || '没起名')}</button>`).join('')}</div>${o.sceneSig ? `<div class="pc-dim small" style="margin:6px 0">用生图页存下的这条固定提示词当例图提示词；下面选尺寸。</div>
+      <label class="pc-field"><span>负面（自己写，所有画师共用）</span><textarea class="pc-textarea mono" rows="2" data-bsneg placeholder="${esc(BATCH_SCENE_NEG)}">${esc(batchSceneNeg())}</textarea></label>
+      <div class="pc-chips wrap" style="margin-bottom:6px"><button class="pc-pill dashed tiny" data-act="bsneg" data-v="studio">用生图页的负面</button><button class="pc-pill dashed tiny" data-act="bsneg" data-v="base">恢复通用的</button></div>` : ''}` : '';
     if (scope === 'batch' && o.sceneSig) return sceneRow + `<div class="pc-chips wrap">${[...Object.entries(M.SHOTS).map(([k, v]) => [k, `${v.name} ${v.ratio}`]), ['all', '三种都要']].map(([k, t]) => `<button class="pc-pill tiny ${o.shot === k ? 'on' : 'dashed'}" data-act="pickshot" data-scope="batch" data-v="${k}">${t}</button>`).join('')}</div>`;
     return sceneRow + `<div class="pc-chips wrap">${ratings.map(([k, t]) => `<button class="pc-pill tiny ${o.rating === k ? 'on' : 'dashed'} ${k === 'nsfw' ? 'nsfw' : ''}" data-act="pickrating" data-scope="${scope}" data-v="${k}">${t}</button>`).join('')}</div>
       <div class="pc-chips wrap">${shots.map(([k, t]) => `<button class="pc-pill tiny ${o.shot === k ? 'on' : 'dashed'}" data-act="pickshot" data-scope="${scope}" data-v="${k}">${t}</button>`).join('')}
@@ -6425,6 +6427,8 @@ function openSamplePicker(ref, redraw) {
 }
 
 /** 选中的组合对应哪些模板 id */
+const BATCH_SCENE_NEG = 'text, watermark, signature, multiple views, lowres, bad anatomy';
+const batchSceneNeg = () => { const v = getData().options.batchSceneNeg; return typeof v === 'string' ? v : BATCH_SCENE_NEG; };
 /** 批量例图用生图页存下的固定提示词：按选的构图尺寸临时做成例图模板 */
 function batchSceneTemplates() {
     const d = getData(), b = ui.batch;
@@ -6433,7 +6437,7 @@ function batchSceneTemplates() {
     const shots = b.shot === 'all' ? Object.keys(M.SHOTS) : [b.shot in M.SHOTS ? b.shot : 'bust'];
     return shots.map(sh => {
         const id = `fx_${hashText(sceneSig(sc)).toString(36)}_${sh}`;
-        d.templates[id] = { id, name: `${sc.name || '固定提示词'}·${M.SHOTS[sh].name}`, nsfw: SCENE_NSFW.test(sc.scene), shot: sh, positive: sc.scene, negative: 'text, watermark, signature, multiple views, lowres, bad anatomy', fromScene: true };
+        d.templates[id] = { id, name: `${sc.name || '固定提示词'}·${M.SHOTS[sh].name}`, nsfw: SCENE_NSFW.test(sc.scene), shot: sh, positive: sc.scene, negative: batchSceneNeg(), fromScene: true };
         return id;
     });
 }
@@ -8325,6 +8329,7 @@ async function onClick(ev, outside = false) {
             case 'pickrating': (el.dataset.scope === 'batch' ? ui.batch : ui.sample).rating = el.dataset.v; render(); break;
             case 'pickshot': (el.dataset.scope === 'batch' ? ui.batch : ui.sample).shot = el.dataset.v; render(); break;
             case 'batchscene': ui.batch.sceneSig = el.dataset.v || ''; render(); break;
+            case 'bsneg': d.options.batchSceneNeg = el.dataset.v === 'studio' ? String(ui.studio.neg ?? d.studio?.neg ?? '') : BATCH_SCENE_NEG; commit({ silent: true }); render(); break;
             case 'edittpl': await openTemplateEditor(chosenTemplates(el.dataset.scope || 'sample')[0] || 'sfw_bust'); break;
             case 'sample': { const r = refFrom(el); if (!ui.busyRefs.has(r.id)) openSamplePicker(r, render); break; }
             case 'samplemembers': {
@@ -8976,6 +8981,7 @@ function onInput(ev) {
     tapOutAt = 0;
     const el = ev.target;
     const d = getData();
+    if (el.dataset.bsneg !== undefined) { d.options.batchSceneNeg = el.value; clearTimeout(onInput.bn); onInput.bn = setTimeout(() => commit({ silent: true }), 500); return; }
     if (el.dataset.ucpCustom !== undefined) { N.settings().UCP_custom = el.value; N.save(); updateStudioPreview(); return; }
     if (el.dataset.castact) { const k = el.dataset.castact; setStudioCast(studioCast().map(e => e.key === k ? { ...e, act: el.value.trim() } : e)); updateStudioPreview(); return; }
     if (el.dataset?.i2i) { (ui.studio.i2i ||= {})[el.dataset.i2i] = Number(el.value); const o = root.querySelector(`[data-i2i-out="${el.dataset.i2i}"]`); if (o) o.textContent = Math.round(Number(el.value) * 100) + '%'; }
