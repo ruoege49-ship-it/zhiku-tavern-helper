@@ -3753,8 +3753,28 @@ function stopFetch() {
     zkFetchFrame?.remove();
     zkFetchFrame = null;
 }
+function zkPageWindow() {
+    try { if (typeof DOC !== 'undefined' && DOC.defaultView) return DOC.defaultView; } catch {}
+    return typeof window !== 'undefined' ? window : globalThis;
+}
+function zkLocalApi(input, w) {
+    const raw = String(input?.url ?? input ?? '');
+    try {
+        const base = new URL(w.location.href), url = new URL(raw, base);
+        return url.protocol === base.protocol && url.host === base.host && url.pathname.startsWith('/api/');
+    } catch { return /^\/api\//.test(raw); }
+}
+function zkClientBridge(w) {
+    try { if (w.__TAURI__ || w.__TAURI_INTERNALS__) return true; } catch {}
+    try { if (w.top?.__TAURI__ || w.top?.__TAURI_INTERNALS__) return true; } catch {}
+    try { return /TauriTavern/i.test(DOC.title || ''); } catch { return false; }
+}
 function zkFetch(...args) {
     if (zkFetchStopped) throw new Error('智库已关闭');
+    const w = zkPageWindow(), local = zkLocalApi(args[0], w);
+    const pageFetch = (...request) => typeof w.fetch === 'function' ? w.fetch(...request) : fetch(...request);
+    // Client API bridges must be selected before creating an isolated iframe.
+    if (local && zkClientBridge(w)) return pageFetch(...args);
     if (zkFetchFrame && !zkFetchFrame.isConnected) {
         zkFetchFrame = null;
         zkCleanFetch = null;
@@ -3766,16 +3786,31 @@ function zkFetch(...args) {
             frame.setAttribute('aria-hidden', 'true'); frame.tabIndex = -1;
             frame.style.cssText = 'display:none!important';
             (DOC.body || DOC.documentElement).appendChild(frame);
-            const w = frame.contentWindow;
-            if (!w?.fetch) throw new Error('no fetch');
-            zkCleanFetch = w.fetch.bind(w);
+            const child = frame.contentWindow;
+            if (!child?.fetch) throw new Error('no fetch');
+            zkCleanFetch = child.fetch.bind(child);
             zkFetchFrame = frame;
-        } catch {
-            frame?.remove();
-        }
+        } catch { frame?.remove(); }
     }
-    // 只在隔离通道创建失败时退回；请求本身失败不能自动重发。
-    return (zkCleanFetch || fetch)(...args);
+    if (!zkCleanFetch) return pageFetch(...args);
+    if (!local) return zkCleanFetch(...args);
+    // Preserve Request bodies before the first send; streams in init cannot be replayed.
+    let replay = args;
+    try {
+        if (args[1]?.body && typeof args[1].body.getReader === 'function') replay = null;
+        else if (typeof args[0]?.clone === 'function') replay = [args[0].clone(), ...args.slice(1)];
+    } catch { replay = null; }
+    return Promise.resolve(zkCleanFetch(...args)).then(async res => {
+        // Only a successful local HTML response gets one bridge fallback. Network,
+        // cancellation, authentication and server failures are never auto-resubmitted.
+        if (!res.ok || !/text\/html/i.test(res.headers?.get('content-type') || '') || !replay) return res;
+        if (zkFetchStopped) throw new Error('智库已关闭');
+        const signal = args[1]?.signal || args[0]?.signal;
+        if (signal?.aborted) { signal.throwIfAborted(); }
+        try { await res.body?.cancel(); } catch {}
+        if (zkFetchStopped) throw new Error('智库已关闭');
+        return pageFetch(...replay);
+    });
 }
 async function readBody(res) {
     const unavailable = res.bodyUsed || res.body?.locked;
@@ -6747,10 +6782,10 @@ function viewOutfit(d) {
     <div class="pc-outhero">${img ? `<img src="${esc(img)}" alt="" data-act="viewimg" data-src="${esc(img)}">` : '<span>还没有图</span>'}
       ${u.busy === 'read' ? '<em class="pc-outhero-busy"><span class="pc-busy">AI 正在看图</span></em>' : ''}
       <label class="pc-outhero-btn">换一张<input type="file" accept="image/*" data-outimg hidden></label></div>
-    ${u.draft ? (() => { const n = [img || o.tags.length, o.tags.length, u.dest].filter(Boolean).length; return fold('outsteps', '怎么做', n ? `三步做完 ${n} 步` : '放图或打字 → 检查标签 → 选存到哪里', `<div class="pc-outsteps">
+    ${u.draft ? (() => { const n = [img || o.tags.length, o.tags.length, u.destChosen || u.dest].filter(Boolean).length; return fold('outsteps', '怎么做', n ? `三步做完 ${n} 步` : '放图或打字 → 检查标签 → 选存到哪里', `<div class="pc-outsteps">
       <span class="${img || o.tags.length ? 'done' : ''}"><b>第一步</b>点图片右下「换一张」放一张衣服的图，AI 会写成标签；没图就直接在下面打字加</span>
       <span class="${o.tags.length ? 'done' : ''}"><b>第二步</b>看看下面的标签：点一下改、× 删掉、↓↑ 在整体和配饰之间挪</span>
-      <span class="${u.dest ? 'done' : ''}"><b>第三步</b>选「存到哪里」：只进衣柜，或者直接给某个人穿，再点「保存」</span></div>`); })() : ''}
+      <span class="${u.destChosen || u.dest ? 'done' : ''}"><b>第三步</b>选「存到哪里」：只进衣柜，或者直接给某个人穿，再点「保存」</span></div>`); })() : ''}
     <section class="pc-card pc-pad pc-mt">
       <div class="pc-row-between"><b>${o.tags.length ? `${o.tags.length} 件` : '还没有标签'}</b>${o.tags.length ? `<button class="pc-pill dashed tiny" data-act="copytext" data-text="${esc(C.tagText(o.tags))}">复制整套</button>` : ''}</div>
       ${outfitSections(o.tags, 'ward', { busy: u.busy === 'add', busyKey: u.addKey })}
@@ -6986,7 +7021,7 @@ async function charAction(act, el) {
         }
         case 'openoutfit': ui.outfit = { owner: el.dataset.owner, id: el.dataset.id }; ui.view = 'outfit'; ui.addText.ward = ''; render(); root.querySelector('.pc-body')?.scrollTo(0, 0); return true;
         case 'outback': ui.view = 'cast'; ui.castTop = 'wardrobe'; ui.outfit = null; render(); return true;
-        case 'outdest': ui.outfit.dest = el.dataset.v; render(); return true;
+        case 'outdest': ui.outfit.dest = el.dataset.v; ui.outfit.destChosen = true; render(); return true;
         case 'outsave': {
             const u = ui.outfit;
             let image = u.image;
