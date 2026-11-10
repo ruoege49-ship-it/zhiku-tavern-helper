@@ -2928,7 +2928,10 @@ async function comfyUseWorkflow(kind, name = '', raw = null) {
 }
 async function generateRequest(opts) {
     const s = settings();
-    if (opts.backend === 'comfy') return comfyGenerate(opts, s);
+    if (opts.backend === 'comfy') {
+        if (opts.i2i?.image) throw new Error('ComfyUI 通道暂不支持这里的垫图，请使用 NovelAI 通道');
+        return comfyGenerate(opts, s);
+    }
     if (!opts.comic && s.naiMode === 'site' && String(s.naiSiteSimple) === 'true') {
         const cs = opts.chars || [];
         opts = {
@@ -2940,6 +2943,15 @@ async function generateRequest(opts) {
     const model = opts.comic ? 'nai-diffusion-5-full' : s.novelaimode;
     if (opts.comic && s.naiMode === 'tavern') throw new Error('漫画要用自己的 NovelAI key：酒馆通道画不了分人物和画进图里的文字。到智库「设置 → NovelAI」改成自己填 key');
     const params = buildParameters(opts);
+    // 垫图（img2img）：底图已经裁成这次的尺寸
+    if (opts.i2i?.image) {
+        if (s.naiMode === 'tavern') throw new Error('「用酒馆里的 key」不能垫图，到智库设置 → NovelAI 改成「填我的 key」');
+        params.image = opts.i2i.image;
+        const unit = (v, fallback) => v != null && Number.isFinite(Number(v)) ? Math.max(0, Math.min(1, Number(v))) : fallback;
+        params.strength = unit(opts.i2i.strength, 0.7);
+        params.noise = unit(opts.i2i.noise, 0);
+        params.extra_noise_seed = params.seed;
+    }
     const sent = {
         prompt: opts.positive, negative: opts.negative,
         size: `${params.width}×${params.height}`,
@@ -2947,6 +2959,7 @@ async function generateRequest(opts) {
         seed: params.seed,
         model,
         director: params.director_reference_images_cached?.length || 0,
+        ...(opts.i2i?.image ? { i2i: { strength: params.strength, noise: params.noise } } : {}),
     };
     if (s.naiMode === 'tavern') {
         const body = {
@@ -2966,7 +2979,7 @@ async function generateRequest(opts) {
     const r = await http(siteUrl('/ai/generate-image'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: '*/*', ...(key ? { Authorization: 'Bearer ' + key } : {}) },
-        body: JSON.stringify({ input: opts.positive, model, action: 'generate', parameters: params, use_new_shared_trial: true }),
+        body: JSON.stringify({ input: opts.positive, model, action: opts.i2i?.image ? 'img2img' : 'generate', parameters: params, use_new_shared_trial: true }),
     });
     const buf = new Uint8Array(await r.arrayBuffer());
     if (!r.ok) throw Object.assign(new Error(explain(r.status, new TextDecoder().decode(buf))),{status:r.status,retryAfter:r.headers?.get('Retry-After')});
@@ -3342,14 +3355,14 @@ async function run(opts) {
 }
 
 /** 生图页 */
-async function generate({ pos, neg, scene = '', width, height }) {
+async function generate({ pos, neg, scene = '', width, height, i2i }) {
     const { positive, negative } = composeStudio({ pos, neg, scene });
-    return run({ positive, negative, width, height });
+    return run({ positive, negative, width, height, i2i });
 }
 
 /** 已经拼好的提示词（聊天生图用，可带分角色） */
-async function generateFull({ positive, negative, chars = [], width, height, director, backend }) {
-    return run({ positive, negative, chars, width, height, director, backend });
+async function generateFull({ positive, negative, chars = [], width, height, director, backend, i2i }) {
+    return run({ positive, negative, chars, width, height, director, backend, i2i });
 }
 
 /** 生成一张例图：画师串 + 例图模板（不带氛围和角色） */
@@ -4744,7 +4757,10 @@ function studioCastPick(e, nsfw = false) {
     const ch = getChar(e.key);
     if (!ch) return null;
     const out = e.outfit === '' ? null : (ch.outfits.find(o => o.id === e.outfit) || currentOutfit(ch));
-    return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', tags: [tagText(ch.appearance), nsfw ? tagText(ch.nsfwBody) : '', tagText(out?.tags)].filter(Boolean).join(', '), x: CAST_X[e.pos] ?? 0.5 };
+    const look = [tagText(ch.appearance), nsfw ? tagText(ch.nsfwBody) : ''].filter(Boolean).join(', ');
+    const act = String(e.act || '').trim(), fit = tagText(out?.tags);
+    // 分角色时：外貌 → 这个人的动作 → 衣服，动作别被一长串衣服挤到最后
+    return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', look, act, fit, tags: [look, act, fit].filter(Boolean).join(', '), x: CAST_X[e.pos] ?? 0.5 };
 }
 function studioCastPrompt({ pos = '', neg = '', scene = '' }, cast) {
     const nsfw = hasNsfwRating([pos, scene].filter(Boolean).join(', '));
@@ -4753,9 +4769,10 @@ function studioCastPrompt({ pos = '', neg = '', scene = '' }, cast) {
     const chars = picks.map(p => p.char);
     const hasCount = /\b(?:\d+(?:boys?|girls?|others?)|no humans)\b/i.test(pos);
     const negAll = [neg, ...chars.map(c => c.negative)].filter(Boolean).join(', ');
-    if (picks.length === 1 || !canSplit()) {
+    if (picks.length === 1 || !canSplit({ chat: false })) {
         const lead = picks.length === 1 ? 'solo' : (hasCount ? '' : countTags(chars));
-        return { ...E.composeStudio({ pos: M.mergeTags(pos, lead, ...picks.map(p => p.tags)), neg: negAll, scene }), chars: [], picks };
+        // 固定提示词（动作、镜头）放在外貌后面、衣服前面：NovelAI 越靠前越听话，原来排在一长串衣服后面容易被忽略
+        return { ...E.composeStudio({ pos: M.mergeTags(pos, lead, ...picks.map(p => [p.look, p.act].filter(Boolean).join(', ')), scene, ...picks.map(p => p.fit)), neg: negAll, scene: '' }), chars: [], picks };
     }
     const r = E.composeStudio({ pos: M.mergeTags(hasCount ? '' : countTags(chars), pos), neg, scene });
     return { ...r, chars: picks.map(p => ({ prompt: soloize(p.tags), uc: p.char.negative || '', center: { x: p.x, y: 0.5 } })), picks };
@@ -5511,7 +5528,7 @@ const CAST_CSS = `<style>
 function castFold() {
     const d = getData();
     const list = studioCast().map(e => ({ e, c: C.getChar(e.key) }));
-    const n = list.length, split = C.canSplit();
+    const n = list.length, split = C.canSplit({ chat: false });
     const mode = n === 0 ? '<b>不选人：</b>就按上面的提示词画，跟以前一样。'
         : n === 1 ? '<b>单人：</b>把这个人的外貌、衣服接在提示词后面（加 solo）。'
         : split ? `<b>${n} 人：</b>每个人的外貌单独发给 NAI（分角色），发色瞳色不会串到别人身上；人数词自动补上。`
@@ -5525,11 +5542,12 @@ function castFold() {
             ${n > 1 && split ? `<span class="pc-seg pc-castseg">${['L', 'C', 'R'].map(v => `<button class="${(e.pos || 'C') === v ? 'on' : ''}" data-act="castpos" data-key="${k}" data-v="${v}">${CAST_POS[v]}</button>`).join('')}</span>` : ''}
             <button class="pc-x" data-act="castrm" data-key="${k}" aria-label="不画${esc(c.name)}">×</button></div>
           <div class="pc-casttags mono">${look ? esc(look) : '这个角色还没写外貌：去「角色」页写一下，或者在提示词里自己写'}</div>
+          ${n > 1 ? `<input class="pc-castact mono" data-castact="${k}" value="${esc(e.act || '')}" placeholder="${esc(c.name)}自己的动作、表情">` : ''}
           ${c.outfits.length ? `<div class="pc-chips wrap">${c.outfits.map(o => `<button class="pc-pill tiny ${fitOn(o.id) ? 'on' : 'dashed'}" data-act="castfit" data-key="${k}" data-id="${esc(o.id)}">${esc(o.name)}</button>`).join('')}<button class="pc-pill tiny ${e.outfit === '' ? 'on' : 'dashed'}" data-act="castfit" data-key="${k}" data-id="">不穿固定衣服</button></div>` : ''}
           ${ref ? `<div class="pc-dim small" style="margin-top:6px">带上长相参考「${esc(ref.name)}」${N.charRefSupported() ? '' : '（现在的模型用不了，这次不带）'}</div>` : ''}</div>`;
     }).join('');
     return CAST_CSS + fold('cast', '入画角色', n ? list.map(x => x.c.name).join('、') : '不画指定的人', `
-      <div class="pc-castmode">${mode}</div>${rows}
+      <div class="pc-castmode">${mode}</div>${n > 1 ? `<div class="pc-dim small" style="margin-top:6px">${split ? '两个人容易弄错谁在做什么：' : ''}每个人的动作、表情写在他自己那一栏，固定提示词里只放镜头、场景这类大家共用的。两人之间的动作用 NovelAI 的互动写法：做的人写 <span class="mono">source#hug</span>，被做的人写 <span class="mono">target#hug</span>，一起做写 <span class="mono">mutual#hug</span>。</div>` : ''}${rows}
       <button class="pc-castadd" data-act="castopen">＋ 从角色库里选人</button>
       <label class="pc-switch"><input type="checkbox" data-cast-memo ${castMemoOn() ? 'checked' : ''}><span></span>记住这次聊天选的人<small>下次打开同一个聊天，自动选好</small></label>`);
 }
@@ -5583,9 +5601,9 @@ function sceneSnapshot() {
 }
 const sceneSig = p => String(p.scene || '').toLowerCase().replace(/[\s，,]+/g, ',');
 const sceneName = text => String(text || '').split(/[,，\n]/).map(s => s.trim()).filter(s => s && !/quality|masterpiece|highres|absurdres|detailed/i.test(s)).slice(0, 3).join(', ').slice(0, 24);
-function rememberScene() {
-    const st = ui.studio, p = sceneSnapshot();
-    if (st.sceneOn === false || !p.scene) return;
+function rememberScene(p = sceneSnapshot(), enabled = ui.studio.sceneOn !== false) {
+    const st = ui.studio;
+    if (!enabled || !p.scene) return;
     const sig = sceneSig(p);
     if ((st.scenes || []).some(x => sceneSig(x) === sig)) return; // 已经存下的就不再记
     st.recentScenes = [p, ...(st.recentScenes || []).filter(x => sceneSig(x) !== sig)].slice(0, 20);
@@ -5597,13 +5615,16 @@ function applyScene(p) {
     st.sceneOn = true;
     saveStudio();
 }
+const SCENE_NSFW = /\b(?:nsfw|nude|naked|nipples?|areolae?|penis|pussy|vagina|clitoris|sex|cum|ejaculation|masturbation|erection|anus|anal|fellatio|paizuri|handjob|cunnilingus|testicles|pubic hair|topless|bottomless|spread (?:ass|legs|pussy))\b/i;
+/** 没标过的旧条目：带明显 NSFW 词的先标上 NSFW */
+const sceneAutoTags = text => SCENE_NSFW.test(String(text || '')) ? ['NSFW'] : [];
 function sceneRow(p, i, kind) {
     const cur = sceneSig(p) === sceneSig(sceneSnapshot());
     const title = kind === 'saved' ? p.name || '没起名' : new Date(p.at).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
     return `<div class="pc-promptrow ${cur ? 'cur' : ''}">
-      <div class="pc-grow"><b>${esc(title)}${cur ? ' <em>在用</em>' : ''}</b><small class="mono">${esc(p.scene)}</small></div>
+      <div class="pc-grow"><b>${esc(title)}${cur ? ' <em>在用</em>' : ''}</b>${kind === 'saved' && p.tags?.length ? `<span class="pc-scenetags">${p.tags.map(t => `<i>${esc(t)}</i>`).join('')}</span>` : ''}<small class="mono">${esc(p.scene)}</small></div>
       <div class="pc-promptacts">${cur ? '' : `<button class="pc-pill tiny on" data-act="sceneuse" data-kind="${kind}" data-i="${i}">换上</button>`}
-        ${kind === 'recent' ? `<button class="pc-pill tiny dashed" data-act="scenekeep" data-i="${i}">存下</button>` : `<button class="pc-pill tiny dashed" data-act="scenerename" data-i="${i}">改名</button>`}
+        ${kind === 'recent' ? `<button class="pc-pill tiny dashed" data-act="scenekeep" data-i="${i}">存下</button>` : `<button class="pc-pill tiny dashed" data-act="scenerename" data-i="${i}">改名</button><button class="pc-pill tiny dashed" data-act="scenetags" data-i="${i}">标签</button>`}
         <button class="pc-x" data-act="scenedel" data-kind="${kind}" data-i="${i}" aria-label="删掉">×</button></div></div>`;
 }
 function sceneLibrary() {
@@ -5619,12 +5640,77 @@ function sceneLibrary() {
 .pc-promptsec{font-size:11px;letter-spacing:.3em;color:var(--pc-ink-soft);margin:12px 0 0}
 .pc-recent-scenes>summary{cursor:pointer;font-size:12px;color:var(--pc-ink-soft);margin-top:12px;list-style:none}
 .pc-recent-scenes>summary::-webkit-details-marker{display:none}
+.pc-saved-scenes>summary{font-size:13px;color:var(--pc-ink);letter-spacing:.05em}
+.pc-scenetags{display:flex;flex-wrap:wrap;gap:4px;margin:3px 0 2px}
+.pc-scenetags i{font-style:normal;font-size:11px;padding:1px 8px;border-radius:99px;border:1px solid var(--pc-dash);color:var(--pc-ink-soft)}
+.pc-i2i{display:flex;gap:10px;align-items:flex-start}
+.pc-castact{width:100%;box-sizing:border-box;margin-top:6px;padding:7px 12px;border-radius:12px;border:1.5px dashed var(--pc-dash);background:transparent;color:var(--pc-ink);font-size:12px}
+.pc-i2i img{width:84px;max-height:120px;object-fit:cover;border-radius:12px;cursor:zoom-in}
+.pc-i2i input[type=range]{width:100%}
 </style>
       <div class="pc-actions wrap" style="margin-top:8px"><button class="pc-pill dashed" data-act="scenesave">＋ 存下这段</button></div>
-      ${saved.length ? '<div class="pc-promptsec">存下的固定提示词</div>' + saved.map((p, i) => sceneRow(p, i, 'saved')).join('') : ''}
+      ${saved.length ? (() => {
+        const tagsOf = p => (p.tags ??= sceneAutoTags(p.scene));
+        const all = [...new Set(saved.flatMap(tagsOf))];
+        const f = all.includes(st.sceneTag) || st.sceneTag === '__none' ? st.sceneTag : '', q = String(st.sceneQ || '').trim().toLowerCase();
+        const rows = saved.map((p, i) => [p, i]).filter(([p]) => (!f || (f === '__none' ? !tagsOf(p).length : tagsOf(p).includes(f))) && (!q || [p.name, p.scene, p.sceneSrc, ...tagsOf(p)].join(' ').toLowerCase().includes(q)));
+        const curP = saved.find(p => sceneSig(p) === sceneSig(sceneSnapshot()));
+        const chip = (v, t) => `<button class="pc-pill tiny ${f === v ? 'on' : 'dashed'}" data-act="scenetag" data-v="${esc(v)}">${esc(t)}</button>`;
+        return `<details class="pc-recent-scenes pc-saved-scenes" ${st.open.savedScenes ? 'open' : ''} data-fold="savedScenes"><summary>存下的固定提示词 ${saved.length} 条${curP ? ` · 在用「${esc(curP.name || '没起名')}」` : ''} ▸</summary>
+          ${saved.length > 0 ? `<label class="pc-search pc-mt-s"><span class="pc-sr">搜固定提示词</span>${ICON.search}<input data-bind="studio.sceneQ" value="${esc(st.sceneQ || '')}" placeholder="搜名字、标签、提示词"></label>` : ''}
+          ${all.length ? `<div class="pc-chips wrap" style="margin-top:8px">${chip('', '全部')}${all.map(t => chip(t, t)).join('')}${saved.some(p => !tagsOf(p).length) ? chip('__none', '没标签') : ''}</div>` : '<div class="pc-dim small" style="margin-top:6px">点每条的「标签」可以分类，比如 证件照、NSFW、双人</div>'}
+          ${rows.map(([p, i]) => sceneRow(p, i, 'saved')).join('') || '<div class="pc-dim small" style="margin-top:8px">没有对得上的</div>'}</details>`;
+      })() : ''}
       ${recent.length ? `<details class="pc-recent-scenes" ${ui.studio.open.recentScenes ? 'open' : ''} data-fold="recentScenes"><summary>最近用过 ${recent.length} 条（生成时自动记）▸</summary>${recent.map((p, i) => sceneRow(p, i, 'recent')).join('')}<div class="pc-actions" style="margin-top:6px"><button class="pc-pill tiny dashed" data-act="sceneclear">清空最近</button></div></details>` : ''}`;
 }
 function studioParts() { return { pos: ui.studio.pos, neg: ui.studio.neg, scene: sceneTags() }; }
+/** 垫图：底图按这次的尺寸铺满裁好，返回不带前缀的 PNG base64 */
+async function i2iImage(dataUrl, w, h) {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('底图读不出来，换一张试试')); i.src = dataUrl; });
+    const c = DOC.createElement('canvas'); c.width = w; c.height = h;
+    const k = Math.max(w / img.width, h / img.height), dw = img.width * k, dh = img.height * k;
+    c.getContext('2d').drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
+    return c.toDataURL('image/png').replace(/^data:image\/png;base64,/, '');
+}
+/** 按底图比例算尺寸：64 的倍数，不超过 1024×1024 的像素数（Opus 免费档以内） */
+function i2iFitSize(iw, ih) {
+    if (!(Number.isFinite(iw) && Number.isFinite(ih) && iw > 0 && ih > 0)) return [1024, 1024];
+    const scale = Math.min(1600 / iw, 1600 / ih, Math.sqrt(1024 * 1024 / (iw * ih)));
+    return [iw, ih].map(v => Math.max(64, Math.floor(v * scale / 64) * 64));
+}
+let i2iLoadSeq = 0;
+async function loadI2i(source, file = false) {
+    const seq = ++i2iLoadSeq, st = ui.studio;
+    const current = () => seq === i2iLoadSeq && ui.studio === st && !stopped;
+    try {
+        const du = file ? await shrinkDataUrl(await fileToDataUrl(source), 1600, 0.92) : source;
+        const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = du; });
+        if (!current()) return false;
+        st.i2i = { strength: 0.7, noise: 0, ...(st.i2i || {}), image: du, iw: im.width, ih: im.height };
+        st.open.i2i = true; render(); return true;
+    } catch { if (current()) toastr.error('这张图读不出来，换一张试试', '垫图'); return false; }
+}
+function i2iFold(s) {
+    const g = ui.studio.i2i || {};
+    const w = Number(s.novelai_width) || 832, h = Number(s.novelai_height) || 1216;
+    const pct = v => Math.round(v * 100) + '%';
+    const strength = g.strength ?? 0.7, noise = g.noise ?? 0;
+    const fit = g.image && g.iw ? i2iFitSize(g.iw, g.ih) : null;
+    const body = g.image ? `<div class="pc-i2i">
+        <img src="${esc(g.image)}" alt="底图" data-act="viewimg" data-src="${esc(g.image)}">
+        <div class="pc-grow">
+          <label class="pc-field"><span>重绘强度 <b data-i2i-out="strength">${pct(strength)}</b> · 越大越不像底图</span><input type="range" min="0.01" max="0.99" step="0.01" value="${strength}" data-i2i="strength"></label>
+          <label class="pc-field"><span>噪声 <b data-i2i-out="noise">${pct(noise)}</b> · 加一点能多些细节</span><input type="range" min="0" max="0.99" step="0.01" value="${noise}" data-i2i="noise"></label>
+        </div></div>
+      <div class="pc-chips wrap pc-mt-s"><label class="pc-pill dashed tiny" style="cursor:pointer">换一张<input type="file" accept="image/*" data-i2iimg hidden></label>
+        ${fit && (fit[0] !== w || fit[1] !== h) ? `<button class="pc-pill dashed tiny" data-act="i2ifit">尺寸改成底图比例（${fit[0]}×${fit[1]}）</button>` : ''}
+        <button class="pc-pill dashed tiny danger" data-act="i2ioff">不垫了</button></div>
+      <div class="pc-hint">生成时底图铺满裁成现在的尺寸（${w}×${h}）。画师串、提示词、角色、氛围照常发。底图只留在这次打开里，刷新就没了。</div>`
+      : `<label class="pc-pill dashed" style="cursor:pointer">放一张底图<input type="file" accept="image/*" data-i2iimg hidden></label>
+      ${ui.studio.result ? '<button class="pc-pill dashed" data-act="i2iresult">用上面生成的这张</button>' : ''}
+      <div class="pc-hint">按底图的构图和颜色重画（img2img）。要用自己的 NovelAI key，酒馆转发不行。</div>`;
+    return fold('i2i', '垫图', g.image ? `开 · 强度 ${pct(strength)}${noise ? ' · 噪声 ' + pct(noise) : ''}` : '没放底图', body);
+}
 function previewHtml(s) {
     const cast = studioCast();
     const c = cast.length ? C.studioCastPrompt(studioParts(), cast) : E.composeStudio(studioParts(), s);
@@ -5912,6 +5998,7 @@ function viewStudio(d) {
       <label class="pc-label" for="pc-neg">负面提示词</label>
       <textarea id="pc-neg" class="pc-textarea small mono" data-bind="studio.neg" placeholder="不想出现的东西，比如 1girl, text">${esc(st.neg)}</textarea>
       <div class="pc-mt-s">${castFold()}</div>
+      <div class="pc-mt-s">${i2iFold(s)}</div>
       <div class="pc-row-between" style="margin-top:10px">
         <div class="pc-chips" style="margin:0">${sizeBtn(832, 1216, '竖')}${sizeBtn(1216, 832, '横')}${sizeBtn(1024, 1024, '方')}</div>
         <label class="pc-cfg">CFG <input type="number" step="0.1" data-st="nai3Scale" value="${esc(s.nai3Scale)}"></label>
@@ -5923,6 +6010,7 @@ function viewStudio(d) {
       <img src="${esc(st.result)}" alt="生成结果" data-act="viewimg" data-src="${esc(st.result)}">
       <div class="pc-actions wrap">
         <button class="pc-btn" data-act="saveresult">存为例图</button>
+        <button class="pc-btn" data-act="i2iresult">拿这张垫图</button>
         <button class="pc-btn" data-act="quickshare">上传到共享</button>
         <button class="pc-btn" data-act="inpaint">局部重绘</button>
         <button class="pc-btn" data-act="insertresult">插到聊天最后一楼</button>
@@ -7954,6 +8042,9 @@ async function onClick(ev, outside = false) {
             }
             case 'switcher': openSwitcher(); break;
             case 'pickartist': openSwitcher({ onPick: ref => { applyArtistToStudio(ref); render(); } }); break;
+            case 'i2iresult': { const r = ui.studio.result; if (r && await loadI2i(r)) toastr.info('用这张垫图了，调一下重绘强度再生成', '垫图', { timeOut: 2000 }); break; }
+            case 'i2ioff': ++i2iLoadSeq; ui.studio.i2i = { ...(ui.studio.i2i || {}), image: '' }; render(); break;
+            case 'i2ifit': { const g = ui.studio.i2i; if (!g?.iw) break; const [w, h] = i2iFitSize(g.iw, g.ih); const n = N.settings(); n.novelai_width = String(w); n.novelai_height = String(h); N.save(); render(); break; }
             case 'studiosize': { const [w, h] = el.dataset.size.split('x'); const n = N.settings(); n.novelai_width = w; n.novelai_height = h; N.save(); render(); break; }
             case 'insertai': case 'replaceai': {
                 const st = ui.studio;
@@ -8282,6 +8373,16 @@ async function onClick(ev, outside = false) {
                 if (name == null) break;
                 ui.studio.scenes = [{ ...p, name: name.trim() || '没起名' }, ...(ui.studio.scenes || [])];
                 ui.studio.recentScenes = list.filter(x => x !== p);
+                saveStudio(); render(); break;
+            }
+            case 'scenetag': ui.studio.sceneTag = el.dataset.v || ''; render(); break;
+            case 'scenetags': {
+                const p = ui.studio.scenes?.[Number(el.dataset.i)];
+                if (!p) break;
+                const had = [...new Set((ui.studio.scenes || []).flatMap(x => x.tags || []))];
+                const t = await promptText(`「${p.name || '没起名'}」的标签，逗号隔开${had.length ? `（已有：${had.join('、')}）` : '（比如 证件照，NSFW，双人）'}`, (p.tags || []).join('，'));
+                if (t == null) break;
+                p.tags = [...new Set(t.split(/[,，、;；\n]+/).map(x => x.trim()).filter(Boolean))].slice(0, 8);
                 saveStudio(); render(); break;
             }
             case 'scenerename': {
@@ -8756,8 +8857,11 @@ function onInput(ev) {
     const el = ev.target;
     const d = getData();
     if (el.dataset.ucpCustom !== undefined) { N.settings().UCP_custom = el.value; N.save(); updateStudioPreview(); return; }
+    if (el.dataset.castact) { const k = el.dataset.castact; setStudioCast(studioCast().map(e => e.key === k ? { ...e, act: el.value.trim() } : e)); updateStudioPreview(); return; }
+    if (el.dataset?.i2i) { (ui.studio.i2i ||= {})[el.dataset.i2i] = Number(el.value); const o = root.querySelector(`[data-i2i-out="${el.dataset.i2i}"]`); if (o) o.textContent = Math.round(Number(el.value) * 100) + '%'; }
     if (el.dataset.bind) {
         setPath(ui, el.dataset.bind, el.value);
+        if (el.dataset.bind === 'studio.sceneQ') { clearTimeout(onInput.sq); onInput.sq = setTimeout(render, 250); }
         if (el.dataset.bind === 'studio.pos') { const w = root.querySelector('#pc-pos-ban'); if (w) w.innerHTML = banWarn(getData(), el.value) + lintHtml(el.value); }
         if (el.dataset.bind === 'batch.text') { const w = root.querySelector('#pc-batch-ban'); if (w) w.innerHTML = batchBanWarn(getData(), el.value); }
         if (String(el.dataset.bind).startsWith('cfy.')) { clearTimeout(onInput.cf); onInput.cf = setTimeout(saveCfy, 600); }
@@ -8819,6 +8923,12 @@ async function onChangeEv(ev) {
     if (el.dataset.bindGroup || el.dataset.bindArtist) { commit(); return; }
     if (el.dataset.cast) { C.setCastOn(el.dataset.cast, el.checked); render(); return; }
     if (el.dataset.crtype) { const [g, i] = el.dataset.crtype.split(':'); d.charRefGroups[g].refs[Number(i)].type = el.value; commit({ silent: true }); return; }
+    if (el.dataset.i2iimg !== undefined) {
+        const f = el.files?.[0]; el.value = ''; if (!f) return;
+        await loadI2i(f, true); return;
+    }
+    if (el.dataset.i2i) { const g = (ui.studio.i2i ||= {}); g[el.dataset.i2i] = Number(el.value); render(); return; }
+    if (el.dataset.castact) { const k = el.dataset.castact, v = el.value.trim(); setStudioCast(studioCast().map(e => e.key === k ? { ...e, act: v } : e)); updateStudioPreview?.(); return; }
     if (el.dataset.wardimg !== undefined || el.dataset.outimg !== undefined) {
         const f = el.files[0];
         el.value = '';
@@ -9014,6 +9124,9 @@ async function onChangeEv(ev) {
 
 async function doGenerate() {
     const st = ui.studio;
+    if (st.generating || st.busy) return;
+    st.generating = true;
+    try {
     if (!N.isReady()) { toastr.warning('先到设置里填 NovelAI key', '生成图片'); ui.view = 'settings'; render(); return; }
     if (!st.pos.trim() && !studioCast().length) { toastr.warning('正面提示词是空的', '生成图片'); return; }
     if (T.hasChinese(st.pos.replace(/（[^（）]*）/g, ''))) {
@@ -9026,22 +9139,24 @@ async function doGenerate() {
     saveStudio();
     st.busy = true; render();
     try {
-        const cast = studioCast();
-        if (cast.length) {
-            const p = C.studioCastPrompt(studioParts(), cast);
-            const ids = C.studioCastRefs(p.picks);
-            st.result = await E.generateFull({ ...studioParts(), positive: p.positive, negative: p.negative, chars: p.chars, director: ids.length ? await E.charRefs(ids) : null });
-        } else st.result = await E.generate(studioParts());
+        const g = { ...st.i2i }, ns = N.settings();
+        const width = Number(ns.novelai_width) || 832, height = Number(ns.novelai_height) || 1216;
+        const parts = studioParts(), scene = sceneSnapshot(), sceneOn = st.sceneOn !== false;
+        const cast = studioCast(), p = cast.length ? C.studioCastPrompt(parts, cast) : E.composeStudio(parts);
+        const ids = cast.length ? C.studioCastRefs(p.picks) : null;
+        const i2i = g.image ? { image: await i2iImage(g.image, width, height), strength: g.strength ?? 0.7, noise: g.noise ?? 0 } : null;
+        st.result = await E.generateFull({ i2i, width, height, positive: p.positive, negative: p.negative, chars: p.chars || [], director: ids ? (ids.length ? await E.charRefs(ids) : null) : undefined });
         st.sent = E.runtime.lastSent;
-        rememberScene();
+        rememberScene(scene, sceneOn);
         // 存起来（默认本地浏览器），记到历史生图里；关掉智库、刷新页面后也能找回来
-        const shot = { dataUrl: st.result, raw: st.pos, sent: st.sent, from: 'studio' };
+        const shot = { dataUrl: st.result, raw: parts.pos, sent: st.sent, from: 'studio' };
         pcStoreImage(shot.dataUrl, 'studio_' + Date.now()).then(r => pcRecordImage({ ...shot, url: r.url })).catch(e => console.warn('[智库] 历史生图没存上', e));
     } catch (e) {
         toastr.error(e.message, '生成失败', { timeOut: 8000 });
     } finally {
         st.busy = false; render();
     }
+    } finally { st.generating = false; }
 }
 
 async function saveStudioResult() {

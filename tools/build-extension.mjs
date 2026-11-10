@@ -1,3 +1,4 @@
+import {applyImg2imgCompatibility} from './img2img-compat.mjs';
 import {applyTauriFetchCompatibility} from './tauri-fetch-compat.mjs';
 import {applyPoseInputCompatibility} from './pose-input-compat.mjs';
 import {applySharingWardrobeCompatibility} from './sharing-wardrobe-compat.mjs';
@@ -2741,6 +2742,169 @@ patch(`    \${u.draft ? \`<div class="pc-outsteps">
 patch("case 'outdest': ui.outfit.dest = el.dataset.v; render(); return true;", "case 'outdest': ui.outfit.dest = el.dataset.v; ui.outfit.destChosen = true; render(); return true;");
 patch("[img || o.tags.length, o.tags.length, u.dest].filter(Boolean)", "[img || o.tags.length, o.tags.length, u.destChosen || u.dest].filter(Boolean)");
 patch("<span class=\"${u.dest ? 'done' : ''}\"><b>第三步</b>", "<span class=\"${u.destChosen || u.dest ? 'done' : ''}\"><b>第三步</b>");
+// 0.8.36：生图页垫图（img2img）；存下的固定提示词折叠、加标签、能搜
+patch(`    const params = buildParameters(opts);
+    const sent = {`,`    const params = buildParameters(opts);
+    // 垫图（img2img）：底图已经裁成这次的尺寸
+    if (opts.i2i?.image) {
+        if (s.naiMode === 'tavern') throw new Error('「用酒馆里的 key」不能垫图，到智库设置 → NovelAI 改成「填我的 key」');
+        params.image = opts.i2i.image;
+        params.strength = Number(opts.i2i.strength) || 0.7;
+        params.noise = Number(opts.i2i.noise) || 0;
+        params.extra_noise_seed = params.seed;
+    }
+    const sent = {`);
+patch(`        director: params.director_reference_images_cached?.length || 0,
+    };
+    if (s.naiMode === 'tavern') {`,`        director: params.director_reference_images_cached?.length || 0,
+        ...(opts.i2i?.image ? { i2i: { strength: params.strength, noise: params.noise } } : {}),
+    };
+    if (s.naiMode === 'tavern') {`);
+patch(`body: JSON.stringify({ input: opts.positive, model, action: 'generate', parameters: params, use_new_shared_trial: true }),`,`body: JSON.stringify({ input: opts.positive, model, action: opts.i2i?.image ? 'img2img' : 'generate', parameters: params, use_new_shared_trial: true }),`);
+patch(`async function generate({ pos, neg, scene = '', width, height }) {
+    const { positive, negative } = composeStudio({ pos, neg, scene });
+    return run({ positive, negative, width, height });`,`async function generate({ pos, neg, scene = '', width, height, i2i }) {
+    const { positive, negative } = composeStudio({ pos, neg, scene });
+    return run({ positive, negative, width, height, i2i });`);
+patch(`async function generateFull({ positive, negative, chars = [], width, height, director, backend }) {
+    return run({ positive, negative, chars, width, height, director, backend });`,`async function generateFull({ positive, negative, chars = [], width, height, director, backend, i2i }) {
+    return run({ positive, negative, chars, width, height, director, backend, i2i });`);
+patch(`function studioParts() { return { pos: ui.studio.pos, neg: ui.studio.neg, scene: sceneTags() }; }`,`function studioParts() { return { pos: ui.studio.pos, neg: ui.studio.neg, scene: sceneTags() }; }
+/** 垫图：底图按这次的尺寸铺满裁好，返回不带前缀的 PNG base64 */
+async function i2iImage(dataUrl, w, h) {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('底图读不出来，换一张试试')); i.src = dataUrl; });
+    const c = DOC.createElement('canvas'); c.width = w; c.height = h;
+    const k = Math.max(w / img.width, h / img.height), dw = img.width * k, dh = img.height * k;
+    c.getContext('2d').drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
+    return c.toDataURL('image/png').replace(/^data:image\\/png;base64,/, '');
+}
+/** 按底图比例算尺寸：64 的倍数，不超过 1024×1024 的像素数（Opus 免费档以内） */
+function i2iFitSize(iw, ih) {
+    const r = iw / ih, area = 1024 * 1024;
+    let h = Math.floor(Math.sqrt(area / r) / 64) * 64, w = Math.floor(h * r / 64) * 64;
+    w = Math.max(64, Math.min(w, 1600)); h = Math.max(64, Math.min(h, 1600));
+    return [w, h];
+}
+function i2iFold(s) {
+    const g = ui.studio.i2i || {};
+    const w = Number(s.novelai_width) || 832, h = Number(s.novelai_height) || 1216;
+    const pct = v => Math.round(v * 100) + '%';
+    const strength = g.strength ?? 0.7, noise = g.noise ?? 0;
+    const fit = g.image && g.iw ? i2iFitSize(g.iw, g.ih) : null;
+    const body = g.image ? \`<div class="pc-i2i">
+        <img src="\${esc(g.image)}" alt="底图" data-act="viewimg" data-src="\${esc(g.image)}">
+        <div class="pc-grow">
+          <label class="pc-field"><span>重绘强度 <b data-i2i-out="strength">\${pct(strength)}</b> · 越大越不像底图</span><input type="range" min="0.01" max="0.99" step="0.01" value="\${strength}" data-i2i="strength"></label>
+          <label class="pc-field"><span>噪声 <b data-i2i-out="noise">\${pct(noise)}</b> · 加一点能多些细节</span><input type="range" min="0" max="0.99" step="0.01" value="\${noise}" data-i2i="noise"></label>
+        </div></div>
+      <div class="pc-chips wrap pc-mt-s"><label class="pc-pill dashed tiny" style="cursor:pointer">换一张<input type="file" accept="image/*" data-i2iimg hidden></label>
+        \${fit && (fit[0] !== w || fit[1] !== h) ? \`<button class="pc-pill dashed tiny" data-act="i2ifit">尺寸改成底图比例（\${fit[0]}×\${fit[1]}）</button>\` : ''}
+        <button class="pc-pill dashed tiny danger" data-act="i2ioff">不垫了</button></div>
+      <div class="pc-hint">生成时底图铺满裁成现在的尺寸（\${w}×\${h}）。画师串、提示词、角色、氛围照常发。底图只留在这次打开里，刷新就没了。</div>\`
+      : \`<label class="pc-pill dashed" style="cursor:pointer">放一张底图<input type="file" accept="image/*" data-i2iimg hidden></label>
+      \${ui.studio.result ? '<button class="pc-pill dashed" data-act="i2iresult">用上面生成的这张</button>' : ''}
+      <div class="pc-hint">按底图的构图和颜色重画（img2img）。要用自己的 NovelAI key，酒馆转发不行。</div>\`;
+    return fold('i2i', '垫图', g.image ? \`开 · 强度 \${pct(strength)}\${noise ? ' · 噪声 ' + pct(noise) : ''}\` : '没放底图', body);
+}`);
+patch(`      <div class="pc-mt-s">\${castFold()}</div>`,`      <div class="pc-mt-s">\${castFold()}</div>
+      <div class="pc-mt-s">\${i2iFold(s)}</div>`);
+patch(`            const ids = C.studioCastRefs(p.picks);
+            st.result = await E.generateFull({ ...studioParts(), positive: p.positive, negative: p.negative, chars: p.chars, director: ids.length ? await E.charRefs(ids) : null });
+        } else st.result = await E.generate(studioParts());`,`            const ids = C.studioCastRefs(p.picks);
+            st.result = await E.generateFull({ ...studioParts(), i2i, positive: p.positive, negative: p.negative, chars: p.chars, director: ids.length ? await E.charRefs(ids) : null });
+        } else st.result = await E.generate({ ...studioParts(), i2i });`);
+patch(`    st.busy = true; render();
+    try {
+        const cast = studioCast();
+        if (cast.length) {`,`    st.busy = true; render();
+    try {
+        const g = st.i2i, ns = N.settings();
+        const i2i = g?.image ? { image: await i2iImage(g.image, Number(ns.novelai_width) || 832, Number(ns.novelai_height) || 1216), strength: g.strength ?? 0.7, noise: g.noise ?? 0 } : null;
+        const cast = studioCast();
+        if (cast.length) {`);
+patch(`        <button class="pc-btn" data-act="saveresult">存为例图</button>`,`        <button class="pc-btn" data-act="saveresult">存为例图</button>
+        <button class="pc-btn" data-act="i2iresult">拿这张垫图</button>`);
+patch(`            case 'studiosize': {`,`            case 'i2iresult': { const r = ui.studio.result; if (!r) break; const im = new Image(); im.onload = () => { ui.studio.i2i = { ...(ui.studio.i2i || {}), image: r, iw: im.width, ih: im.height }; ui.studio.open.i2i = true; render(); }; im.src = r; toastr.info('用这张垫图了，调一下重绘强度再生成', '垫图', { timeOut: 2000 }); break; }
+            case 'i2ioff': ui.studio.i2i = { ...(ui.studio.i2i || {}), image: '' }; render(); break;
+            case 'i2ifit': { const g = ui.studio.i2i; if (!g?.iw) break; const [w, h] = i2iFitSize(g.iw, g.ih); const n = N.settings(); n.novelai_width = String(w); n.novelai_height = String(h); N.save(); render(); break; }
+            case 'studiosize': {`);
+patch(`    if (el.dataset.wardimg !== undefined || el.dataset.outimg !== undefined) {`,`    if (el.dataset.i2iimg !== undefined) {
+        const f = el.files?.[0]; el.value = ''; if (!f) return;
+        try {
+            const du = await shrinkDataUrl(await fileToDataUrl(f), 1600, 0.92);
+            const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = du; });
+            ui.studio.i2i = { strength: 0.7, noise: 0, ...(ui.studio.i2i || {}), image: du, iw: im.width, ih: im.height };
+            ui.studio.open.i2i = true;
+        } catch { toastr.error('这张图读不出来，换一张试试', '垫图'); }
+        render(); return;
+    }
+    if (el.dataset.i2i) { const g = (ui.studio.i2i ||= {}); g[el.dataset.i2i] = Number(el.value); render(); return; }
+    if (el.dataset.wardimg !== undefined || el.dataset.outimg !== undefined) {`);
+patch(`    if (el.dataset.bind) {
+        setPath(ui, el.dataset.bind, el.value);`,`    if (el.dataset?.i2i) { const o = root.querySelector(\`[data-i2i-out="\${el.dataset.i2i}"]\`); if (o) o.textContent = Math.round(Number(el.value) * 100) + '%'; }
+    if (el.dataset.bind) {
+        setPath(ui, el.dataset.bind, el.value);
+        if (el.dataset.bind === 'studio.sceneQ') { clearTimeout(onInput.sq); onInput.sq = setTimeout(render, 250); }`);
+patch(`.pc-recent-scenes>summary::-webkit-details-marker{display:none}`,`.pc-recent-scenes>summary::-webkit-details-marker{display:none}
+.pc-saved-scenes>summary{font-size:13px;color:var(--pc-ink);letter-spacing:.05em}
+.pc-scenetags{display:flex;flex-wrap:wrap;gap:4px;margin:3px 0 2px}
+.pc-scenetags i{font-style:normal;font-size:11px;padding:1px 8px;border-radius:99px;border:1px solid var(--pc-dash);color:var(--pc-ink-soft)}
+.pc-i2i{display:flex;gap:10px;align-items:flex-start}
+.pc-i2i img{width:84px;max-height:120px;object-fit:cover;border-radius:12px;cursor:zoom-in}
+.pc-i2i input[type=range]{width:100%}`);
+patch(`      \${saved.length ? '<div class="pc-promptsec">存下的固定提示词</div>' + saved.map((p, i) => sceneRow(p, i, 'saved')).join('') : ''}`,`      \${saved.length ? (() => {
+        const tagsOf = p => (p.tags ??= sceneAutoTags(p.scene));
+        const all = [...new Set(saved.flatMap(tagsOf))];
+        const f = all.includes(st.sceneTag) || st.sceneTag === '__none' ? st.sceneTag : '', q = String(st.sceneQ || '').trim().toLowerCase();
+        const rows = saved.map((p, i) => [p, i]).filter(([p]) => (!f || (f === '__none' ? !tagsOf(p).length : tagsOf(p).includes(f))) && (!q || [p.name, p.scene, p.sceneSrc, ...tagsOf(p)].join(' ').toLowerCase().includes(q)));
+        const curP = saved.find(p => sceneSig(p) === sceneSig(sceneSnapshot()));
+        const chip = (v, t) => \`<button class="pc-pill tiny \${f === v ? 'on' : 'dashed'}" data-act="scenetag" data-v="\${esc(v)}">\${esc(t)}</button>\`;
+        return \`<details class="pc-recent-scenes pc-saved-scenes" \${st.open.savedScenes ? 'open' : ''} data-fold="savedScenes"><summary>存下的固定提示词 \${saved.length} 条\${curP ? \` · 在用「\${esc(curP.name || '没起名')}」\` : ''} ▸</summary>
+          \${saved.length > 0 ? \`<label class="pc-search pc-mt-s"><span class="pc-sr">搜固定提示词</span>\${ICON.search}<input data-bind="studio.sceneQ" value="\${esc(st.sceneQ || '')}" placeholder="搜名字、标签、提示词"></label>\` : ''}
+          \${all.length ? \`<div class="pc-chips wrap" style="margin-top:8px">\${chip('', '全部')}\${all.map(t => chip(t, t)).join('')}\${saved.some(p => !tagsOf(p).length) ? chip('__none', '没标签') : ''}</div>\` : '<div class="pc-dim small" style="margin-top:6px">点每条的「标签」可以分类，比如 证件照、NSFW、双人</div>'}
+          \${rows.map(([p, i]) => sceneRow(p, i, 'saved')).join('') || '<div class="pc-dim small" style="margin-top:8px">没有对得上的</div>'}</details>\`;
+      })() : ''}`);
+patch(`function sceneRow(p, i, kind) {`,`const SCENE_NSFW = /\\b(?:nsfw|nude|naked|nipples?|areolae?|penis|pussy|vagina|clitoris|sex|cum|ejaculation|masturbation|erection|anus|anal|fellatio|paizuri|handjob|cunnilingus|testicles|pubic hair|topless|bottomless|spread (?:ass|legs|pussy))\\b/i;
+/** 没标过的旧条目：带明显 NSFW 词的先标上 NSFW */
+const sceneAutoTags = text => SCENE_NSFW.test(String(text || '')) ? ['NSFW'] : [];
+function sceneRow(p, i, kind) {`);
+patch(`      <div class="pc-grow"><b>\${esc(title)}\${cur ? ' <em>在用</em>' : ''}</b><small class="mono">\${esc(p.scene)}</small></div>`,`      <div class="pc-grow"><b>\${esc(title)}\${cur ? ' <em>在用</em>' : ''}</b>\${kind === 'saved' && p.tags?.length ? \`<span class="pc-scenetags">\${p.tags.map(t => \`<i>\${esc(t)}</i>\`).join('')}</span>\` : ''}<small class="mono">\${esc(p.scene)}</small></div>`);
+patch(`\`<button class="pc-pill tiny dashed" data-act="scenerename" data-i="\${i}">改名</button>\`}`,`\`<button class="pc-pill tiny dashed" data-act="scenerename" data-i="\${i}">改名</button><button class="pc-pill tiny dashed" data-act="scenetags" data-i="\${i}">标签</button>\`}`);
+patch(`            case 'scenerename': {`,`            case 'scenetag': ui.studio.sceneTag = el.dataset.v || ''; render(); break;
+            case 'scenetags': {
+                const p = ui.studio.scenes?.[Number(el.dataset.i)];
+                if (!p) break;
+                const had = [...new Set((ui.studio.scenes || []).flatMap(x => x.tags || []))];
+                const t = await promptText(\`「\${p.name || '没起名'}」的标签，逗号隔开\${had.length ? \`（已有：\${had.join('、')}）\` : '（比如 证件照，NSFW，双人）'}\`, (p.tags || []).join('，'));
+                if (t == null) break;
+                p.tags = [...new Set(t.split(/[,，、;；\\n]+/).map(x => x.trim()).filter(Boolean))].slice(0, 8);
+                saveStudio(); render(); break;
+            }
+            case 'scenerename': {`);
+// 0.8.36：生图页双人每人单独写动作；固定提示词排到衣服前面；生图页不受「聊天不分角色」影响
+patch(`    return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', tags: [tagText(ch.appearance), nsfw ? tagText(ch.nsfwBody) : '', tagText(out?.tags)].filter(Boolean).join(', '), x: CAST_X[e.pos] ?? 0.5 };
+}`,`    const look = [tagText(ch.appearance), nsfw ? tagText(ch.nsfwBody) : ''].filter(Boolean).join(', ');
+    const act = String(e.act || '').trim(), fit = tagText(out?.tags);
+    // 分角色时：外貌 → 这个人的动作 → 衣服，动作别被一长串衣服挤到最后
+    return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', look, act, fit, tags: [look, act, fit].filter(Boolean).join(', '), x: CAST_X[e.pos] ?? 0.5 };
+}`);
+patch(`    if (picks.length === 1 || !canSplit()) {
+        const lead = picks.length === 1 ? 'solo' : (hasCount ? '' : countTags(chars));
+        return { ...E.composeStudio({ pos: M.mergeTags(pos, lead, ...picks.map(p => p.tags)), neg: negAll, scene }), chars: [], picks };
+    }`,`    if (picks.length === 1 || !canSplit({ chat: false })) {
+        const lead = picks.length === 1 ? 'solo' : (hasCount ? '' : countTags(chars));
+        // 固定提示词（动作、镜头）放在外貌后面、衣服前面：NovelAI 越靠前越听话，原来排在一长串衣服后面容易被忽略
+        return { ...E.composeStudio({ pos: M.mergeTags(pos, lead, ...picks.map(p => [p.look, p.act].filter(Boolean).join(', ')), scene, ...picks.map(p => p.fit)), neg: negAll, scene: '' }), chars: [], picks };
+    }`);
+patch(`    const n = list.length, split = C.canSplit();`,`    const n = list.length, split = C.canSplit({ chat: false });`);
+patch(`          <div class="pc-casttags mono">\${look ? esc(look) : '这个角色还没写外貌：去「角色」页写一下，或者在提示词里自己写'}</div>`,`          <div class="pc-casttags mono">\${look ? esc(look) : '这个角色还没写外貌：去「角色」页写一下，或者在提示词里自己写'}</div>
+          \${n > 1 ? \`<input class="pc-castact mono" data-castact="\${k}" value="\${esc(e.act || '')}" placeholder="\${esc(c.name)}自己的动作、表情">\` : ''}`);
+patch(`      <div class="pc-castmode">\${mode}</div>\${rows}`,`      <div class="pc-castmode">\${mode}</div>\${n > 1 ? \`<div class="pc-dim small" style="margin-top:6px">\${split ? '两个人容易弄错谁在做什么：' : ''}每个人的动作、表情写在他自己那一栏，固定提示词里只放镜头、场景这类大家共用的。两人之间的动作用 NovelAI 的互动写法：做的人写 <span class="mono">source#hug</span>，被做的人写 <span class="mono">target#hug</span>，一起做写 <span class="mono">mutual#hug</span>。</div>\` : ''}\${rows}`);
+patch(`    if (el.dataset.wardimg !== undefined || el.dataset.outimg !== undefined) {`,`    if (el.dataset.castact) { const k = el.dataset.castact, v = el.value.trim(); setStudioCast(studioCast().map(e => e.key === k ? { ...e, act: v } : e)); updateStudioPreview?.(); return; }
+    if (el.dataset.wardimg !== undefined || el.dataset.outimg !== undefined) {`);
+patch(`.pc-i2i{display:flex;gap:10px;align-items:flex-start}`,`.pc-i2i{display:flex;gap:10px;align-items:flex-start}
+.pc-castact{width:100%;box-sizing:border-box;margin-top:6px;padding:7px 12px;border-radius:12px;border:1.5px dashed var(--pc-dash);background:transparent;color:var(--pc-ink);font-size:12px}`);
+s=applyImg2imgCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
