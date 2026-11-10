@@ -4168,12 +4168,17 @@ async function imagePose(imageDataUrl) {
 姿势：身体姿势（standing、sitting、leaning forward、lying on side 等）、手和手臂的动作、腿的动作、头的朝向和视线方向；多人时写互动和相对位置（hug、holding hands、back-to-back 等）；表情最多写一两个。
 构图（必须写，不能空）：景别（extreme close-up、close-up、portrait、upper body、cowboy shot、full body、wide shot 选一个）、机位角度（from above、from below、from side、from behind、straight-on、dutch angle、pov）、裁切（head out of frame、cropped legs、feet out of frame、xx focus）、人物在画面里的位置（centered、off-center、rule of thirds）、透视和景深（foreshortening、fisheye、depth of field、blurry background）。
 不写长相、衣服、背景、画风、画师。看不清的不要编。
+只在 NSFW 图里才会用的标签（性行为、裸露部位、体液、明显带性暗示的姿势，比如 spread legs、presenting、sex、saliva、cum、nipples 等）不要放进 pose，单独放进 nsfw；普通图里也常见的姿势放 pose。
 ${PAIRS}
-只输出 JSON：{"pose": [...], "composition": [...]}`;
+只输出 JSON：{"pose": [...], "composition": [...], "nsfw": [...]}`;
     const j = pickJson(await askVision(sys, '读这张图的姿势和构图。', imageDataUrl, { maxTokens: 1200, fn: 'pose' }));
-    const pose = normPairs(j.pose), composition = normPairs(j.composition);
-    if (!pose.length && !composition.length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
-    return { pose, composition };
+    const NSFW_RE = /\b(nsfw|sex|penis|vagina|pussy|nipples?|cum|ejaculation|saliva|spread legs|presenting|masturbation|fellatio|paizuri|orgasm|ahegao|nude|naked|bdsm|bondage|groping|panties aside|after sex|rape)\b/i;
+    let pose = normPairs(j.pose), composition = normPairs(j.composition), nsfw = normPairs(j.nsfw);
+    // AI 偶尔还是放错栏：明显的挪到 NSFW
+    const moved = pose.filter(p => NSFW_RE.test(p.en));
+    if (moved.length) { pose = pose.filter(p => !moved.includes(p)); nsfw = [...nsfw, ...moved]; }
+    if (!pose.length && !composition.length && !nsfw.length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
+    return { pose, composition, nsfw };
 }
 return { AI_FNS, stopFetch, extractCastFromChat, apiFor, aiSeen, aiCfg, splitFormat, stToEntries, tavernPresets, entriesFor, currentTavernPreset, imagePose, imageToPrompt, zhForTags, extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
 })();
@@ -9202,8 +9207,8 @@ function showImg2Prompt(r, from) {
 /** 看图读出的姿势和构图：挑着用，带中文 */
 function showPose(r) {
     const st = ui.studio;
-    const all = [...r.pose.map(p => ({ ...p, g: '姿势' })), ...r.composition.map(p => ({ ...p, g: '构图' }))];
-    const picked = new Set(all.map((_, i) => i));
+    const all = [...r.pose.map(p => ({ ...p, g: '姿势' })), ...r.composition.map(p => ({ ...p, g: '构图' })), ...(r.nsfw || []).map(p => ({ ...p, g: 'NSFW' }))];
+    const picked = new Set(all.map((p, i) => p.g === 'NSFW' ? -1 : i).filter(i => i >= 0));
     const box = modal('<div data-pose></div>');
     const draw = () => {
         const grp = g => all.map((p, i) => [p, i]).filter(([p]) => p.g === g).map(([p, i]) => `<button class="pc-pair-pick ${picked.has(i) ? 'on' : ''}" data-pi="${i}"><span class="mono">${esc(p.en)}</span>${p.zh ? `<em>${esc(p.zh)}</em>` : ''}</button>`).join('') || '<span class="pc-dim small">没读出来</span>';
@@ -9211,9 +9216,10 @@ function showPose(r) {
           <h3 class="pc-h3">图里的姿势和构图</h3><div class="pc-dim small">点标签选上 / 取消，选上的才会用。</div>
           <div class="pc-label">姿势</div><div>${grp('姿势')}</div>
           <div class="pc-label">构图</div><div>${grp('构图')}</div>
+          ${all.some(p => p.g === 'NSFW') ? `<div class="pc-label">NSFW（默认不选，要用就点上）</div><div>${grp('NSFW')}</div>` : ''}
           <div class="pc-actions wrap">
             <button class="pc-btn dark" data-pa="pos">接在正面后面</button>
-            <button class="pc-btn" data-pa="scene">放进固定提示词</button>
+            <button class="pc-btn" data-pa="scene">换成固定提示词</button>
             <button class="pc-btn" data-pa="copy">复制</button>
             <button class="pc-btn" data-pa="no">算了</button></div>`;
     };
@@ -9227,9 +9233,9 @@ function showPose(r) {
         if (!tags) { toastr.info('一个都没选', '姿势构图'); return; }
         if (a === 'copy') { try { await navigator.clipboard.writeText(tags); toastr.success('复制好了', '姿势构图', { timeOut: 1200 }); } catch { toastr.info(tags, '复制不了，自己长按复制'); } return; }
         if (a === 'pos') st.pos = M.mergeTags(st.pos || '', tags);
-        else { st.scene = [String(st.scene || '').trim(), tags].filter(Boolean).join(', '); st.sceneOn = true; }
+        else { st.scene = tags; st.sceneEn = ''; st.sceneOn = true; }
         saveStudio(); box.closeModal(); ui.view = 'studio'; render();
-        toastr.success(a === 'pos' ? '接在正面后面了' : '放进固定提示词了', '姿势构图', { timeOut: 1500 });
+        toastr.success(a === 'pos' ? '接在正面后面了' : '固定提示词换成这些了', '姿势构图', { timeOut: 1500 });
     });
     draw();
 }
@@ -9791,6 +9797,8 @@ function promptText(title, value = '', multiline = false) {
           ${multiline ? `<textarea class="pc-textarea mono" data-v>${esc(value)}</textarea>` : `<input class="pc-input" data-v value="${esc(value)}">`}
           <div class="pc-actions"><button class="pc-btn" data-m="no">算了</button><button class="pc-btn dark" data-m="ok">好</button></div>`);
         const done = v => { box.closeModal(); resolve(v); };
+        // 单行（取名字之类）：打开时全选，一打字就替换掉旧的
+        if (!multiline) setTimeout(() => { const inp = box.querySelector('[data-v]'); try { inp.focus({ preventScroll: true }); inp.select(); } catch { } }, 60);
         box.addEventListener('click', ev => { const m = ev.target.closest('[data-m]')?.dataset.m; if (m === 'ok') done(box.querySelector('[data-v]').value.trim()); if (m === 'no') done(null); });
         box.addEventListener('keydown', ev => { if (ev.key === 'Enter' && !multiline) done(box.querySelector('[data-v]').value.trim()); });
         box.parentElement.addEventListener('click', ev => { if (ev.target === box.parentElement) resolve(null); });

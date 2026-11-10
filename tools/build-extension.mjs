@@ -2360,6 +2360,38 @@ patch(`            const o = C.currentOutfit(c);
             const others = o ? C.outfitHolders(o).filter(x => x.owner.key !== c.key) : [];
             if (!o || !(await confirmBox(others.length ? \`把「\${o.name}」从\${c.name}身上拿掉？\${others.map(x => x.owner.name).join('、')}还穿着这套，不受影响。\` : \`删掉「\${o.name}」这套衣服？\`))) return true;
             c.outfits = c.outfits.filter(x => x !== o); c.outfitId = c.outfits[0]?.id || ''; save();`);
+// 看图读姿势：NSFW 的动作单独一栏、默认不选；放进固定提示词改成替换；改名输入框一打字就清掉旧名字
+patch(`不写长相、衣服、背景、画风、画师。看不清的不要编。
+\${PAIRS}
+只输出 JSON：{"pose": [...], "composition": [...]}\`;`,`不写长相、衣服、背景、画风、画师。看不清的不要编。
+只在 NSFW 图里才会用的标签（性行为、裸露部位、体液、明显带性暗示的姿势，比如 spread legs、presenting、sex、saliva、cum、nipples 等）不要放进 pose，单独放进 nsfw；普通图里也常见的姿势放 pose。
+\${PAIRS}
+只输出 JSON：{"pose": [...], "composition": [...], "nsfw": [...]}\`;`);
+patch(`    const pose = normPairs(j.pose), composition = normPairs(j.composition);
+    if (!pose.length && !composition.length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
+    return { pose, composition };`,`    const NSFW_RE = /\\b(nsfw|sex|penis|vagina|pussy|nipples?|cum|ejaculation|saliva|spread legs|presenting|masturbation|fellatio|paizuri|orgasm|ahegao|nude|naked|bdsm|bondage|groping|panties aside|after sex|rape)\\b/i;
+    let pose = normPairs(j.pose), composition = normPairs(j.composition), nsfw = normPairs(j.nsfw);
+    // AI 偶尔还是放错栏：明显的挪到 NSFW
+    const moved = pose.filter(p => NSFW_RE.test(p.en));
+    if (moved.length) { pose = pose.filter(p => !moved.includes(p)); nsfw = [...nsfw, ...moved]; }
+    if (!pose.length && !composition.length && !nsfw.length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
+    return { pose, composition, nsfw };`);
+patch(`    const all = [...r.pose.map(p => ({ ...p, g: '姿势' })), ...r.composition.map(p => ({ ...p, g: '构图' }))];
+    const picked = new Set(all.map((_, i) => i));`,`    const all = [...r.pose.map(p => ({ ...p, g: '姿势' })), ...r.composition.map(p => ({ ...p, g: '构图' })), ...(r.nsfw || []).map(p => ({ ...p, g: 'NSFW' }))];
+    const picked = new Set(all.map((p, i) => p.g === 'NSFW' ? -1 : i).filter(i => i >= 0));`);
+patch(`          <div class="pc-label">构图</div><div>\${grp('构图')}</div>`,`          <div class="pc-label">构图</div><div>\${grp('构图')}</div>
+          \${all.some(p => p.g === 'NSFW') ? \`<div class="pc-label">NSFW（默认不选，要用就点上）</div><div>\${grp('NSFW')}</div>\` : ''}`);
+patch(`            <button class="pc-btn" data-pa="scene">放进固定提示词</button>`,`            <button class="pc-btn" data-pa="scene">换成固定提示词</button>`);
+patch(`        else { st.scene = [String(st.scene || '').trim(), tags].filter(Boolean).join(', '); st.sceneOn = true; }
+        saveStudio(); box.closeModal(); ui.view = 'studio'; render();
+        toastr.success(a === 'pos' ? '接在正面后面了' : '放进固定提示词了', '姿势构图', { timeOut: 1500 });`,`        else { st.scene = tags; st.sceneEn = ''; st.sceneOn = true; }
+        saveStudio(); box.closeModal(); ui.view = 'studio'; render();
+        toastr.success(a === 'pos' ? '接在正面后面了' : '固定提示词换成这些了', '姿势构图', { timeOut: 1500 });`);
+patch(`        const done = v => { box.closeModal(); resolve(v); };
+        box.addEventListener('click', ev => { const m = ev.target.closest('[data-m]')?.dataset.m; if (m === 'ok') done(box.querySelector('[data-v]').value.trim()); if (m === 'no') done(null); });`,`        const done = v => { box.closeModal(); resolve(v); };
+        // 单行（取名字之类）：打开时全选，一打字就替换掉旧的
+        if (!multiline) setTimeout(() => { const inp = box.querySelector('[data-v]'); try { inp.focus({ preventScroll: true }); inp.select(); } catch { } }, 60);
+        box.addEventListener('click', ev => { const m = ev.target.closest('[data-m]')?.dataset.m; if (m === 'ok') done(box.querySelector('[data-v]').value.trim()); if (m === 'no') done(null); });`);
 // 0.8.36：设置里单独的 AI 预设、下载和水印、先存后改名、一键上传到共享
 patch(`    const ai = setFold('ai', '翻译和 AI',`,`    const ai0 = setFold('ai', '翻译和 AI',`);
 patch(`    const tpl = setFold('tpl', '例图提示词',`,`    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), \`
