@@ -3118,6 +3118,46 @@ patch(`            case 'batchscene': ui.batch.sceneSig = el.dataset.v || ''; re
             case 'bsneg': d.options.batchSceneNeg = el.dataset.v === 'studio' ? String(ui.studio.neg ?? d.studio?.neg ?? '') : BATCH_SCENE_NEG; commit({ silent: true }); render(); break;`);
 patch(`    if (el.dataset.ucpCustom !== undefined) {`,`    if (el.dataset.bsneg !== undefined) { d.options.batchSceneNeg = el.value; clearTimeout(onInput.bn); onInput.bn = setTimeout(() => commit({ silent: true }), 500); return; }
     if (el.dataset.ucpCustom !== undefined) {`);
+// 0.8.36：AI 请求一开始就给够 8000 长度，不再空了重试
+patch(`async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {`,`/** 带思考的模型会先把限长用在思考上：一开始就给够 8000（只是上限，用不到不花），不再空了重试——重试等于再思考一次，白费额度 */
+const LLM_MIN_TOKENS = 8000;
+const TOO_BIG_TOKENS = /max_tokens|max tokens|max_completion|maximum.{0,20}tokens|tokens.{0,20}(?:exceed|limit|too large)/i;
+async function askLLM(system, user, opts = {}) {
+    const want = Math.max(LLM_MIN_TOKENS, opts.maxTokens || 800);
+    try { return await askLLMOnce(system, user, { ...opts, maxTokens: want }); }
+    catch (e) {
+        // 模型不收这么大的长度（请求直接被拒，没花额度）：按原来的长度发
+        if (want > (opts.maxTokens || 800) && !e.emptyLength && TOO_BIG_TOKENS.test(String(e?.message))) return askLLMOnce(system, user, opts);
+        if (e.emptyLength) throw Object.assign(new Error(\`AI 回复是空的（\${e.diag || '没有更多信息'}）。带思考的模型会先把长度用在思考上：换不带思考的模型，或者在 AI 设置里把思考关掉\`), { emptyLength: true, diag: e.diag });
+        throw e;
+    }
+}
+async function askLLMOnce(system, user, { maxTokens = 800, fn = '' } = {}) {`);
+patch(`async function askVision(system, text, imageDataUrl, { maxTokens = 800, fn = '' } = {}) {`,`/** 看图同理：一开始就给够长度 */
+async function askVision(system, text, imageDataUrl, opts = {}) {
+    const want = Math.max(LLM_MIN_TOKENS, opts.maxTokens || 800);
+    try { return await askVisionOnce(system, text, imageDataUrl, { ...opts, maxTokens: want }); }
+    catch (e) { if (want > (opts.maxTokens || 800) && TOO_BIG_TOKENS.test(String(e?.message))) return askVisionOnce(system, text, imageDataUrl, opts); throw e; }
+}
+async function askVisionOnce(system, text, imageDataUrl, { maxTokens = 800, fn = '' } = {}) {`);
+patch(`async function askRoomy(sys, user, opts) {
+    try {
+        const raw = await askLLM(sys, user, opts);
+        if (answerOf(raw) || String(raw || '').includes('{')) return raw;
+    } catch (e) { if (!e.emptyLength) throw e; }
+    console.warn('[智库] AI 回复是空的，加大长度再试一次');
+    let diag = '';
+    try {
+        const raw = await askLLM(sys, user, { ...opts, maxTokens: Math.max(16000, (opts?.maxTokens || 800) * 2) });
+        if (answerOf(raw) || String(raw || '').includes('{')) return raw;
+    } catch (e) { if (!e.emptyLength && !/max_tokens|max tokens|max_completion/i.test(String(e?.message))) throw e; diag = e.diag || String(e?.message || ''); }
+    throw new Error('AI 回复是空的，加大长度又试了一次还是空的。实际情况：' + (diag || '没有更多信息') + '。如果写着思考用了很多 token，换不带思考的模型或关掉思考；如果结束原因是 stop 但用了 0 token，多半是中转站或模型拒绝了这段设定');
+}`,`/** 只问一次：askLLM 已经给够长度，空了就照实报，不再重试 */
+async function askRoomy(sys, user, opts) {
+    const raw = await askLLM(sys, user, opts);
+    if (answerOf(raw) || String(raw || '').includes('{')) return raw;
+    throw new Error('AI 回复只有思考、没有正文。换不带思考的模型，或者在 AI 设置里把思考关掉');
+}`);
 s=applyImg2imgCompatibility(s);
 s=applyWardrobeCanonCompatibility(s);
 s=applyBatchScenesCompatibility(s);
