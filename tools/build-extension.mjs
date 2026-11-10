@@ -3069,6 +3069,42 @@ patch(`        case 'readcard': {`,`        case 'canonai': {
             return true;
         }
         case 'readcard': {`);
+// 0.8.36：批量例图认出中文名字行；例图可以用存下的固定提示词
+patch(`    for (const line of src.split(/\\n+/).map(x => x.replace(/<\\/?[\\w-]+[^>]*>/g, ' ').trim()).filter(Boolean)) {
+        const toks = splitTop(line).map(t => t.trim()).filter(Boolean);`,`    // 「34 剪影色块｜黑块剪影+一点粉色」这种带中文、没有 artist: 的单独一行：是下一串的名字，不是画师
+    let label = '';
+    const push0 = push;
+    const pushNamed = u => { if (u && label && u.text) u.name = label; label = ''; push0(u); };
+    for (const line of src.split(/\\n+/).map(x => x.replace(/<\\/?[\\w-]+[^>]*>/g, ' ').trim()).filter(Boolean)) {
+        const push = pushNamed;
+        const toks = splitTop(line).map(t => t.trim()).filter(Boolean);
+        if (/[\\u3040-\\u30ff\\u3400-\\u9fff\\uac00-\\ud7af]/.test(line) && !tokenize(line).some(t => t.isArtist) && toks.length <= 2) {
+            label = line.replace(/^\\s*(?:\\d+[.、:：)）]?\\s*|[#＃]+\\s*)/, '').trim().slice(0, 40);
+            continue;
+        }`);
+patch(`const ref = findUnit(d, u) || (u.text ? M.createFromString(d, { name: '', text: u.text }) : { type: 'artist', id: M.ensureArtist(d, u.tag).id });`,`const ref = findUnit(d, u) || (u.text ? M.createFromString(d, { name: u.name || '', text: u.text }) : { type: 'artist', id: M.ensureArtist(d, u.tag).id });`);
+patch(`function chosenTemplates(scope) {
+    const o = scope === 'batch' ? ui.batch : ui.sample;`,`/** 批量例图用生图页存下的固定提示词：按选的构图尺寸临时做成例图模板 */
+function batchSceneTemplates() {
+    const d = getData(), b = ui.batch;
+    const sc = (ui.studio.scenes?.length ? ui.studio.scenes : (d.studio?.scenes || [])).find(p => sceneSig(p) === b.sceneSig);
+    if (!sc) return null;
+    const shots = b.shot === 'all' ? Object.keys(M.SHOTS) : [b.shot in M.SHOTS ? b.shot : 'bust'];
+    return shots.map(sh => {
+        const id = \`fx_\${hashText(sceneSig(sc)).toString(36)}_\${sh}\`;
+        d.templates[id] = { id, name: \`\${sc.name || '固定提示词'}·\${M.SHOTS[sh].name}\`, nsfw: SCENE_NSFW.test(sc.scene), shot: sh, positive: sc.scene, negative: 'text, watermark, signature, multiple views, lowres, bad anatomy', fromScene: true };
+        return id;
+    });
+}
+function chosenTemplates(scope) {
+    if (scope === 'batch' && ui.batch.sceneSig) { const ids = batchSceneTemplates(); if (ids) return ids; ui.batch.sceneSig = ''; }
+    const o = scope === 'batch' ? ui.batch : ui.sample;`);
+patch(`    return \`<div class="pc-chips wrap">\${ratings.map(([k, t]) => \`<button class="pc-pill tiny \${o.rating === k ? 'on' : 'dashed'} \${k === 'nsfw' ? 'nsfw' : ''}" data-act="pickrating" data-scope="\${scope}" data-v="\${k}">\${t}</button>\`).`,`    const saved = scope === 'batch' ? (ui.studio.scenes?.length ? ui.studio.scenes : (getData().studio?.scenes || [])) : [];
+    const sceneRow = saved.length ? \`<div class="pc-dim small" style="margin:4px 0 6px">提示词用：</div><div class="pc-chips wrap"><button class="pc-pill tiny \${!o.sceneSig ? 'on' : 'dashed'}" data-act="batchscene" data-v="">例图模板</button>\${saved.map(p => \`<button class="pc-pill tiny \${o.sceneSig === sceneSig(p) ? 'on' : 'dashed'}" data-act="batchscene" data-v="\${esc(sceneSig(p))}">\${esc(p.name || '没起名')}</button>\`).join('')}</div>\${o.sceneSig ? '<div class="pc-dim small" style="margin:6px 0">用生图页存下的这条固定提示词当例图提示词；下面选尺寸。</div>' : ''}\` : '';
+    if (scope === 'batch' && o.sceneSig) return sceneRow + \`<div class="pc-chips wrap">\${[...Object.entries(M.SHOTS).map(([k, v]) => [k, \`\${v.name} \${v.ratio}\`]), ['all', '三种都要']].map(([k, t]) => \`<button class="pc-pill tiny \${o.shot === k ? 'on' : 'dashed'}" data-act="pickshot" data-scope="batch" data-v="\${k}">\${t}</button>\`).join('')}</div>\`;
+    return sceneRow + \`<div class="pc-chips wrap">\${ratings.map(([k, t]) => \`<button class="pc-pill tiny \${o.rating === k ? 'on' : 'dashed'} \${k === 'nsfw' ? 'nsfw' : ''}" data-act="pickrating" data-scope="\${scope}" data-v="\${k}">\${t}</button>\`).`);
+patch(`            case 'pickshot': (el.dataset.scope === 'batch' ? ui.batch : ui.sample).shot = el.dataset.v; render(); break;`,`            case 'pickshot': (el.dataset.scope === 'batch' ? ui.batch : ui.sample).shot = el.dataset.v; render(); break;
+            case 'batchscene': ui.batch.sceneSig = el.dataset.v || ''; render(); break;`);
 s=applyImg2imgCompatibility(s);
 s=applyWardrobeCanonCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.

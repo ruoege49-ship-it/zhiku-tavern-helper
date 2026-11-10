@@ -2004,8 +2004,17 @@ function parseBatchLines(text) {
         if (cur) push(batchUnit(cur));
         return out;
     }
+    // 「34 剪影色块｜黑块剪影+一点粉色」这种带中文、没有 artist: 的单独一行：是下一串的名字，不是画师
+    let label = '';
+    const push0 = push;
+    const pushNamed = u => { if (u && label && u.text) u.name = label; label = ''; push0(u); };
     for (const line of src.split(/\n+/).map(x => x.replace(/<\/?[\w-]+[^>]*>/g, ' ').trim()).filter(Boolean)) {
+        const push = pushNamed;
         const toks = splitTop(line).map(t => t.trim()).filter(Boolean);
+        if (/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(line) && !tokenize(line).some(t => t.isArtist) && toks.length <= 2) {
+            label = line.replace(/^\s*(?:\d+[.、:：)）]?\s*|[#＃]+\s*)/, '').trim().slice(0, 40);
+            continue;
+        }
         const bare = t => t.replace(/^\s*-?\d+(?:\.\d+)?::/, '').replace(/::\s*$/, '').replace(/[{}\[\]]/g, '').trim();
         if (tokenize(line).some(t => t.isArtist)) push(batchUnit([line]));
         else if (!toks.every(t => batchNameLike(bare(t)))) {
@@ -6366,7 +6375,10 @@ function sampleChooser(scope) {
     const o = scope === 'batch' ? ui.batch : ui.sample;
     const ratings = scope === 'batch' ? [['sfw', 'SFW'], ['nsfw', 'NSFW'], ['both', '两种']] : [['sfw', 'SFW'], ['nsfw', 'NSFW']];
     const shots = [...Object.entries(M.SHOTS).map(([k, v]) => [k, `${v.name} ${v.ratio}`]), ['all', '三种都要']];
-    return `<div class="pc-chips wrap">${ratings.map(([k, t]) => `<button class="pc-pill tiny ${o.rating === k ? 'on' : 'dashed'} ${k === 'nsfw' ? 'nsfw' : ''}" data-act="pickrating" data-scope="${scope}" data-v="${k}">${t}</button>`).join('')}</div>
+    const saved = scope === 'batch' ? (ui.studio.scenes?.length ? ui.studio.scenes : (getData().studio?.scenes || [])) : [];
+    const sceneRow = saved.length ? `<div class="pc-dim small" style="margin:4px 0 6px">提示词用：</div><div class="pc-chips wrap"><button class="pc-pill tiny ${!o.sceneSig ? 'on' : 'dashed'}" data-act="batchscene" data-v="">例图模板</button>${saved.map(p => `<button class="pc-pill tiny ${o.sceneSig === sceneSig(p) ? 'on' : 'dashed'}" data-act="batchscene" data-v="${esc(sceneSig(p))}">${esc(p.name || '没起名')}</button>`).join('')}</div>${o.sceneSig ? '<div class="pc-dim small" style="margin:6px 0">用生图页存下的这条固定提示词当例图提示词；下面选尺寸。</div>' : ''}` : '';
+    if (scope === 'batch' && o.sceneSig) return sceneRow + `<div class="pc-chips wrap">${[...Object.entries(M.SHOTS).map(([k, v]) => [k, `${v.name} ${v.ratio}`]), ['all', '三种都要']].map(([k, t]) => `<button class="pc-pill tiny ${o.shot === k ? 'on' : 'dashed'}" data-act="pickshot" data-scope="batch" data-v="${k}">${t}</button>`).join('')}</div>`;
+    return sceneRow + `<div class="pc-chips wrap">${ratings.map(([k, t]) => `<button class="pc-pill tiny ${o.rating === k ? 'on' : 'dashed'} ${k === 'nsfw' ? 'nsfw' : ''}" data-act="pickrating" data-scope="${scope}" data-v="${k}">${t}</button>`).join('')}</div>
       <div class="pc-chips wrap">${shots.map(([k, t]) => `<button class="pc-pill tiny ${o.shot === k ? 'on' : 'dashed'}" data-act="pickshot" data-scope="${scope}" data-v="${k}">${t}</button>`).join('')}
       <button class="pc-pill tiny dashed" data-act="edittpl" data-scope="${scope}">改提示词</button></div>`;
 }
@@ -6413,7 +6425,20 @@ function openSamplePicker(ref, redraw) {
 }
 
 /** 选中的组合对应哪些模板 id */
+/** 批量例图用生图页存下的固定提示词：按选的构图尺寸临时做成例图模板 */
+function batchSceneTemplates() {
+    const d = getData(), b = ui.batch;
+    const sc = (ui.studio.scenes?.length ? ui.studio.scenes : (d.studio?.scenes || [])).find(p => sceneSig(p) === b.sceneSig);
+    if (!sc) return null;
+    const shots = b.shot === 'all' ? Object.keys(M.SHOTS) : [b.shot in M.SHOTS ? b.shot : 'bust'];
+    return shots.map(sh => {
+        const id = `fx_${hashText(sceneSig(sc)).toString(36)}_${sh}`;
+        d.templates[id] = { id, name: `${sc.name || '固定提示词'}·${M.SHOTS[sh].name}`, nsfw: SCENE_NSFW.test(sc.scene), shot: sh, positive: sc.scene, negative: 'text, watermark, signature, multiple views, lowres, bad anatomy', fromScene: true };
+        return id;
+    });
+}
 function chosenTemplates(scope) {
+    if (scope === 'batch' && ui.batch.sceneSig) { const ids = batchSceneTemplates(); if (ids) return ids; ui.batch.sceneSig = ''; }
     const o = scope === 'batch' ? ui.batch : ui.sample;
     const rs = o.rating === 'both' ? ['sfw', 'nsfw'] : [o.rating];
     const ss = scope === 'batch' ? (o.shot === 'all' ? Object.keys(M.SHOTS) : [o.shot]) : Object.keys(M.SHOTS).filter(k => o.shots.has(k));
@@ -8299,6 +8324,7 @@ async function onClick(ev, outside = false) {
                 break;
             case 'pickrating': (el.dataset.scope === 'batch' ? ui.batch : ui.sample).rating = el.dataset.v; render(); break;
             case 'pickshot': (el.dataset.scope === 'batch' ? ui.batch : ui.sample).shot = el.dataset.v; render(); break;
+            case 'batchscene': ui.batch.sceneSig = el.dataset.v || ''; render(); break;
             case 'edittpl': await openTemplateEditor(chosenTemplates(el.dataset.scope || 'sample')[0] || 'sfw_bust'); break;
             case 'sample': { const r = refFrom(el); if (!ui.busyRefs.has(r.id)) openSamplePicker(r, render); break; }
             case 'samplemembers': {
@@ -9380,7 +9406,7 @@ function startBatch() {
     const tpls = chosenTemplates('batch');
     const jobs = [];
     for (const u of list) {
-        const ref = findUnit(d, u) || (u.text ? M.createFromString(d, { name: '', text: u.text }) : { type: 'artist', id: M.ensureArtist(d, u.tag).id });
+        const ref = findUnit(d, u) || (u.text ? M.createFromString(d, { name: u.name || '', text: u.text }) : { type: 'artist', id: M.ensureArtist(d, u.tag).id });
         if (!ref) continue;
         const item = M.resolveTicket(d, ref).item;
         for (const t of tpls) jobs.push({ ref, templateId: t, skip: ui.batch.skipExisting && item.images.some(i => i.template === t) });
