@@ -6747,10 +6747,10 @@ function viewOutfit(d) {
     <div class="pc-outhero">${img ? `<img src="${esc(img)}" alt="" data-act="viewimg" data-src="${esc(img)}">` : '<span>还没有图</span>'}
       ${u.busy === 'read' ? '<em class="pc-outhero-busy"><span class="pc-busy">AI 正在看图</span></em>' : ''}
       <label class="pc-outhero-btn">换一张<input type="file" accept="image/*" data-outimg hidden></label></div>
-    ${u.draft ? `<div class="pc-outsteps">
+    ${u.draft ? (() => { const n = [img || o.tags.length, o.tags.length, u.dest].filter(Boolean).length; return fold('outsteps', '怎么做', n ? `三步做完 ${n} 步` : '放图或打字 → 检查标签 → 选存到哪里', `<div class="pc-outsteps">
       <span class="${img || o.tags.length ? 'done' : ''}"><b>第一步</b>点图片右下「换一张」放一张衣服的图，AI 会写成标签；没图就直接在下面打字加</span>
       <span class="${o.tags.length ? 'done' : ''}"><b>第二步</b>看看下面的标签：点一下改、× 删掉、↓↑ 在整体和配饰之间挪</span>
-      <span class="${u.dest ? 'done' : ''}"><b>第三步</b>选「存到哪里」：只进衣柜，或者直接给某个人穿，再点「保存」</span></div>` : ''}
+      <span class="${u.dest ? 'done' : ''}"><b>第三步</b>选「存到哪里」：只进衣柜，或者直接给某个人穿，再点「保存」</span></div>`); })() : ''}
     <section class="pc-card pc-pad pc-mt">
       <div class="pc-row-between"><b>${o.tags.length ? `${o.tags.length} 件` : '还没有标签'}</b>${o.tags.length ? `<button class="pc-pill dashed tiny" data-act="copytext" data-text="${esc(C.tagText(o.tags))}">复制整套</button>` : ''}</div>
       ${outfitSections(o.tags, 'ward', { busy: u.busy === 'add', busyKey: u.addKey })}
