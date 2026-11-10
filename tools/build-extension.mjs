@@ -1,3 +1,4 @@
+import {applyBatchScenesCompatibility} from './batch-scenes-compat.mjs';
 import {applyWardrobeCanonCompatibility} from './wardrobe-canon-compat.mjs';
 import {applyImg2imgCompatibility} from './img2img-compat.mjs';
 import {applyTauriFetchCompatibility} from './tauri-fetch-compat.mjs';
@@ -3119,6 +3120,7 @@ patch(`    if (el.dataset.ucpCustom !== undefined) {`,`    if (el.dataset.bsneg 
     if (el.dataset.ucpCustom !== undefined) {`);
 s=applyImg2imgCompatibility(s);
 s=applyWardrobeCanonCompatibility(s);
+s=applyBatchScenesCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
