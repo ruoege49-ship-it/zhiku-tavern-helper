@@ -5320,7 +5320,7 @@ function renderView() {
     const scroll = body ? body.scrollTop : 0;
     ensureCfyCss();
     const navs = [['studio', '生图'], ['comfy', 'Comfy'], ['comic', '漫画'], ['book', '画师库'], ['vibe', '氛围'], ['cast', '角色'], ['lobby', '共享']];
-    const mainView = ['artist', 'group', 'batch'].includes(ui.view) ? 'book' : ['charedit', 'outfit'].includes(ui.view) ? 'cast' : ui.view;
+    const mainView = ['artist', 'group', 'batch'].includes(ui.view) ? 'book' : ['charedit', 'outfit', 'combine'].includes(ui.view) ? 'cast' : ui.view;
     root.innerHTML = `
     <div class="pc-shell">
       <header class="pc-head">
@@ -6838,11 +6838,12 @@ function viewWardrobe(d) {
         && (!q || (x.o.name + ' ' + C.tagText(x.o.tags) + ' ' + x.o.tags.map(t => t.zh).join(' ')).toLowerCase().includes(q)));
     return `${castTop()}
     <div class="pc-outmake">
-      <label class="pc-btn dark">${IMG_ICON} 图片<input type="file" accept="image/*" data-wardimg hidden></label>
+      <label class="pc-btn dark">${IMG_ICON} 图片<input type="file" accept="image/*" multiple data-wardimg hidden></label>
       <button class="pc-btn" data-act="wardai">✦ AI 设计</button>
       <button class="pc-btn" data-act="wardnew">＋ 自己写</button>
-      <button class="pc-btn" data-act="omimport">从穿搭管理器导入</button>
     </div>
+    ${WARD2_CSS}<div class="pc-outmake2"><button class="pc-btn" data-act="wardcombine">⊕ 配饰搭配</button><button class="pc-pill dashed tiny" data-act="omimport">从穿搭管理器导入</button></div>
+    ${ui.wardBatch ? `<div class="pc-castmode pc-mt-s">批量导入 ${ui.wardBatch.done} / ${ui.wardBatch.total}${ui.wardBatch.fail ? `（${ui.wardBatch.fail} 张没读出标签，存了图，打开改一下）` : ''}… <button class="pc-pill tiny dashed" data-act="wardbatchstop">${ui.wardBatch.stop ? '停下中' : '停'}</button></div>` : '<div class="pc-dim small pc-mt-s">「图片」可以一次选好几张，每张存成一套。</div>'}
     <label class="pc-search pc-mt-s"><span class="pc-sr">搜索</span>${ICON.search}<input data-bind="wardSearch" value="${esc(ui.wardSearch)}" placeholder="搜衣服名、标签"></label>
     <div class="pc-chips">${[['all', '全部'], ...owners.map(c => [c.key, c.name]), ['none', '没给谁穿']].map(([k, t]) => `<button class="pc-pill ${ui.wardFilter === k ? 'on' : 'dashed'}" data-act="wardfilter" data-v="${esc(k)}">${esc(t)}</button>`).join('')}</div>
     <div class="pc-grid2 pc-mt-s">${list.map(({ o, owner, holders }) => `<article class="pc-ticket" data-act="openoutfit" data-owner="${esc(owner?.key || '')}" data-id="${esc(o.id)}">
@@ -6850,6 +6851,36 @@ function viewWardrobe(d) {
         <div class="pc-ticket-text"><b>${esc(o.name)}</b><small>${o.tags.length} 个标签</small><span class="pc-state ${owner ? '' : 'todo'}">${owner ? '穿在：' + esc(holders.map(h => h.owner.name).join('、')) : '还没给谁穿'}</span></div></article>`).join('')
         || empty('衣柜是空的', '点上面「图片」放一张图，AI 会把衣服写成标签；也可以让 AI 设计，或者自己写。')}</div>
     <div style="height:24px"></div>`;
+}
+
+const WARD2_CSS = `<style>.pc-outmake2{display:flex;gap:8px;align-items:center;margin-top:8px}.pc-outmake2 .pc-btn{flex:1 1 auto;min-height:40px;font-size:14px}.pc-outmake2 .pc-pill{flex:none;white-space:nowrap}.pc-cbbase{display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;padding:2px 0 6px}.pc-cbbase::-webkit-scrollbar{display:none}.pc-cbbase button{flex:none;width:86px;display:flex;flex-direction:column;gap:4px;align-items:center;padding:6px;border-radius:14px;border:1.5px dashed var(--pc-dash);background:transparent;color:var(--pc-ink);font:inherit;font-size:12px;cursor:pointer}.pc-cbbase button.on{border-style:solid;border-color:var(--pc-ink)}.pc-cbbase .th{width:72px;height:72px;border-radius:10px;background:var(--pc-paper-2, rgba(128,128,128,.18));object-fit:cover;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--pc-ink-soft)}.pc-cbbase b{font-weight:600;max-width:74px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pc-cbacc{display:flex;flex-wrap:wrap;gap:6px}.pc-cbacc button{border-radius:99px;border:1.5px dashed var(--pc-dash);background:transparent;color:var(--pc-ink);padding:5px 11px;font-size:12px;cursor:pointer}.pc-cbacc button.on{border-style:solid;background:var(--pc-ink);color:var(--pc-paper, #fff)}.pc-cbacc em{font-style:normal;opacity:.7;margin-left:4px}</style>`;
+/** 配饰搭配：一套当底（只取整体），再从所有衣服的配饰里挑，存成新的一套 */
+function viewCombine(d) {
+    const g = (ui.combine ||= { base: '', acc: [], q: '' });
+    const groups = C.wardrobeGroups();
+    const base = groups.find(x => x.o.id === g.base)?.o || null;
+    const pool = new Map();
+    for (const x of groups) for (const t of x.o.tags) if (t.en && isAcc(t) && !pool.has(t.en.toLowerCase())) pool.set(t.en.toLowerCase(), { t, from: x.o.name });
+    const q = String(g.q || '').trim().toLowerCase();
+    const sel = new Set(g.acc);
+    const accs = [...pool.entries()].filter(([k, a]) => !q || sel.has(k) || (k + ' ' + (a.t.zh || '') + ' ' + a.from).toLowerCase().includes(q));
+    const body = base ? base.tags.filter(t => !isAcc(t)) : [];
+    const picked = [...pool.entries()].filter(([k]) => sel.has(k)).map(([, a]) => a.t);
+    const src = o => o.image ? (o.image.startsWith('data:') ? o.image : '/' + o.image.replace(/^\/+/, '')) : '';
+    return `
+    ${WARD2_CSS}<div class="pc-dhead"><button class="pc-round" data-act="cbback" aria-label="返回">‹</button><div class="pc-dtitle" style="border:0">配饰搭配</div></div>
+    <section class="pc-card pc-pad">
+      <div class="pc-dim small">选一套当底，再从别的衣服里挑配饰加上，存成新的一套。</div>
+      <div class="pc-promptsec" style="margin-top:12px">底子（只用它的「整体」）</div>
+      <div class="pc-cbbase"><button class="${!g.base ? 'on' : ''}" data-act="cbbase" data-id=""><span class="th">不要</span><b>不要底子</b></button>${groups.map(({ o }) => `<button class="${g.base === o.id ? 'on' : ''}" data-act="cbbase" data-id="${esc(o.id)}">${src(o) ? `<img class="th" src="${esc(src(o))}" alt="" loading="lazy">` : '<span class="th">没图</span>'}<b>${esc(o.name)}</b></button>`).join('')}</div>
+      <div class="pc-promptsec" style="margin-top:12px">配饰（所有衣服里的配饰，点一下选上）· 选了 ${picked.length} 个</div>
+      ${pool.size > 12 ? `<label class="pc-search" style="margin-bottom:8px"><span class="pc-sr">搜配饰</span>${ICON.search}<input data-bind="combine.q" value="${esc(g.q || '')}" placeholder="搜配饰，中英文都行"></label>` : ''}
+      <div class="pc-cbacc">${accs.map(([k, a]) => `<button class="${sel.has(k) ? 'on' : ''}" data-act="cbacc" data-k="${esc(k)}" title="来自「${esc(a.from)}」">${esc(a.t.en)}${a.t.zh ? `<em>${esc(a.t.zh)}</em>` : ''}</button>`).join('') || '<span class="pc-dim small">衣柜里还没有配饰标签</span>'}</div>
+      <div class="pc-promptsec" style="margin-top:14px">会存成</div>
+      <div class="mono small" style="line-height:1.6;word-break:break-word">${esc([...body, ...picked].map(t => t.en).join(', ')) || '<span class="pc-dim">先选底子或配饰</span>'}</div>
+      <button class="pc-btn dark pc-mt" style="width:100%" data-act="cbsave" ${body.length || picked.length ? '' : 'disabled'}>存成新的一套 →</button>
+      <div class="pc-dim small" style="margin-top:6px">存之前会进这套的页面，可以改名、给谁穿、生成展示图。</div>
+    </section>`;
 }
 
 /** 一套衣服的页面（新的草稿也用这页） */
@@ -7109,6 +7140,21 @@ async function charAction(act, el) {
         }
         case 'openoutfit': ui.outfit = { owner: el.dataset.owner, id: el.dataset.id }; ui.view = 'outfit'; ui.addText.ward = ''; render(); root.querySelector('.pc-body')?.scrollTo(0, 0); return true;
         case 'outback': ui.view = 'cast'; ui.castTop = 'wardrobe'; ui.outfit = null; render(); return true;
+        case 'wardcombine': ui.combine = { base: '', acc: [], q: '' }; ui.view = 'combine'; render(); return true;
+        case 'cbback': ui.view = 'cast'; ui.castTop = 'wardrobe'; render(); return true;
+        case 'cbbase': ui.combine.base = el.dataset.id || ''; render(); return true;
+        case 'cbacc': { const k = el.dataset.k, a = ui.combine.acc; ui.combine.acc = a.includes(k) ? a.filter(x => x !== k) : [...a, k]; render(); return true; }
+        case 'cbsave': {
+            const g = ui.combine, groups = C.wardrobeGroups();
+            const base = groups.find(x => x.o.id === g.base)?.o;
+            const pool = new Map();
+            for (const x of groups) for (const t of x.o.tags) if (t.en && isAcc(t) && !pool.has(t.en.toLowerCase())) pool.set(t.en.toLowerCase(), t);
+            const tags = [...(base ? base.tags.filter(t => !isAcc(t)).map(t => ({ ...t, acc: false })) : []), ...g.acc.map(k => pool.get(k)).filter(Boolean).map(t => ({ ...t, acc: true }))];
+            if (!tags.length) return true;
+            ui.outfit = { draft: true, name: base ? `${base.name}·搭配`.slice(0, 20) : '配饰搭配', tags, image: '', dest: '' };
+            ui.combine = null; ui.view = 'outfit'; render(); return true;
+        }
+        case 'wardbatchstop': if (ui.wardBatch) ui.wardBatch.stop = true; render(); return true;
         case 'outdest': ui.outfit.dest = el.dataset.v; ui.outfit.destChosen = true; render(); return true;
         case 'outsave': {
             const u = ui.outfit;
@@ -7983,7 +8029,7 @@ function viewComic(d) {
       <section class="pc-card pc-pad pc-mt"><h3 class="pc-h3">漫画设置</h3><div id="pc-comic-view"></div></section>
       <div style="height:24px"></div>`;
 }
-const VIEWS = { comfy: viewComfy, aipreset: viewAiPreset, comic: viewComic, cast: viewCast, charedit: viewCharEdit, outfit: viewOutfit, studio: viewStudio, book: viewBook, artist: viewArtist, group: viewGroup, batch: viewBatch, vibe: viewVibe, lobby: viewLobby, settings: viewSettings };
+const VIEWS = { comfy: viewComfy, aipreset: viewAiPreset, comic: viewComic, cast: viewCast, charedit: viewCharEdit, outfit: viewOutfit, combine: viewCombine, studio: viewStudio, book: viewBook, artist: viewArtist, group: viewGroup, batch: viewBatch, vibe: viewVibe, lobby: viewLobby, settings: viewSettings };
 
 // ═════════════════════ 事件 ═════════════════════
 
@@ -8861,7 +8907,7 @@ function onInput(ev) {
     if (el.dataset?.i2i) { (ui.studio.i2i ||= {})[el.dataset.i2i] = Number(el.value); const o = root.querySelector(`[data-i2i-out="${el.dataset.i2i}"]`); if (o) o.textContent = Math.round(Number(el.value) * 100) + '%'; }
     if (el.dataset.bind) {
         setPath(ui, el.dataset.bind, el.value);
-        if (el.dataset.bind === 'studio.sceneQ') { clearTimeout(onInput.sq); onInput.sq = setTimeout(render, 250); }
+        if (el.dataset.bind === 'studio.sceneQ' || el.dataset.bind === 'combine.q') { clearTimeout(onInput.sq); onInput.sq = setTimeout(render, 250); }
         if (el.dataset.bind === 'studio.pos') { const w = root.querySelector('#pc-pos-ban'); if (w) w.innerHTML = banWarn(getData(), el.value) + lintHtml(el.value); }
         if (el.dataset.bind === 'batch.text') { const w = root.querySelector('#pc-batch-ban'); if (w) w.innerHTML = batchBanWarn(getData(), el.value); }
         if (String(el.dataset.bind).startsWith('cfy.')) { clearTimeout(onInput.cf); onInput.cf = setTimeout(saveCfy, 600); }
@@ -8929,6 +8975,28 @@ async function onChangeEv(ev) {
     }
     if (el.dataset.i2i) { const g = (ui.studio.i2i ||= {}); g[el.dataset.i2i] = Number(el.value); render(); return; }
     if (el.dataset.castact) { const k = el.dataset.castact, v = el.value.trim(); setStudioCast(studioCast().map(e => e.key === k ? { ...e, act: v } : e)); updateStudioPreview?.(); return; }
+    if (el.dataset.wardimg !== undefined && el.files?.length > 1) {
+        const files = [...el.files]; el.value = '';
+        if (ui.wardBatch) { toastr.info('上一批还在导入', '衣柜'); return; }
+        const b = ui.wardBatch = { total: files.length, done: 0, fail: 0, stop: false };
+        render();
+        for (const f of files) {
+            if (b.stop) break;
+            let tags = [], name = f.name.replace(/\.[^.]+$/, '').slice(0, 20), image = '';
+            try {
+                const du = await shrinkDataUrl(await fileToDataUrl(f), 1024, 0.88);
+                try { const r = await T.outfitFromImage(du); tags = r.tags || []; if (r.name) name = r.name; } catch (e) { console.warn('[智库] 批量导入：读图失败', e); }
+                try { image = (await uploadImage(await shrinkDataUrl(du, 768), `outfit_${M.uid('')}`)).path; } catch { image = du.length < 600000 ? await shrinkDataUrl(du, 512, 0.8) : ''; }
+            } catch (e) { console.warn('[智库] 批量导入：图片读不出来', e); }
+            if (!tags.length) b.fail++;
+            if (tags.length || image) { const o = { id: M.uid('o_'), name: name || '导入的衣服', tags, ...(image ? { image } : {}) }; getData().outfits[o.id] = o; commit({ silent: true }); }
+            b.done++; render();
+        }
+        const msg = `${b.stop ? '停了，' : ''}导入 ${b.done} 张${b.fail ? `，${b.fail} 张没读出标签` : ''}`;
+        ui.wardBatch = null; commit();
+        toastr[b.fail ? 'warning' : 'success'](msg, '衣柜', { timeOut: 4000 });
+        render(); return;
+    }
     if (el.dataset.wardimg !== undefined || el.dataset.outimg !== undefined) {
         const f = el.files[0];
         el.value = '';
