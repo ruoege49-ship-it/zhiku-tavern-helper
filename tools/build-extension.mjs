@@ -1,3 +1,4 @@
+import {applyTauriFetchCompatibility} from './tauri-fetch-compat.mjs';
 import {applyPoseInputCompatibility} from './pose-input-compat.mjs';
 import {applySharingWardrobeCompatibility} from './sharing-wardrobe-compat.mjs';
 import {applyComfyCompatibility} from './comfy-compat.mjs';
@@ -2725,6 +2726,21 @@ patch(`                if (where === 'app') { for (const p of pairs) if (!c.appe
                 else if (where === 'nsfw') { c.nsfwBody ||= []; for (const p of pairs) if (!c.nsfwBody.some(x => x.en === p.en)) c.nsfwBody.push(p); }`);
 { const a=`            const list = el.dataset.where === 'app' ? c.appearance : C.currentOutfit(c)?.tags;`; assert(s.split(a).length===3, 'patchall '+a.slice(0,40)); s=s.split(a).join(`            const list = el.dataset.where === 'app' ? c.appearance : el.dataset.where === 'nsfw' ? (c.nsfwBody ||= []) : C.currentOutfit(c)?.tags;`); }
 s=applyPoseInputCompatibility(s);
+// 0.8.36：TauriTavern 里本地 /api/ 走页面的 fetch（借来的干净 fetch 拿到的是网页）
+s=applyTauriFetchCompatibility(s);
+{ const a=`try { json = JSON.parse(raw); } catch { throw new Error('AI 返回的不是正常格式：' + raw.slice(0, 120)); }`; assert(s.split(a).length===3,'html msg'); s=s.split(a).join(`try { json = JSON.parse(raw); } catch { throw new Error(/^\\s*<(?:!doctype|html)/i.test(raw) ? 'AI 请求拿回来的是一张网页，不是 AI 的回复：多半是请求没到后端（客户端或别的插件拦了），或者 AI 地址填成了网页地址（OpenAI 兼容的地址一般以 /v1 结尾）' : 'AI 返回的不是正常格式：' + raw.slice(0, 120)); }`); }
+// 0.8.36：新建衣服的三步说明折叠起来
+patch(`    \${u.draft ? \`<div class="pc-outsteps">
+      <span class="\${img || o.tags.length ? 'done' : ''}"><b>第一步</b>点图片右下「换一张」放一张衣服的图，AI 会写成标签；没图就直接在下面打字加</span>
+      <span class="\${o.tags.length ? 'done' : ''}"><b>第二步</b>看看下面的标签：点一下改、× 删掉、↓↑ 在整体和配饰之间挪</span>
+      <span class="\${u.dest ? 'done' : ''}"><b>第三步</b>选「存到哪里」：只进衣柜，或者直接给某个人穿，再点「保存」</span></div>\` : ''}`,`    \${u.draft ? (() => { const n = [img || o.tags.length, o.tags.length, u.dest].filter(Boolean).length; return fold('outsteps', '怎么做', n ? \`三步做完 \${n} 步\` : '放图或打字 → 检查标签 → 选存到哪里', \`<div class="pc-outsteps">
+      <span class="\${img || o.tags.length ? 'done' : ''}"><b>第一步</b>点图片右下「换一张」放一张衣服的图，AI 会写成标签；没图就直接在下面打字加</span>
+      <span class="\${o.tags.length ? 'done' : ''}"><b>第二步</b>看看下面的标签：点一下改、× 删掉、↓↑ 在整体和配饰之间挪</span>
+      <span class="\${u.dest ? 'done' : ''}"><b>第三步</b>选「存到哪里」：只进衣柜，或者直接给某个人穿，再点「保存」</span></div>\`); })() : ''}`);
+// Choosing the standalone wardrobe also completes the destination step.
+patch("case 'outdest': ui.outfit.dest = el.dataset.v; render(); return true;", "case 'outdest': ui.outfit.dest = el.dataset.v; ui.outfit.destChosen = true; render(); return true;");
+patch("[img || o.tags.length, o.tags.length, u.dest].filter(Boolean)", "[img || o.tags.length, o.tags.length, u.destChosen || u.dest].filter(Boolean)");
+patch("<span class=\"${u.dest ? 'done' : ''}\"><b>第三步</b>", "<span class=\"${u.destChosen || u.dest ? 'done' : ''}\"><b>第三步</b>");
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
