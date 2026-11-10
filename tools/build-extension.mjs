@@ -2992,6 +2992,40 @@ patch(`    if (el.dataset.wardimg !== undefined || el.dataset.outimg !== undefin
     }
     if (el.dataset.wardimg !== undefined || el.dataset.outimg !== undefined) {
         const f = el.files[0];`);
+// 0.8.36：同人角色开关，直接发原作角色名
+patch(`const GENDER = { '1boy': 'boy', '1girl': 'girl', '1other': 'other' };`,`const GENDER = { '1boy': 'boy', '1girl': 'girl', '1other': 'other' };
+/** 同人角色：开着时外貌只发性别词 + 角色名（danbooru 上的角色标签），让 NovelAI 照原作画 */
+const GENDER_WORD = /^1?(?:boy|girl|other)s?$/i;
+function lookTags(c) {
+    const tag = String(c?.canonTag || '').trim();
+    if (!c?.canonOn || !tag) return tagText(c?.appearance);
+    const g = (c.appearance || []).filter(x => GENDER_WORD.test(String(x.en || '').trim())).map(x => x.en);
+    const rest = c.canonKeepLook ? tagText((c.appearance || []).filter(x => !GENDER_WORD.test(String(x.en || '').trim()))) : '';
+    return [...g, tag, rest].filter(Boolean).join(', ');
+}`);
+patch(`function fixedTags(c, { nsfw = false } = {}) {
+    const parts = [tagText(c.appearance)];`,`function fixedTags(c, { nsfw = false } = {}) {
+    const parts = [lookTags(c)];`);
+patch(`    const look = [tagText(ch.appearance), nsfw ? tagText(ch.nsfwBody) : ''].filter(Boolean).join(', ');`,`    const look = [lookTags(ch), nsfw ? tagText(ch.nsfwBody) : ''].filter(Boolean).join(', ');`);
+patch(`return { studioCastPrompt,`,`return { studioCastPrompt, lookTags,`);
+patch(`    const rows = list.map(({ e, c }) => {
+        const look = C.tagText(c.appearance);`,`    const rows = list.map(({ e, c }) => {
+        const look = C.lookTags(c);`);
+patch(`      <label class="pc-field pc-mt-s"><span>别名（逗号隔开）· 图片角色标记可使用名字或别名</span><input data-charalias value="\${esc(c.aliases || '')}" placeholder="比如 小秋，秋秋"></label>`,`      <label class="pc-field pc-mt-s"><span>别名（逗号隔开）· 图片角色标记可使用名字或别名</span><input data-charalias value="\${esc(c.aliases || '')}" placeholder="比如 小秋，秋秋"></label>
+      <label class="pc-switch pc-mt-s"><input type="checkbox" data-charcanon \${c.canonOn ? 'checked' : ''}><span></span>同人角色：直接写原作角色名<small>原作里有的角色，写 danbooru 上的角色名，NovelAI 认得就会照原作的长相画。打开后外貌只发性别词 + 角色名，衣服照常。</small></label>
+      \${c.canonOn ? \`<label class="pc-field"><span>角色名标签（英文，可以带作品名）</span><input class="mono" data-charcanontag value="\${esc(c.canonTag || '')}" placeholder="hatsune miku, vocaloid"></label>
+      <label class="pc-switch"><input type="checkbox" data-charcanonlook \${c.canonKeepLook ? 'checked' : ''}><span></span>外貌标签也一起发<small>冷门角色 NovelAI 认不准时打开，用下面的外貌补</small></label>
+      \${'<div class="pc-hint">角色名空着时照常发外貌。不知道怎么写就去 danbooru 搜这个角色，用它的角色标签，空格代替下划线，比如 hatsune miku；同名的会带作品名，比如 saber (fate)。</div>'}\` : ''}`);
+patch(`    if (el.dataset.charneg !== undefined) {`,`    if (el.dataset.charcanon !== undefined || el.dataset.charcanonlook !== undefined) { const c = C.getChar(ui.charKey); if (c) { if (el.dataset.charcanon !== undefined) c.canonOn = el.checked; else c.canonKeepLook = el.checked; C.saveChar(c); render(); } return; }
+    if (el.dataset.charcanontag !== undefined) { const c = C.getChar(ui.charKey); if (c) { c.canonTag = el.value.trim(); C.saveChar(c); } return; }
+    if (el.dataset.charneg !== undefined) {`);
+patch(`只输出 JSON：{"appearance": [...], "outfit": [...], "nsfw": [...]}。外貌和衣服设定里没写的不要编。\`;`,`如果这个角色是现有动画、漫画、游戏、小说里的角色（同人），canon 写 danbooru 上的角色标签，英文小写、空格代替下划线，可以再带作品标签，比如 "hatsune miku, vocaloid"、"saber (fate), fate/stay night"；原创角色或拿不准就写 ""。
+只输出 JSON：{"appearance": [...], "outfit": [...], "nsfw": [...], "canon": ""}。外貌和衣服设定里没写的不要编。\`;`);
+patch(`    return { appearance: norm(j.appearance), outfit: norm(j.outfit), nsfw: norm(j.nsfw) };`,`    return { appearance: norm(j.appearance), outfit: norm(j.outfit), nsfw: norm(j.nsfw), canon: typeof j.canon === 'string' ? j.canon.replace(/_/g, ' ').trim().slice(0, 120) : '' };`);
+patch(`                if (r.nsfw?.length) c.nsfwBody = r.nsfw;`,`                if (r.nsfw?.length) c.nsfwBody = r.nsfw;
+                if (r.canon && !c.canonTag) { c.canonTag = r.canon; c.canonOn = true; toastr.info(\`认出是同人角色「\${r.canon}」，已经打开「同人角色」，不对可以关掉\`, '读外貌', { timeOut: 4000 }); }`);
+patch(`return { character: { name: c.name, appearance: c.appearance, nsfwBody: c.nsfwBody || [], `,`return { character: { name: c.name, appearance: c.appearance, nsfwBody: c.nsfwBody || [], ...(c.canonTag ? { canonOn: !!c.canonOn, canonTag: c.canonTag, canonKeepLook: !!c.canonKeepLook } : {}), `);
+patch(`? { name: src.name, appearance: src.appearance, nsfwBody: Array.isArray(src.nsfwBody) ? src.nsfwBody : [], `,`? { name: src.name, appearance: src.appearance, nsfwBody: Array.isArray(src.nsfwBody) ? src.nsfwBody : [], ...(typeof src.canonTag === 'string' && src.canonTag ? { canonOn: !!src.canonOn, canonTag: src.canonTag.slice(0, 120), canonKeepLook: !!src.canonKeepLook } : {}), `);
 s=applyImg2imgCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {

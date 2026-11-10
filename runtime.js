@@ -3925,10 +3925,11 @@ async function extractAppearance(name, description) {
     const sys = `你从角色设定里挑出画图用的外貌标签。只挑不会变的外貌：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身等。衣服另外放。
 ${PAIRS}
 NSFW 身体单独放进 nsfw：只给明确是成年人的角色写（未成年、年龄不明、非人类幼体一律留空 []）。写脱了衣服才看得到的身体特征：乳头 / 乳晕颜色和大小、阴毛、私处、男性的阴茎等；设定写了就照写，没写的按这个人的身材和气质补 2～4 个常见的。不要写动作和姿势。
-只输出 JSON：{"appearance": [...], "outfit": [...], "nsfw": [...]}。外貌和衣服设定里没写的不要编。`;
+如果这个角色是现有动画、漫画、游戏、小说里的角色（同人），canon 写 danbooru 上的角色标签，英文小写、空格代替下划线，可以再带作品标签，比如 "hatsune miku, vocaloid"、"saber (fate), fate/stay night"；原创角色或拿不准就写 ""。
+只输出 JSON：{"appearance": [...], "outfit": [...], "nsfw": [...], "canon": ""}。外貌和衣服设定里没写的不要编。`;
     const j = await askShrinking(sys, limit => `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000, fn: 'look' });
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x.en || '').trim(), zh: String(x.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
-    return { appearance: norm(j.appearance), outfit: norm(j.outfit), nsfw: norm(j.nsfw) };
+    return { appearance: norm(j.appearance), outfit: norm(j.outfit), nsfw: norm(j.nsfw), canon: typeof j.canon === 'string' ? j.canon.replace(/_/g, ' ').trim().slice(0, 120) : '' };
 }
 
 /** 设定很长时：先发 6 万字；模型说太长（上下文不够、请求太大、超时）就缩到 3 万、1.5 万再试。设定是按描述在前、世界书在后排的，缩的时候先丢后面的 */
@@ -4410,7 +4411,7 @@ const tagText = list => (list || []).map(t => t.en).filter(Boolean).join(', ');
 function currentOutfit(c) { return c.outfits.find(o => o.id === c.outfitId) || c.outfits[0] || null; }
 /** 这个角色固定会发的标签（外貌 + 固定的衣服） */
 function fixedTags(c, { nsfw = false } = {}) {
-    const parts = [tagText(c.appearance)];
+    const parts = [lookTags(c)];
     // NSFW 身体：只有这张图是 NSFW 时才加
     if (nsfw) parts.push(tagText(c.nsfwBody));
     if (c.outfitMode === 'fixed') parts.push(tagText(currentOutfit(c)?.tags));
@@ -4418,6 +4419,15 @@ function fixedTags(c, { nsfw = false } = {}) {
 }
 
 const GENDER = { '1boy': 'boy', '1girl': 'girl', '1other': 'other' };
+/** 同人角色：开着时外貌只发性别词 + 角色名（danbooru 上的角色标签），让 NovelAI 照原作画 */
+const GENDER_WORD = /^1?(?:boy|girl|other)s?$/i;
+function lookTags(c) {
+    const tag = String(c?.canonTag || '').trim();
+    if (!c?.canonOn || !tag) return tagText(c?.appearance);
+    const g = (c.appearance || []).filter(x => GENDER_WORD.test(String(x.en || '').trim())).map(x => x.en);
+    const rest = c.canonKeepLook ? tagText((c.appearance || []).filter(x => !GENDER_WORD.test(String(x.en || '').trim()))) : '';
+    return [...g, tag, rest].filter(Boolean).join(', ');
+}
 function genderOf(c) {
     const t = c.appearance.map(x => x.en.toLowerCase()).find(x => GENDER[x]);
     return t ? GENDER[t] : '';
@@ -4577,7 +4587,7 @@ function fromZhihuijiOutfit(name, o) {
 function saveCharacterPost(payload, fallbackName) {
     const src = payload.character || {};
     const ours = Array.isArray(src.appearance)
-        ? { name: src.name, appearance: src.appearance, nsfwBody: Array.isArray(src.nsfwBody) ? src.nsfwBody : [], outfitMode: src.outfitMode || 'story', outfits: (src.outfits || []).map(o => ({ ...o, id: M.uid('o_') })), negative: src.negative || '' }
+        ? { name: src.name, appearance: src.appearance, nsfwBody: Array.isArray(src.nsfwBody) ? src.nsfwBody : [], ...(typeof src.canonTag === 'string' && src.canonTag ? { canonOn: !!src.canonOn, canonTag: src.canonTag.slice(0, 120), canonKeepLook: !!src.canonKeepLook } : {}), outfitMode: src.outfitMode || 'story', outfits: (src.outfits || []).map(o => ({ ...o, id: M.uid('o_') })), negative: src.negative || '' }
         : fromZhihuijiChar(src, payload.outfits || {});
     const c = blank({ key: 'free:' + M.uid(''), kind: 'free', name: uniqueName(ours.name || fallbackName) });
     Object.assign(c, ours, { name: c.name });
@@ -4594,7 +4604,7 @@ function outfitFromPost(payload, fallbackName) {
 
 /** 分享用的内容 */
 function characterPayload(c) {
-    return { character: { name: c.name, appearance: c.appearance, nsfwBody: c.nsfwBody || [], outfitMode: c.outfitMode, outfits: c.outfits.map(({ name, tags }) => ({ name, tags })), negative: c.negative } };
+    return { character: { name: c.name, appearance: c.appearance, nsfwBody: c.nsfwBody || [], ...(c.canonTag ? { canonOn: !!c.canonOn, canonTag: c.canonTag, canonKeepLook: !!c.canonKeepLook } : {}), outfitMode: c.outfitMode, outfits: c.outfits.map(({ name, tags }) => ({ name, tags })), negative: c.negative } };
 }
 
 /** 智绘姬里存的角色全搬过来，返回搬了几个 */
@@ -4757,7 +4767,7 @@ function studioCastPick(e, nsfw = false) {
     const ch = getChar(e.key);
     if (!ch) return null;
     const out = e.outfit === '' ? null : (ch.outfits.find(o => o.id === e.outfit) || currentOutfit(ch));
-    const look = [tagText(ch.appearance), nsfw ? tagText(ch.nsfwBody) : ''].filter(Boolean).join(', ');
+    const look = [lookTags(ch), nsfw ? tagText(ch.nsfwBody) : ''].filter(Boolean).join(', ');
     const act = String(e.act || '').trim(), fit = tagText(out?.tags);
     // 分角色时：外貌 → 这个人的动作 → 衣服，动作别被一长串衣服挤到最后
     return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', look, act, fit, tags: [look, act, fit].filter(Boolean).join(', '), x: CAST_X[e.pos] ?? 0.5 };
@@ -4783,7 +4793,7 @@ function studioCastRefs(picks) {
     return [...new Set((picks || []).map(p => p.char.charRef).filter(id => id && d.charRefGroups?.[id]))];
 }
 
-return { studioCastPrompt, wardrobeGroups, outfitHolders, takeOffOutfit, deleteOutfitGroup, studioCastRefs, namesOf, castIn, markerPrompt, avatarUrl, stCards, stPersonas, currentPersonaKey, getChar, saveChar, descOf, descOfFull, sideKicks, addSideKick, deleteChar, chatId, currentCast, removeFromCast, setCastOn, tagText, currentOutfit, fixedTags, canSplit, buildChatPrompt, previewCast, generateForMessage, insertImage, parsePairs, freeChars, saveCharacterPost, outfitFromPost, characterPayload, importZhihuijiCharacters, copyLook, wardrobe, findOutfit, giveOutfit, deleteOutfit };
+return { studioCastPrompt, lookTags, wardrobeGroups, outfitHolders, takeOffOutfit, deleteOutfitGroup, studioCastRefs, namesOf, castIn, markerPrompt, avatarUrl, stCards, stPersonas, currentPersonaKey, getChar, saveChar, descOf, descOfFull, sideKicks, addSideKick, deleteChar, chatId, currentCast, removeFromCast, setCastOn, tagText, currentOutfit, fixedTags, canSplit, buildChatPrompt, previewCast, generateForMessage, insertImage, parsePairs, freeChars, saveCharacterPost, outfitFromPost, characterPayload, importZhihuijiCharacters, copyLook, wardrobe, findOutfit, giveOutfit, deleteOutfit };
 })();
 
 // ───── ui.js ─────
@@ -5534,7 +5544,7 @@ function castFold() {
         : split ? `<b>${n} 人：</b>每个人的外貌单独发给 NAI（分角色），发色瞳色不会串到别人身上；人数词自动补上。`
         : `<b>${n} 人：</b>现在的模型或通道（V3 / 酒馆里的 key）不能分角色，几个人的外貌会按顺序接在一起，容易串色。`;
     const rows = list.map(({ e, c }) => {
-        const look = C.tagText(c.appearance);
+        const look = C.lookTags(c);
         const ref = c.charRef && d.charRefGroups?.[c.charRef];
         const fitOn = id => e.outfit === undefined ? C.currentOutfit(c)?.id === id : e.outfit === id;
         const k = esc(e.key);
@@ -7040,6 +7050,10 @@ function viewCharEdit(d) {
       <div class="pc-dim small">头发、眼睛、脸、身材这类不会变的。第一个写 1boy 或 1girl。点标签可以改，× 删掉。</div>
       ${c.kind === 'char' || c.kind === 'side' ? `<button class="pc-pill dashed tiny pc-mt-s" data-act="readcast" ${busy ? 'disabled' : ''}>${busy === 'cast' ? '<span class="pc-busy">读取中</span>' : '读出这张卡里所有人（含世界书）'}</button><button class="pc-pill dashed tiny pc-mt-s" style="margin-left:6px" data-act="readchatcast" ${busy ? 'disabled' : ''}>${busy === 'chatcast' ? '<span class="pc-busy">读取中</span>' : '从聊天正文读出人物（最近 40 楼）'}</button>` : ''}
       <label class="pc-field pc-mt-s"><span>别名（逗号隔开）· 图片角色标记可使用名字或别名</span><input data-charalias value="${esc(c.aliases || '')}" placeholder="比如 小秋，秋秋"></label>
+      <label class="pc-switch pc-mt-s"><input type="checkbox" data-charcanon ${c.canonOn ? 'checked' : ''}><span></span>同人角色：直接写原作角色名<small>原作里有的角色，写 danbooru 上的角色名，NovelAI 认得就会照原作的长相画。打开后外貌只发性别词 + 角色名，衣服照常。</small></label>
+      ${c.canonOn ? `<label class="pc-field"><span>角色名标签（英文，可以带作品名）</span><input class="mono" data-charcanontag value="${esc(c.canonTag || '')}" placeholder="hatsune miku, vocaloid"></label>
+      <label class="pc-switch"><input type="checkbox" data-charcanonlook ${c.canonKeepLook ? 'checked' : ''}><span></span>外貌标签也一起发<small>冷门角色 NovelAI 认不准时打开，用下面的外貌补</small></label>
+      ${'<div class="pc-hint">角色名空着时照常发外貌。不知道怎么写就去 danbooru 搜这个角色，用它的角色标签，空格代替下划线，比如 hatsune miku；同名的会带作品名，比如 saber (fate)。</div>'}` : ''}
       ${(() => { const n = charPairs(c).filter(t => !t.zh).length; return n ? `<div class="pc-chips wrap"><button class="pc-pill dashed tiny" data-act="zhtags" ${busy ? 'disabled' : ''}>${busy === 'zh' ? '<span class="pc-busy">翻译中</span>' : `译成中文 · ${n} 个没有中文`}</button></div>` : ''; })()}
       <div class="pc-pairs">${pairChips(c.appearance, 'app') || '<span class="pc-dim small">还没有</span>'}</div>
       <div class="pc-addrow"><textarea rows="1" data-bind="addText.app" placeholder="自己加，中文也行，可以一次粘贴好几个" data-enter="addpair-app">${esc(ui.addText.app)}</textarea><button class="pc-btn dark" data-act="addpair" data-where="app" ${busy ? 'disabled' : ''}>${busy === 'app' ? '…' : '加'}</button></div>
@@ -7299,6 +7313,7 @@ async function charAction(act, el) {
                 const r = await T.extractAppearance(c.name, desc);
                 c.appearance = r.appearance;
                 if (r.nsfw?.length) c.nsfwBody = r.nsfw;
+                if (r.canon && !c.canonTag) { c.canonTag = r.canon; c.canonOn = true; toastr.info(`认出是同人角色「${r.canon}」，已经打开「同人角色」，不对可以关掉`, '读外貌', { timeOut: 4000 }); }
                 if (r.outfit.length && !c.outfits.length) { const o = { id: M.uid('o_'), name: '默认', tags: r.outfit }; c.outfits.push(o); c.outfitId = o.id; }
                 toastr.success(`读到 ${r.appearance.length} 个外貌标签${r.outfit.length ? `，${r.outfit.length} 个衣服标签（存在「默认」这套里）` : ''}`, '角色');
             } catch (e) { toastr.error(e.message, '读取失败'); }
@@ -8923,6 +8938,8 @@ function onInput(ev) {
         else { const h = u && C.findOutfit(u.owner, u.id); if (h) { h.o.name = el.value.trim(); if (h.owner) C.saveChar(h.owner); else commit({ silent: true }); } }
         return;
     }
+    if (el.dataset.charcanon !== undefined || el.dataset.charcanonlook !== undefined) { const c = C.getChar(ui.charKey); if (c) { if (el.dataset.charcanon !== undefined) c.canonOn = el.checked; else c.canonKeepLook = el.checked; C.saveChar(c); render(); } return; }
+    if (el.dataset.charcanontag !== undefined) { const c = C.getChar(ui.charKey); if (c) { c.canonTag = el.value.trim(); C.saveChar(c); } return; }
     if (el.dataset.charneg !== undefined) { const c = C.getChar(ui.charKey); if (c) { c.negative = el.value; C.saveChar(c); } return; }
     if (el.dataset.charalias !== undefined) { const c = C.getChar(ui.charKey); if (c) { c.aliases = el.value.trim(); C.saveChar(c); } return; }
     if (el.dataset.bindGroup) { d.groups[el.dataset.bindGroup][el.dataset.field] = el.value; commit({ silent: true }); return; }

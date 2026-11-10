@@ -21,6 +21,11 @@ try{
  api.setStudioCast([{key:'a',pos:'C',outfit:'coat'}]);await api.doGenerate();req=requests.at(-1);assert(req.input.indexOf('rain, window')<req.input.indexOf('black coat'),'scene before outfit');assert(req.input.indexOf('black hair')<req.input.indexOf('rain, window'));
  data.options.chatNoSplit=true;api.setStudioCast([{key:'a',pos:'L',outfit:'coat',act:'source#hug'},{key:'b',pos:'R',act:'target#hug, crying'}]);await api.doGenerate();req=requests.at(-1);data.options.chatNoSplit=false;
  assert.equal(req.parameters.v4_prompt.caption.char_captions.length,2);assert.match(req.parameters.v4_prompt.caption.char_captions[0].char_caption,/black hair, source#hug, black coat/);assert.match(req.parameters.v4_prompt.caption.char_captions[1].char_caption,/target#hug, crying/);
+ // 同人角色：外貌只发性别词 + 角色名，衣服照常
+ Object.assign(data.characters.a,{canonOn:true,canonTag:'hatsune miku, vocaloid'});api.setStudioCast([{key:'a',pos:'C',outfit:'coat'}]);await api.doGenerate();req=requests.at(-1);
+ assert.match(req.input,/1boy, hatsune miku, vocaloid/);assert(!req.input.includes('black hair'),'canon drops appearance');assert(req.input.includes('black coat'));
+ data.characters.a.canonKeepLook=true;await api.doGenerate();assert(requests.at(-1).input.includes('black hair'),'keep look');
+ Object.assign(data.characters.a,{canonOn:false,canonKeepLook:false});
  api.setStudioCast([{key:'a',pos:'C',outfit:''}]);
  chat='two';assert.equal(api.studioCast().length,0);chat='one';assert.equal(api.studioCast().length,1);
  const originalPos=ui.studio.pos;ui.studio.scenes=[{...api.sceneSnapshot(),name:'雨天'}];api.saveStudio();api.applyScene({scene:'snow'});assert.equal(ui.studio.pos,originalPos);for(let i=0;i<25;i++){ui.studio.scene='scene '+i;api.rememberScene();}assert.equal(ui.studio.recentScenes.length,20);data=M.normalizeData(JSON.parse(persisted));ui.studio={loaded:false,open:{}};api.loadStudio();assert.equal(ui.studio.scenes[0].name,'雨天');assert.equal(ui.studio.recentScenes.length,20);assert.equal(api.studioCast()[0].key,'a');
