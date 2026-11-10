@@ -3232,6 +3232,102 @@ patch(`      \${[...ORIENT, ...AUD].map(t => \`<button class="pc-pill \${lb.tag 
     <div class="pc-chips">\${AUD.map(t => \`<button class="pc-pill \${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}">\${t}</button>\`).join('')}</div>`);
 patch(`            case 'nsfwtoggle':`,`            case 'lobbynsfw': d.options.lobbyNsfwMode = el.dataset.v; d.options.lobbyShowNsfw = el.dataset.v !== 'sfw'; commit(); loadLobby(); break;
             case 'nsfwtoggle':`);
+// 0.8.36：共享改成裸体分类、第一次进来先问、R18G 可屏蔽、封面剧透、名字可不填、画风只留经典的
+patch(`    ['NSFW 图里是谁·有 NSFW 才选，都有就两个都选', ['男性NSFW', '女性NSFW'], false],`,`    ['裸体·有才选，都有就两个都选', ['男性裸体', '女性裸体'], false],
+    ['重口·猎奇血腥才选', ['R18G'], false],`);
+patch(`    ['画风·拿不准就不选', ['厚涂', '半厚涂', '平涂', '赛璐璐', '水彩', '写实', '2.5D', '古风', '日系', '韩系', '欧美', '像素', 'Q版', '线稿', '暗黑', '清新', '柔和', '华丽'], false],`,`    ['画风', ['厚涂', '半厚涂', '平涂', '赛璐璐', '水彩', '写实', 'Q版'], false],`);
+patch(`const ORIENT = [...NSFW_WHO, '男性向', '女性向', '全性向'];
+const tagLabel = t => ({ '男性NSFW': '男性', '女性NSFW': '女性' })[t] || t;`,`const ORIENT = [...NSFW_WHO, 'R18G', '剧透'];
+const tagLabel = t => t;`);
+patch(`    if (t.has('男性NSFW')) who.add('male');
+    if (t.has('女性NSFW')) who.add('female');
+    if (!who.size) {
+        if (t.has('女性向') || t.has('BL')) who.add('male');
+        if (t.has('男性向') || t.has('GL')) who.add('female');
+        if (t.has('全性向') || t.has('BG') || t.has('GB')) { who.add('male'); who.add('female'); }
+    }
+    return who;`,`    if (t.has('男性裸体')) who.add('male');
+    if (t.has('女性裸体')) who.add('female');
+    return who;`);
+patch(`/** 共享里看哪种 NSFW：sfw 不看 / male 男性的 / female 女性的 / all 全都看 */`,`/** 共享里看哪种：sfw 不看裸体 / male 只有男性裸体 / female 只有女性裸体 / all 全都有 */`);
+patch(`    const whoOk = p => p.mine || nm === 'all' || nm === 'sfw' || !postHasNsfw(p) || postWho(p).has(nm);`,`    // 只有男性裸体 / 只有女性裸体：带裸体的分享只留只有这一种的；没有裸体的照常显示。R18G 没打开就不显示
+    const whoOk = p => p.mine || ((nm === 'all' || nm === 'sfw' || !postHasNsfw(p) || (postWho(p).has(nm) && postWho(p).size === 1)) && (d.options.lobbyR18g || !(p.tags || []).includes('R18G')));`);
+patch(`      <span class="pc-dim small" style="align-self:center">NSFW</span>\${[['sfw', '不看'], ['male', '男性的'], ['female', '女性的'], ['all', '全都看']].map(`,`      \${[['sfw', '不看裸体'], ['male', '只有男性裸体'], ['female', '只有女性裸体'], ['all', '全都有']].map(`);
+patch(`    <div class="pc-chips">\${AUD.map(t => \`<button class="pc-pill \${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}">\${t}</button>\`).join('')}</div>`,`    <div class="pc-chips">\${AUD.map(t => \`<button class="pc-pill \${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}">\${t}</button>\`).join('')}<button class="pc-pill \${d.options.lobbyR18g ? 'nsfw on' : 'blocked'}" data-act="lobbyr18g" title="猎奇、血腥">\${d.options.lobbyR18g ? 'R18G 显示' : '⊘ R18G 已屏蔽'}</button></div>`);
+patch(`            case 'lobbynsfw':`,`            case 'lobbyr18g': d.options.lobbyR18g = !d.options.lobbyR18g; commit(); render(); break;
+            case 'lobbynsfw':`);
+patch(`    if (ui.view === 'lobby' && !ui.lobby.items.length) loadLobby();`,`    if (ui.view === 'lobby' && !getData().options.lobbyAsked) askLobbyPrefs();
+    if (ui.view === 'lobby' && !ui.lobby.items.length) loadLobby();`);
+patch(`async function loadLobby({ more = false } = {}) {`,`/** 第一次进共享：问一下想看什么、能不能接受 R18G */
+function askLobbyPrefs() {
+    const d = getData();
+    if (d.options.lobbyAsked || DOC.querySelector('[data-lobbyask]')) return;
+    const box = modal(\`<div data-lobbyask><h3 class="pc-h3">先选一下想看什么</h3>
+      <div class="pc-dim small">共享里是大家上传的例图，有的带裸体。只管别人的图，以后在共享页上面随时能改。</div>
+      <div class="pc-chips wrap pc-mt-s" data-la-mode>\${[['sfw', '不看裸体'], ['male', '只有男性裸体'], ['female', '只有女性裸体'], ['all', '全都有']].map(([k, t], i) => \`<button type="button" class="pc-pill \${i === 0 ? 'on' : 'dashed'}" data-v="\${k}">\${t}</button>\`).join('')}</div>
+      <label class="pc-switch pc-mt-s"><input type="checkbox" data-la-g><span></span>能接受 R18G<small>猎奇、血腥这类。不勾就屏蔽，带 R18G 标签的都不显示</small></label>
+      <div class="pc-actions"><button class="pc-btn dark" type="button" data-la-ok>好了</button></div></div>\`);
+    let mode = 'sfw';
+    box.addEventListener('click', ev => {
+        const b = ev.target.closest('[data-la-mode] [data-v]');
+        if (b) { mode = b.dataset.v; box.querySelectorAll('[data-la-mode] [data-v]').forEach(x => { x.classList.toggle('on', x === b); x.classList.toggle('dashed', x !== b); }); return; }
+        if (ev.target.closest('[data-la-ok]')) {
+            const o = getData().options;
+            Object.assign(o, { lobbyAsked: true, lobbyNsfwMode: mode, lobbyShowNsfw: mode !== 'sfw', lobbyR18g: !!box.querySelector('[data-la-g]').checked });
+            commit(); box.closeModal(); loadLobby();
+        }
+    });
+}
+async function loadLobby({ more = false } = {}) {`);
+patch(`        if (nsfw && !tags.some(t => NSFW_WHO.includes(t))) { say('含 NSFW 的话，在标签里选一下 NSFW 图里是男性还是女性（都有就两个都选）。'); return; }`,`        if (nsfw && !tags.some(t => NSFW_WHO.includes(t))) { say('含 NSFW 的话，在标签里选一下是男性裸体还是女性裸体（都有就两个都选）。'); return; }
+        if (form.elements.namedItem('spoiler')?.checked) tags.push('剧透');`);
+patch(`      <label class="pc-switch"><input type="checkbox" name="nsfw"><span></span>含 NSFW 内容</label>`,`      <label class="pc-switch"><input type="checkbox" name="nsfw"><span></span>含 NSFW 内容</label>
+      <label class="pc-switch"><input type="checkbox" name="spoiler"><span></span>封面剧透<small>封面先糊住，别人点一下才看得到</small></label>`);
+patch(`<input class="pc-input" name="title" maxlength="200" required placeholder="给这串起个名字" value="\${esc(pre.title || '')}">`,`<input class="pc-input" name="title" maxlength="200" placeholder="不填就用前两位画师的名字" value="\${esc(pre.title || '')}">`);
+patch(`        const name = value('title'), nickname = value('signature'), artistString = artistOnly(value('artistString')), negative = value('negative');
+        const { members } = M.parseArtistString(artistString);
+        if (!name || !nickname) { say('请填写名称和署名。'); return; }`,`        const nickname = value('signature'), artistString = artistOnly(value('artistString')), negative = value('negative');
+        const { members } = M.parseArtistString(artistString);
+        const name = value('title') || members.slice(0, 2).map(m => m.tag.replace(/^artist:/, '')).join(' + ') || '';
+        if (!nickname) { say('请填写署名。'); return; }`);
+patch(`      <div class="pc-ticket-img">\${img ? \`<img src="\${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">\` : '<span>无图</span>'}</div>
+      <span class="pc-kind">\${KIND_NAME[p.kind] || p.kind}</span>`,`      <div class="pc-ticket-img \${lobbySpoiled(p) ? 'pc-spoiler' : ''}">\${img ? \`<img src="\${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">\` : '<span>无图</span>'}\${lobbySpoiled(p) ? \`<button class="pc-spoil-btn" data-act="lobbyreveal" data-id="\${p.id}">剧透 · 点一下看</button>\` : ''}</div>
+      <span class="pc-kind">\${KIND_NAME[p.kind] || p.kind}</span>`);
+patch(`      <div class="pc-lobby-img" \${img ? \`data-act="viewimg" data-src="\${esc(L.lobbyImgUrl(img.url))}"\` : ''}>\${img ? \`<img src="\${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">\` : '<span>无图</span>'}`,`      <div class="pc-lobby-img \${lobbySpoiled(p) ? 'pc-spoiler' : ''}" \${img && !lobbySpoiled(p) ? \`data-act="viewimg" data-src="\${esc(L.lobbyImgUrl(img.url))}"\` : ''}>\${img ? \`<img src="\${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">\` : '<span>无图</span>'}\${lobbySpoiled(p) ? \`<button class="pc-spoil-btn" data-act="lobbyreveal" data-id="\${p.id}">剧透 · 点一下看</button>\` : ''}`);
+patch(`function lobbyGridCard(p) {`,`const lobbyRevealed = new Set();
+const lobbySpoiled = p => !p.mine && (p.tags || []).includes('剧透') && !lobbyRevealed.has(p.id);
+function lobbyGridCard(p) {`);
+patch(`            case 'lobbyr18g':`,`            case 'lobbyreveal': lobbyRevealed.add(el.dataset.id); render(); break;
+            case 'lobbyr18g':`);
+patch(`.pc-outmake2{display:flex;gap:8px;align-items:center;margin-top:8px}`,`.pc-outmake2{display:flex;gap:8px;align-items:center;margin-top:8px}`);
+// 0.8.36：随机画师串一次抽好多串去批量测；共享剧透封面的样式
+patch(`">我分享的</button>
+    </div>
+    <div class="pc-chips">
+      \${[['sfw', '不看裸体']`,`">我分享的</button>
+    </div>
+    <div class="pc-chips wrap">
+      \${[['sfw', '不看裸体']`);
+patch(`                if (ui.view === 'lobby') loadLobby();`,`                if (ui.view === 'lobby') { loadLobby(); if (!getData().options.lobbyAsked) askLobbyPrefs(); }`);
+patch(`    <div class="pc-row-between pc-mt-s"><h2 class="pc-h2" style="margin:0">共享</h2>`,`    <style>.pc-spoiler{position:relative;overflow:hidden}.pc-spoiler img{filter:blur(22px) saturate(.6);transform:scale(1.15)}.pc-spoil-btn{position:absolute;inset:auto 50% 50% auto;transform:translate(50%,50%);padding:8px 14px;border-radius:99px;border:1.5px dashed rgba(255,255,255,.8);background:rgba(0,0,0,.45);color:#fff;font:inherit;font-size:13px;white-space:nowrap;cursor:pointer}</style>
+    <div class="pc-row-between pc-mt-s"><h2 class="pc-h2" style="margin:0">共享</h2>`);
+patch(`      <label class="pc-switch"><input type="checkbox" data-mk-w \${st.weighted ? 'checked' : ''}><span></span>随机权重<small>每位画师随机给 0.8～1.3 的权重</small></label>\` : ''}`,`      <label class="pc-switch"><input type="checkbox" data-mk-w \${st.weighted ? 'checked' : ''}><span></span>随机权重<small>每位画师随机给 0.8～1.3 的权重</small></label>
+      <div class="pc-row-between pc-mt-s"><span class="pc-dim small">一次抽好多串去测</span><div class="pc-chips" style="margin:0" data-mk-many>\${[5, 10, 20, 30].map(n => \`<button class="pc-pill \${(st.many || 10) === n ? 'on' : 'dashed'} tiny" type="button" data-many="\${n}">\${n} 串</button>\`).join('')}</div></div>
+      <button class="pc-btn wide pc-mt-s" type="button" data-mk="batch">抽 <b data-mk-manyn>\${st.many || 10}</b> 串，放进批量生成例图去测</button>\` : ''}`);
+patch(`        const nb = ev.target.closest('[data-n]');`,`        const mb = ev.target.closest('[data-many]');
+        if (mb) { st.many = Number(mb.dataset.many); box.querySelectorAll('[data-mk-many] [data-many]').forEach(b => { b.classList.toggle('on', b === mb); b.classList.toggle('dashed', b !== mb); }); box.querySelector('[data-mk-manyn]').textContent = st.many; return; }
+        if (ev.target.closest('[data-mk="batch"]')) {
+            const dd = getData(), n = st.many || 10, seen = new Set(), lines = [];
+            for (let i = 0; i < n * 4 && lines.length < n; i++) { const t = randomString(dd, st.n, st.weighted); const k = t.split(', ').sort().join('|'); if (t && !seen.has(k)) { seen.add(k); lines.push(t); } }
+            if (!lines.length) { toastr.warning('没有能抽的单个画师，换个标签试试', '随机画师串'); return; }
+            // 每串前面一行中文名字：批量那边会认成画师组的名字
+            ui.batch.text = lines.map((t, i) => \`随机 \${i + 1}\\n\${t}\`).join('\\n\\n');
+            ui.batch.showSetup = true; ui.view = 'batch';
+            box.closeModal(); render(); root.querySelector('.pc-body')?.scrollTo(0, 0);
+            toastr.info(\`抽了 \${lines.length} 串，选好提示词再点开始生成\`, '随机画师串', { timeOut: 3000 });
+            return;
+        }
+        const nb = ev.target.closest('[data-n]');`);
 s=applyImg2imgCompatibility(s);
 s=applyWardrobeCanonCompatibility(s);
 s=applyBatchScenesCompatibility(s);
