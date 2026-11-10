@@ -1,3 +1,4 @@
+import {applyPoseInputCompatibility} from './pose-input-compat.mjs';
 import {applySharingWardrobeCompatibility} from './sharing-wardrobe-compat.mjs';
 import {applyComfyCompatibility} from './comfy-compat.mjs';
 import fs from 'node:fs';
@@ -2360,6 +2361,38 @@ patch(`            const o = C.currentOutfit(c);
             const others = o ? C.outfitHolders(o).filter(x => x.owner.key !== c.key) : [];
             if (!o || !(await confirmBox(others.length ? \`把「\${o.name}」从\${c.name}身上拿掉？\${others.map(x => x.owner.name).join('、')}还穿着这套，不受影响。\` : \`删掉「\${o.name}」这套衣服？\`))) return true;
             c.outfits = c.outfits.filter(x => x !== o); c.outfitId = c.outfits[0]?.id || ''; save();`);
+// 看图读姿势：NSFW 的动作单独一栏、默认不选；放进固定提示词改成替换；改名输入框一打字就清掉旧名字
+patch(`不写长相、衣服、背景、画风、画师。看不清的不要编。
+\${PAIRS}
+只输出 JSON：{"pose": [...], "composition": [...]}\`;`,`不写长相、衣服、背景、画风、画师。看不清的不要编。
+只在 NSFW 图里才会用的标签（性行为、裸露部位、体液、明显带性暗示的姿势，比如 spread legs、presenting、sex、saliva、cum、nipples 等）不要放进 pose，单独放进 nsfw；普通图里也常见的姿势放 pose。
+\${PAIRS}
+只输出 JSON：{"pose": [...], "composition": [...], "nsfw": [...]}\`;`);
+patch(`    const pose = normPairs(j.pose), composition = normPairs(j.composition);
+    if (!pose.length && !composition.length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
+    return { pose, composition };`,`    const NSFW_RE = /\\b(nsfw|sex|penis|vagina|pussy|nipples?|cum|ejaculation|saliva|spread legs|presenting|masturbation|fellatio|paizuri|orgasm|ahegao|nude|naked|bdsm|bondage|groping|panties aside|after sex|rape)\\b/i;
+    let pose = normPairs(j.pose), composition = normPairs(j.composition), nsfw = normPairs(j.nsfw);
+    // AI 偶尔还是放错栏：明显的挪到 NSFW
+    const moved = pose.filter(p => NSFW_RE.test(p.en));
+    if (moved.length) { pose = pose.filter(p => !moved.includes(p)); nsfw = [...nsfw, ...moved]; }
+    if (!pose.length && !composition.length && !nsfw.length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
+    return { pose, composition, nsfw };`);
+patch(`    const all = [...r.pose.map(p => ({ ...p, g: '姿势' })), ...r.composition.map(p => ({ ...p, g: '构图' }))];
+    const picked = new Set(all.map((_, i) => i));`,`    const all = [...r.pose.map(p => ({ ...p, g: '姿势' })), ...r.composition.map(p => ({ ...p, g: '构图' })), ...(r.nsfw || []).map(p => ({ ...p, g: 'NSFW' }))];
+    const picked = new Set(all.map((_, i) => i));`);
+patch(`          <div class="pc-label">构图</div><div>\${grp('构图')}</div>`,`          <div class="pc-label">构图</div><div>\${grp('构图')}</div>
+          \${all.some(p => p.g === 'NSFW') ? \`<div class="pc-label">NSFW（默认选上，不要就点掉）</div><div>\${grp('NSFW')}</div>\` : ''}`);
+patch(`            <button class="pc-btn" data-pa="scene">放进固定提示词</button>`,`            <button class="pc-btn" data-pa="scene">换成固定提示词</button>`);
+patch(`        else { st.scene = [String(st.scene || '').trim(), tags].filter(Boolean).join(', '); st.sceneOn = true; }
+        saveStudio(); box.closeModal(); ui.view = 'studio'; render();
+        toastr.success(a === 'pos' ? '接在正面后面了' : '放进固定提示词了', '姿势构图', { timeOut: 1500 });`,`        else { st.scene = tags; st.sceneEn = ''; st.sceneOn = true; }
+        saveStudio(); box.closeModal(); ui.view = 'studio'; render();
+        toastr.success(a === 'pos' ? '接在正面后面了' : '固定提示词换成这些了', '姿势构图', { timeOut: 1500 });`);
+patch(`        const done = v => { box.closeModal(); resolve(v); };
+        box.addEventListener('click', ev => { const m = ev.target.closest('[data-m]')?.dataset.m; if (m === 'ok') done(box.querySelector('[data-v]').value.trim()); if (m === 'no') done(null); });`,`        const done = v => { box.closeModal(); resolve(v); };
+        // 单行（取名字之类）：打开时全选，一打字就替换掉旧的
+        if (!multiline) setTimeout(() => { const inp = box.querySelector('[data-v]'); try { inp.focus({ preventScroll: true }); inp.select(); } catch { } }, 60);
+        box.addEventListener('click', ev => { const m = ev.target.closest('[data-m]')?.dataset.m; if (m === 'ok') done(box.querySelector('[data-v]').value.trim()); if (m === 'no') done(null); });`);
 // 0.8.36：设置里单独的 AI 预设、下载和水印、先存后改名、一键上传到共享
 patch(`    const ai = setFold('ai', '翻译和 AI',`,`    const ai0 = setFold('ai', '翻译和 AI',`);
 patch(`    const tpl = setFold('tpl', '例图提示词',`,`    const aipFold = setFold('aip', 'AI 预设', (() => { const c = T.aiCfg(), a = c.active ?? 'tavern:'; return a === 'plain' ? '不套预设' : a.startsWith('tavern:') ? '跟酒馆预设' : esc(c.list[a]?.name || ''); })(), \`
@@ -2631,6 +2664,67 @@ s=applyComfyCompatibility(s);
 s=applySharingWardrobeCompatibility(s);
 patch('return { AI_FNS, extractCastFromChat, apiFor, aiSeen, aiCfg,', 'return { AI_FNS, stopFetch, extractCastFromChat, apiFor, aiSeen, aiCfg,');
 
+// 0.8.36：角色的 NSFW 身体标签，只在 NSFW 图里加
+patch(`    appearance: [], outfitMode: 'story', outfits: [], outfitId: '', negative: '', charRef: '',`,`    appearance: [], nsfwBody: [], outfitMode: 'story', outfits: [], outfitId: '', negative: '', charRef: '',`);
+patch(`const charPairs = c => [...(c.appearance || []), `,`const charPairs = c => [...(c.appearance || []), ...(c.nsfwBody || []), `);
+patch(`function fixedTags(c) {
+    const parts = [tagText(c.appearance)];`,`function fixedTags(c, { nsfw = false } = {}) {
+    const parts = [tagText(c.appearance)];
+    // NSFW 身体：只有这张图是 NSFW 时才加
+    if (nsfw) parts.push(tagText(c.nsfwBody));`);
+patch(`function buildChatPrompt(scene, picks) {`,`function buildChatPrompt(scene, picks, { nsfw = /(?:^|[,;\\s])nsfw(?:$|[,;\\s])/i.test(String(scene || '')) } = {}) {`);
+patch(`M.mergeTags(base, ...picks.map(p => [fixedTags(p.char), p.tags]`,`M.mergeTags(base, ...picks.map(p => [fixedTags(p.char, { nsfw }), p.tags]`);
+patch(`soloize([fixedTags(p.char), p.tags]`,`soloize([fixedTags(p.char, { nsfw }), p.tags]`);
+patch(`    const built = buildChatPrompt(parsed.scene, parsed.picks);
+    const rating = plan?.rating?.toLowerCase() || (/^nsfw(?:,|$)/i.test(parsed.scene) ? 'nsfw' : undefined);`,`    const rating = plan?.rating?.toLowerCase() || (/^nsfw(?:,|$)/i.test(parsed.scene) ? 'nsfw' : undefined);
+    const built = buildChatPrompt(parsed.scene, parsed.picks, { nsfw: rating === 'nsfw' });`);
+patch(`function studioCastPick(e) {
+    const ch = getChar(e.key);
+    if (!ch) return null;
+    const out = e.outfit === '' ? null : (ch.outfits.find(o => o.id === e.outfit) || currentOutfit(ch));
+    return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', tags: [tagText(ch.appearance), tagText(out?.tags)]`,`function studioCastPick(e, nsfw = false) {
+    const ch = getChar(e.key);
+    if (!ch) return null;
+    const out = e.outfit === '' ? null : (ch.outfits.find(o => o.id === e.outfit) || currentOutfit(ch));
+    return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', tags: [tagText(ch.appearance), nsfw ? tagText(ch.nsfwBody) : '', tagText(out?.tags)]`);
+patch(`    const picks = (cast || []).map(studioCastPick).filter(Boolean);`,`    const nsfw = /(?:^|[,;\\s])nsfw(?:$|[,;\\s])/i.test(String(pos || ''));
+    const picks = (cast || []).map(e => studioCastPick(e, nsfw)).filter(Boolean);`);
+patch(`return { character: { name: c.name, appearance: c.appearance, `,`return { character: { name: c.name, appearance: c.appearance, nsfwBody: c.nsfwBody || [], `);
+patch(`? { name: src.name, appearance: src.appearance, `,`? { name: src.name, appearance: src.appearance, nsfwBody: Array.isArray(src.nsfwBody) ? src.nsfwBody : [], `);
+patch(`    b.appearance = structuredClone(a.appearance);`,`    b.appearance = structuredClone(a.appearance);
+    b.nsfwBody = structuredClone(a.nsfwBody || []);`);
+patch(`        outfitMode: Object.keys(outfits).length ? 'fixed' : 'story',
+        outfits: Object.entries(outfits).map(([n, o]) => fromZhihuijiOutfit(n, o)),`,`        // 智绘姬里带 nsfw 的字段（NSFW 身体特征）放进「NSFW 身体」
+        nsfwBody: parsePairs(Object.entries(ch || {}).filter(([k, v]) => /nsfw/i.test(k) && typeof v === 'string' && v.trim() && !T.hasChinese(v.replace(/（[^（）]*）/g, ''))).map(([, v]) => v).join(', ')),
+        outfitMode: Object.keys(outfits).length ? 'fixed' : 'story',
+        outfits: Object.entries(outfits).map(([n, o]) => fromZhihuijiOutfit(n, o)),`);
+patch(`只输出 JSON：{"appearance": [...], "outfit": [...]}。设定里没写的不要编。\`;`,`NSFW 身体单独放进 nsfw：只给明确是成年人的角色写（未成年、年龄不明、非人类幼体一律留空 []）。写脱了衣服才看得到的身体特征：乳头 / 乳晕颜色和大小、阴毛、私处、男性的阴茎等；设定写了就照写，没写的按这个人的身材和气质补 2～4 个常见的。不要写动作和姿势。
+只输出 JSON：{"appearance": [...], "outfit": [...], "nsfw": [...]}。外貌和衣服设定里没写的不要编。\`;`);
+patch(`    return { appearance: norm(j.appearance), outfit: norm(j.outfit) };`,`    return { appearance: norm(j.appearance), outfit: norm(j.outfit), nsfw: norm(j.nsfw) };`);
+patch(`只输出 JSON：{"people": [{"name": "正文里的名字", "aliases": ["昵称、称呼、别的叫法"], "appearance": [...], "outfit": [...]}]}\`;`,`NSFW 身体单独放进 nsfw：只给明确是成年人的角色写（未成年、年龄不明、非人类幼体一律留空 []）。写脱了衣服才看得到的身体特征：乳头 / 乳晕颜色和大小、阴毛、私处、男性的阴茎等；设定写了就照写，没写的按这个人的身材和气质补 2～4 个常见的。不要写动作和姿势。
+只输出 JSON：{"people": [{"name": "正文里的名字", "aliases": ["昵称、称呼、别的叫法"], "appearance": [...], "outfit": [...], "nsfw": [...]}]}\`;`);
+patch(`只输出 JSON：{"people": [{"name": "设定里的名字", "aliases": ["昵称、简称、别的叫法"], "appearance": [...], "outfit": [...]}]}\`;`,`NSFW 身体单独放进 nsfw：只给明确是成年人的角色写（未成年、年龄不明、非人类幼体一律留空 []）。写脱了衣服才看得到的身体特征：乳头 / 乳晕颜色和大小、阴毛、私处、男性的阴茎等；设定写了就照写，没写的按这个人的身材和气质补 2～4 个常见的。不要写动作和姿势。
+只输出 JSON：{"people": [{"name": "设定里的名字", "aliases": ["昵称、简称、别的叫法"], "appearance": [...], "outfit": [...], "nsfw": [...]}]}\`;`);
+{ const a=`        appearance: norm(p?.appearance), outfit: norm(p?.outfit),`; assert(s.split(a).length===3, 'patchall '+a.slice(0,40)); s=s.split(a).join(`        appearance: norm(p?.appearance), outfit: norm(p?.outfit), nsfw: norm(p?.nsfw),`); }
+patch(`                        ch.appearance = p.appearance;`,`                        ch.appearance = p.appearance;
+                        if (p.nsfw?.length && !(ch.nsfwBody || []).length) ch.nsfwBody = p.nsfw;`);
+patch(`                c.appearance = r.appearance;`,`                c.appearance = r.appearance;
+                if (r.nsfw?.length) c.nsfwBody = r.nsfw;`);
+patch(`addText: { app: '', out: '' },`,`addText: { app: '', nsfw: '', out: '' },`);
+patch(`      <div class="pc-addrow"><textarea rows="1" data-bind="addText.app" placeholder="自己加，中文也行，可以一次粘贴好几个" data-enter="addpair-app">\${esc(ui.addText.app)}</textarea><button class="pc-btn dark" data-act="addpair" data-where="app" \${busy ? 'disabled' : ''}>\${busy === 'app' ? '…' : '加'}</button></div>
+    </section>`,`      <div class="pc-addrow"><textarea rows="1" data-bind="addText.app" placeholder="自己加，中文也行，可以一次粘贴好几个" data-enter="addpair-app">\${esc(ui.addText.app)}</textarea><button class="pc-btn dark" data-act="addpair" data-where="app" \${busy ? 'disabled' : ''}>\${busy === 'app' ? '…' : '加'}</button></div>
+    </section>
+
+    <section class="pc-card pc-pad pc-mt">
+      <div class="pc-row-between"><b>NSFW 身体</b><span class="pc-dim small">只在 NSFW 图里发</span></div>
+      <div class="pc-dim small">脱了衣服才看得到的：乳头、阴毛、私处这类。只有这张图是 NSFW（标记里带 nsfw、提示词里有 nsfw）时才加进去，SFW 的图不会发。读卡时 AI 会给成年角色顺便写上。</div>
+      <div class="pc-pairs">\${pairChips(c.nsfwBody || [], 'nsfw') || '<span class="pc-dim small">还没有</span>'}</div>
+      <div class="pc-addrow"><textarea rows="1" data-bind="addText.nsfw" placeholder="自己加，比如 pink nipples, pubic hair，中文也行" data-enter="addpair-nsfw">\${esc(ui.addText.nsfw || '')}</textarea><button class="pc-btn dark" data-act="addpair" data-where="nsfw" \${busy ? 'disabled' : ''}>\${busy === 'nsfw' ? '…' : '加'}</button></div>
+    </section>`);
+patch(`                if (where === 'app') { for (const p of pairs) if (!c.appearance.some(x => x.en === p.en)) c.appearance.push(p); }`,`                if (where === 'app') { for (const p of pairs) if (!c.appearance.some(x => x.en === p.en)) c.appearance.push(p); }
+                else if (where === 'nsfw') { c.nsfwBody ||= []; for (const p of pairs) if (!c.nsfwBody.some(x => x.en === p.en)) c.nsfwBody.push(p); }`);
+{ const a=`            const list = el.dataset.where === 'app' ? c.appearance : C.currentOutfit(c)?.tags;`; assert(s.split(a).length===3, 'patchall '+a.slice(0,40)); s=s.split(a).join(`            const list = el.dataset.where === 'app' ? c.appearance : el.dataset.where === 'nsfw' ? (c.nsfwBody ||= []) : C.currentOutfit(c)?.tags;`); }
+s=applyPoseInputCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
