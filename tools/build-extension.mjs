@@ -1,3 +1,4 @@
+import {applyWardrobeCanonCompatibility} from './wardrobe-canon-compat.mjs';
 import {applyImg2imgCompatibility} from './img2img-compat.mjs';
 import {applyTauriFetchCompatibility} from './tauri-fetch-compat.mjs';
 import {applyPoseInputCompatibility} from './pose-input-compat.mjs';
@@ -3069,6 +3070,7 @@ patch(`        case 'readcard': {`,`        case 'canonai': {
         }
         case 'readcard': {`);
 s=applyImg2imgCompatibility(s);
+s=applyWardrobeCanonCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;

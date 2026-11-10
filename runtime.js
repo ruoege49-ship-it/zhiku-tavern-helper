@@ -4403,7 +4403,7 @@ function currentCast() {
     return keys.map(([group, key]) => {
         const ch = getChar(key);
         if (!ch) return null;
-        const on = flags[key] ?? (ch.appearance.length > 0);
+        const on = flags[key] ?? !!lookTags(ch);
         return { key, char: ch, on, group };
     }).filter(Boolean);
 }
@@ -4647,6 +4647,7 @@ function copyLook(fromKey, toKey) {
     if (!a || !b) return;
     b.appearance = structuredClone(a.appearance);
     b.nsfwBody = structuredClone(a.nsfwBody || []);
+    b.canonTag = String(a.canonTag || ''); b.canonOn = !!a.canonOn; b.canonKeepLook = !!a.canonKeepLook;
     b.outfitMode = a.outfitMode;
     b.outfits = a.outfits.map(o => ({ ...structuredClone(o), id: M.uid('o_') }));
     b.outfitId = b.outfits[0]?.id || '';
@@ -6677,7 +6678,7 @@ function openOutfitDesigner({ mesId = null } = {}) {
                 const c = charOf(r);
                 r.busy = true; draw();
                 try {
-                    const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', c ? C.tagText(c.appearance) : '1boy', C.tagText(r.tags), 'solo, full body, standing, looking at viewer, simple background, white background');
+                    const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', c ? C.lookTags(c) : '1boy', C.tagText(r.tags), 'solo, full body, standing, looking at viewer, simple background, white background');
                     const { positive, negative } = E.composeStudio({ pos, neg: c?.negative || '' });
                     r.image = await E.generateFull({ positive, negative, width: 768, height: 1344, director: c?.charRef ? await E.charRefs([c.charRef]) : undefined });
                 } catch (e) { toastr.error(e.message, '生成失败'); }
@@ -6866,7 +6867,7 @@ function viewWardrobe(d) {
       <button class="pc-btn" data-act="wardnew">＋ 自己写</button>
     </div>
     ${WARD2_CSS}<div class="pc-outmake2"><button class="pc-btn" data-act="wardcombine">⊕ 配饰搭配</button><button class="pc-pill dashed tiny" data-act="omimport">从穿搭管理器导入</button></div>
-    ${ui.wardBatch ? `<div class="pc-castmode pc-mt-s">批量导入 ${ui.wardBatch.done} / ${ui.wardBatch.total}${ui.wardBatch.fail ? `（${ui.wardBatch.fail} 张没读出标签，存了图，打开改一下）` : ''}… <button class="pc-pill tiny dashed" data-act="wardbatchstop">${ui.wardBatch.stop ? '停下中' : '停'}</button></div>` : '<div class="pc-dim small pc-mt-s">「图片」可以一次选好几张，每张存成一套。</div>'}
+    ${ui.wardBatch ? `<div class="pc-castmode pc-mt-s">批量导入 ${ui.wardBatch.done} / ${ui.wardBatch.total} · 已存 ${ui.wardBatch.saved} 套${ui.wardBatch.skipped ? ' · ' + ui.wardBatch.skipped + ' 张读取失败' : ''}${ui.wardBatch.fail ? `（${ui.wardBatch.fail} 张没读出标签，存了图，打开改一下）` : ''}… <button class="pc-pill tiny dashed" data-act="wardbatchstop">${ui.wardBatch.stop ? '当前张处理完就停' : '停'}</button></div>` : '<div class="pc-dim small pc-mt-s">「图片」可以一次选好几张，每张存成一套。</div>'}
     <label class="pc-search pc-mt-s"><span class="pc-sr">搜索</span>${ICON.search}<input data-bind="wardSearch" value="${esc(ui.wardSearch)}" placeholder="搜衣服名、标签"></label>
     <div class="pc-chips">${[['all', '全部'], ...owners.map(c => [c.key, c.name]), ['none', '没给谁穿']].map(([k, t]) => `<button class="pc-pill ${ui.wardFilter === k ? 'on' : 'dashed'}" data-act="wardfilter" data-v="${esc(k)}">${esc(t)}</button>`).join('')}</div>
     <div class="pc-grid2 pc-mt-s">${list.map(({ o, owner, holders }) => `<article class="pc-ticket" data-act="openoutfit" data-owner="${esc(owner?.key || '')}" data-id="${esc(o.id)}">
@@ -6960,7 +6961,7 @@ function viewCast(d) {
         if (src.kind === 'free') return `<article class="pc-ticket" data-act="openchar" data-key="${esc(src.key)}">
           <div class="pc-ticket-img">${c.image ? `<img src="${esc(c.image)}" loading="lazy" alt="" onerror="this.remove()">` : '<span>没有图</span>'}</div>
           <div class="pc-ticket-text"><b>${esc(src.name)}</b><span class="pc-state">${C.currentCast().some(x => x.key === src.key) ? '在这次聊天里' : '没绑定角色卡'}</span></div></article>`;
-        const ok = c.appearance.length > 0;
+        const ok = !!C.lookTags(c);
         return `<article class="pc-ticket" data-act="openchar" data-key="${esc(src.key)}">
           <div class="pc-ticket-img">${C.avatarUrl(c) ? `<img src="${esc(C.avatarUrl(c))}" loading="lazy" alt="" onerror="this.remove()">` : ''}</div>
           <div class="pc-ticket-text"><b>${esc(src.name)}</b><span class="pc-state ${ok ? '' : 'todo'}">${ok ? '外貌已写' + (side ? ` · ${side} 个配角` : '') : '还没写外貌，点一下写'}</span></div></article>`;
@@ -7210,7 +7211,7 @@ async function charAction(act, el) {
             const owner = ui.outfit.draft ? C.getChar(ui.outfit.dest) : C.findOutfit(ui.outfit.owner, ui.outfit.id)?.owner;
             ui.outfit.busy = 'gen'; render();
             try {
-                const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', owner ? C.tagText(owner.appearance) : '1boy, solo, male focus, adult', C.tagText(o.tags), 'solo, full body, standing, looking at viewer, simple background, white background');
+                const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', owner ? C.lookTags(owner) : '1boy, solo, male focus, adult', C.tagText(o.tags), 'solo, full body, standing, looking at viewer, simple background, white background');
                 const { positive, negative } = E.composeStudio({ pos, neg: owner?.negative || '' });
                 const img = await E.generateFull({ positive, negative, width: 768, height: 1344, director: owner?.charRef ? await E.charRefs([owner.charRef]) : undefined });
                 if (ui.outfit.draft) o.image = img;
@@ -7318,14 +7319,20 @@ async function charAction(act, el) {
             return true;
         }
         case 'canonai': {
+            if (ui.charBusy) return true;
+            const startKey = ui.charKey, startChat = C.chatId();
+            const original = JSON.stringify([c.name, c.aliases, c.canonOn, c.canonTag, c.canonKeepLook]);
+            const current = () => !stopped && getData() === d && d.characters[c.key] === c && ui.charKey === startKey && C.chatId() === startChat && JSON.stringify([c.name, c.aliases, c.canonOn, c.canonTag, c.canonKeepLook]) === original;
             ui.charBusy = 'canon'; render();
             try {
                 const desc = await C.descOfFull(c).catch(() => '');
+                if (!current()) return true;
                 const r = await T.identifyCanon(c.name, c.aliases || '', desc);
+                if (!current()) return true;
                 if (r.canon) { c.canonTag = r.canon; c.canonOn = true; C.saveChar(c); toastr.success(`认出是「${r.canon}」${r.why ? '：' + r.why : ''}`, '同人角色', { timeOut: 5000 }); }
                 else toastr.info(`AI 认为不是现有作品的角色${r.why ? '：' + r.why : ''}。是的话可以自己填 danbooru 上的角色名`, '同人角色', { timeOut: 5000 });
-            } catch (e) { toastr.error(e.message, '认人失败'); }
-            ui.charBusy = ''; render();
+            } catch (e) { if (current()) toastr.error(e.message, '认人失败'); }
+            finally { if (ui.charKey === startKey && ui.charBusy === 'canon') ui.charBusy = ''; if (!stopped) render(); }
             return true;
         }
         case 'readcard': {
@@ -7427,7 +7434,7 @@ async function charAction(act, el) {
             const o = C.currentOutfit(c);
             ui.charBusy = 'outtest'; render();
             try {
-                const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', C.tagText(c.appearance), C.tagText(o?.tags), 'solo, full body, standing, looking at viewer, simple background, white background');
+                const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', C.lookTags(c), C.tagText(o?.tags), 'solo, full body, standing, looking at viewer, simple background, white background');
                 const { positive, negative } = E.composeStudio({ pos, neg: c.negative });
                 ui.outTestImg = await E.generateFull({ positive, negative, width: 768, height: 1344, director: c.charRef ? await E.charRefs([c.charRef]) : undefined });
             } catch (e) { toastr.error(e.message, '生成失败'); }
@@ -8981,6 +8988,41 @@ function onInput(ev) {
     }
 }
 
+/** 批量读衣服：顺序处理；停止后完成当前张，停用扩展或切换数据后不再保存。 */
+async function importWardrobeImages(files) {
+    if (ui.wardBatch || stopped) return;
+    const d = getData(), b = ui.wardBatch = { total: files.length, done: 0, saved: 0, fail: 0, skipped: 0, stop: false };
+    const current = () => !stopped && getData() === d && ui.wardBatch === b;
+    render();
+    try {
+        for (const f of files) {
+            if (b.stop || !current()) break;
+            let tags = [], name = f.name.replace(/\.[^.]+$/, '').slice(0, 20), image = '';
+            try {
+                const du = await shrinkDataUrl(await fileToDataUrl(f), 1024, 0.88);
+                if (!current()) break;
+                try { const r = await T.outfitFromImage(du); tags = Array.isArray(r.tags) ? r.tags : []; if (r.name) name = String(r.name).slice(0, 20); }
+                catch (e) { console.warn('[智库] 批量导入：读图失败', e); }
+                if (!current()) break;
+                const small = await shrinkDataUrl(du, 768);
+                if (!current()) break;
+                try { image = (await uploadImage(small, 'outfit_' + M.uid(''))).path || ''; } catch { /* 保留本地缩略图 */ }
+                if (!current()) break;
+                if (!image) { const fallback = await shrinkDataUrl(du, 512, 0.8); if (fallback.length < 600000) image = fallback; }
+            } catch (e) { console.warn('[智库] 批量导入：图片读不出来', e); }
+            if (!current()) break;
+            if (tags.length || image) {
+                const o = { id: M.uid('o_'), name: name || '导入的衣服', tags, ...(image ? { image } : {}) };
+                (d.outfits ||= {})[o.id] = o; b.saved++; if (!tags.length) b.fail++;
+                commit({ silent: true });
+            } else b.skipped++;
+            b.done++; render();
+        }
+        if (!current()) return;
+        const msg = (b.stop ? '停了，' : '') + '存下 ' + b.saved + ' 套' + (b.fail ? '，' + b.fail + ' 套没读出标签' : '') + (b.skipped ? '，' + b.skipped + ' 张图片读取失败' : '');
+        commit(); toastr[b.fail || b.skipped ? 'warning' : 'success'](msg, '衣柜', { timeOut: 4000 });
+    } finally { if (ui.wardBatch === b) ui.wardBatch = null; if (!stopped) render(); }
+}
 async function onChangeEv(ev) {
     const el = ev.target;
     const d = getData();
@@ -9018,27 +9060,9 @@ async function onChangeEv(ev) {
     }
     if (el.dataset.i2i) { const g = (ui.studio.i2i ||= {}); g[el.dataset.i2i] = Number(el.value); render(); return; }
     if (el.dataset.castact) { const k = el.dataset.castact, v = el.value.trim(); setStudioCast(studioCast().map(e => e.key === k ? { ...e, act: v } : e)); updateStudioPreview?.(); return; }
+    if (el.dataset.wardimg !== undefined && ui.wardBatch) { el.value = ''; toastr.info('上一批还在导入', '衣柜'); return; }
     if (el.dataset.wardimg !== undefined && el.files?.length > 1) {
-        const files = [...el.files]; el.value = '';
-        if (ui.wardBatch) { toastr.info('上一批还在导入', '衣柜'); return; }
-        const b = ui.wardBatch = { total: files.length, done: 0, fail: 0, stop: false };
-        render();
-        for (const f of files) {
-            if (b.stop) break;
-            let tags = [], name = f.name.replace(/\.[^.]+$/, '').slice(0, 20), image = '';
-            try {
-                const du = await shrinkDataUrl(await fileToDataUrl(f), 1024, 0.88);
-                try { const r = await T.outfitFromImage(du); tags = r.tags || []; if (r.name) name = r.name; } catch (e) { console.warn('[智库] 批量导入：读图失败', e); }
-                try { image = (await uploadImage(await shrinkDataUrl(du, 768), `outfit_${M.uid('')}`)).path; } catch { image = du.length < 600000 ? await shrinkDataUrl(du, 512, 0.8) : ''; }
-            } catch (e) { console.warn('[智库] 批量导入：图片读不出来', e); }
-            if (!tags.length) b.fail++;
-            if (tags.length || image) { const o = { id: M.uid('o_'), name: name || '导入的衣服', tags, ...(image ? { image } : {}) }; getData().outfits[o.id] = o; commit({ silent: true }); }
-            b.done++; render();
-        }
-        const msg = `${b.stop ? '停了，' : ''}导入 ${b.done} 张${b.fail ? `，${b.fail} 张没读出标签` : ''}`;
-        ui.wardBatch = null; commit();
-        toastr[b.fail ? 'warning' : 'success'](msg, '衣柜', { timeOut: 4000 });
-        render(); return;
+        const files = [...el.files]; el.value = ''; await importWardrobeImages(files); return;
     }
     if (el.dataset.wardimg !== undefined || el.dataset.outimg !== undefined) {
         const f = el.files[0];
