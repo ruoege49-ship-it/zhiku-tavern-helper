@@ -1,3 +1,4 @@
+import {applyPoseInputCompatibility} from './pose-input-compat.mjs';
 import {applySharingWardrobeCompatibility} from './sharing-wardrobe-compat.mjs';
 import {applyComfyCompatibility} from './comfy-compat.mjs';
 import fs from 'node:fs';
@@ -2723,6 +2724,7 @@ patch(`      <div class="pc-addrow"><textarea rows="1" data-bind="addText.app" p
 patch(`                if (where === 'app') { for (const p of pairs) if (!c.appearance.some(x => x.en === p.en)) c.appearance.push(p); }`,`                if (where === 'app') { for (const p of pairs) if (!c.appearance.some(x => x.en === p.en)) c.appearance.push(p); }
                 else if (where === 'nsfw') { c.nsfwBody ||= []; for (const p of pairs) if (!c.nsfwBody.some(x => x.en === p.en)) c.nsfwBody.push(p); }`);
 { const a=`            const list = el.dataset.where === 'app' ? c.appearance : C.currentOutfit(c)?.tags;`; assert(s.split(a).length===3, 'patchall '+a.slice(0,40)); s=s.split(a).join(`            const list = el.dataset.where === 'app' ? c.appearance : el.dataset.where === 'nsfw' ? (c.nsfwBody ||= []) : C.currentOutfit(c)?.tags;`); }
+s=applyPoseInputCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;

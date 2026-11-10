@@ -4178,8 +4178,10 @@ ${PAIRS}
     const NSFW_RE = /\b(nsfw|sex|penis|vagina|pussy|nipples?|cum|ejaculation|saliva|spread legs|presenting|masturbation|fellatio|paizuri|orgasm|ahegao|nude|naked|bdsm|bondage|groping|panties aside|after sex|rape)\b/i;
     let pose = normPairs(j.pose), composition = normPairs(j.composition), nsfw = normPairs(j.nsfw);
     // AI 偶尔还是放错栏：明显的挪到 NSFW
-    const moved = pose.filter(p => NSFW_RE.test(p.en));
-    if (moved.length) { pose = pose.filter(p => !moved.includes(p)); nsfw = [...nsfw, ...moved]; }
+    const restricted = p => NSFW_RE.test(p.en.replace(/_/g, ' '));
+    const moved = [...pose, ...composition].filter(restricted);
+    pose = pose.filter(p => !restricted(p)); composition = composition.filter(p => !restricted(p));
+    nsfw = [...new Map([...nsfw, ...moved].map(p => [p.en.replace(/_/g, ' ').trim().toLowerCase(), p])).values()];
     if (!pose.length && !composition.length && !nsfw.length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
     return { pose, composition, nsfw };
 }
@@ -4395,7 +4397,8 @@ function canSplit() {
  * 拼出这一张的提示词。
  * scene：AI 写的场景；picks：[{ char, tags, x, y }]
  */
-function buildChatPrompt(scene, picks, { nsfw = /(?:^|[,;\s])nsfw(?:$|[,;\s])/i.test(String(scene || '')) } = {}) {
+const hasNsfwRating = text => M.tokenize(String(text || '').replace(/[;\n]/g, ',')).some(t => t.text.trim().toLowerCase() === 'nsfw');
+function buildChatPrompt(scene, picks, { nsfw = hasNsfwRating(scene) } = {}) {
     const d = getData();
     const artist = d.active ? M.ticketString(d, d.active) : '';
     const chars = picks.map(p => p.char);
@@ -4428,7 +4431,7 @@ function markerPrompt(prompt, { story } = {}) {
     const plan = readIllustrationPlan(prompt);
     const parsed = plan ? compileIllustrationPlan(plan, currentCast(), story === undefined ? undefined : imageStoryText(story)) : resolveImageCharacters(prompt, currentCast());
     if (parsed.unknown?.length) toastr.info(`「${parsed.unknown.join('、')}」没在角色页登记（或这次聊天没开），按图里写的标签画`, '智库', { timeOut: 4000 });
-    const rating = plan?.rating?.toLowerCase() || (/^nsfw(?:,|$)/i.test(parsed.scene) ? 'nsfw' : undefined);
+    const rating = plan?.rating?.toLowerCase() || (hasNsfwRating(parsed.scene) ? 'nsfw' : undefined);
     const built = buildChatPrompt(parsed.scene, parsed.picks, { nsfw: rating === 'nsfw' });
     return { ...built, positive: applyIllustrationRating(built.positive, rating), cast: parsed.cast };
 }
@@ -4709,7 +4712,7 @@ function studioCastPick(e, nsfw = false) {
     return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', tags: [tagText(ch.appearance), nsfw ? tagText(ch.nsfwBody) : '', tagText(out?.tags)].filter(Boolean).join(', '), x: CAST_X[e.pos] ?? 0.5 };
 }
 function studioCastPrompt({ pos = '', neg = '', scene = '' }, cast) {
-    const nsfw = /(?:^|[,;\s])nsfw(?:$|[,;\s])/i.test(String(pos || ''));
+    const nsfw = hasNsfwRating([pos, scene].filter(Boolean).join(', '));
     const picks = (cast || []).map(e => studioCastPick(e, nsfw)).filter(Boolean);
     if (!picks.length) return { ...E.composeStudio({ pos, neg, scene }), chars: [], picks };
     const chars = picks.map(p => p.char);
@@ -5421,8 +5424,11 @@ async function translateScene() {
     const st = ui.studio;
     st.sceneBusy = true; render();
     try {
-        st.sceneEn = await T.translateToTags(st.scene, { expand: !!st.sceneExpand });
-        st.sceneSrc = String(st.scene || '').trim();
+        const source = String(st.scene || '').trim(), expand = !!st.sceneExpand;
+        const translated = await T.translateToTags(source, { expand });
+        if (ui.studio !== st || String(st.scene || '').trim() !== source || !!st.sceneExpand !== expand) throw new Error('固定提示词已更改，请重新操作');
+        st.sceneEn = translated;
+        st.sceneSrc = source;
         saveStudio();
     } finally { st.sceneBusy = false; }
 }
@@ -9252,7 +9258,7 @@ function showPose(r) {
         if (!tags) { toastr.info('一个都没选', '姿势构图'); return; }
         if (a === 'copy') { try { await navigator.clipboard.writeText(tags); toastr.success('复制好了', '姿势构图', { timeOut: 1200 }); } catch { toastr.info(tags, '复制不了，自己长按复制'); } return; }
         if (a === 'pos') st.pos = M.mergeTags(st.pos || '', tags);
-        else { st.scene = tags; st.sceneEn = ''; st.sceneOn = true; }
+        else { st.scene = tags; st.sceneEn = ''; st.sceneSrc = ''; st.sceneOn = true; }
         saveStudio(); box.closeModal(); ui.view = 'studio'; render();
         toastr.success(a === 'pos' ? '接在正面后面了' : '固定提示词换成这些了', '姿势构图', { timeOut: 1500 });
     });
@@ -9807,7 +9813,7 @@ function modal(inner) {
     box.closeModal = () => back.remove();
     const openedAt = Date.now();
     back.addEventListener('click', ev => { if (ev.target === back && Date.now() - openedAt > 400) back.remove(); });
-    setTimeout(() => box.querySelector('textarea, input')?.focus(), 30);
+    setTimeout(() => { if (back.isConnected && DOC.querySelectorAll('.pc-modal-backdrop')[DOC.querySelectorAll('.pc-modal-backdrop').length - 1] === back) box.querySelector('textarea, input')?.focus(); }, 30);
     return box;
 }
 function promptText(title, value = '', multiline = false) {
@@ -9817,9 +9823,18 @@ function promptText(title, value = '', multiline = false) {
           <div class="pc-actions"><button class="pc-btn" data-m="no">算了</button><button class="pc-btn dark" data-m="ok">好</button></div>`);
         const done = v => { box.closeModal(); resolve(v); };
         // 单行（取名字之类）：打开时全选，一打字就替换掉旧的
-        if (!multiline) setTimeout(() => { const inp = box.querySelector('[data-v]'); try { inp.focus({ preventScroll: true }); inp.select(); } catch { } }, 60);
+        if (!multiline) {
+            const inp = box.querySelector('[data-v]'), initial = inp.value;
+            let touched = false;
+            for (const event of ['pointerdown', 'input', 'keydown']) inp.addEventListener(event, () => { touched = true; }, { once: true });
+            setTimeout(() => {
+                if (!box.isConnected || touched || inp.value !== initial) return;
+                if (DOC.activeElement?.matches('input, textarea') && DOC.activeElement !== inp) return;
+                try { inp.focus({ preventScroll: true }); inp.select(); } catch { }
+            }, 60);
+        }
         box.addEventListener('click', ev => { const m = ev.target.closest('[data-m]')?.dataset.m; if (m === 'ok') done(box.querySelector('[data-v]').value.trim()); if (m === 'no') done(null); });
-        box.addEventListener('keydown', ev => { if (ev.key === 'Enter' && !multiline) done(box.querySelector('[data-v]').value.trim()); });
+        box.addEventListener('keydown', ev => { if (ev.key === 'Enter' && !multiline && !ev.isComposing && ev.keyCode !== 229) done(box.querySelector('[data-v]').value.trim()); });
         box.parentElement.addEventListener('click', ev => { if (ev.target === box.parentElement) resolve(null); });
     });
 }
