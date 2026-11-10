@@ -3921,14 +3921,24 @@ function repairJson(s) {
 const PAIRS = `每个标签写成 {"en": "英文 Danbooru 标签", "zh": "简短中文意思"}。只用常见的 Danbooru 标签。`;
 
 /** 从角色卡 / 人设描述里挑出固定外貌和默认衣服 */
+/** 认同人角色：是现有作品里的角色就给 danbooru 角色标签，不是给 '' */
+async function identifyCanon(name, aliases, description) {
+    const sys = `你判断一个角色是不是现有动画、漫画、游戏、小说、虚拟主播里的角色（同人角色）。
+是的话，canon 写 danbooru 上这个角色的标签，英文小写、空格代替下划线，后面可以再带作品标签，比如 "hatsune miku, vocaloid"、"saber (fate), fate/stay night"、"raiden shogun, genshin impact"。
+原创角色、只是同名、或者拿不准，都写 ""，不要编。
+只输出 JSON：{"canon": "", "why": "一句话说依据"}`;
+    const j = await askShrinking(sys, limit => `角色名：${name}${aliases ? `\n别名：${aliases}` : ''}\n设定：\n${String(description || '（没有设定，只看名字）').slice(0, limit)}`, { maxTokens: 2000, fn: 'look' });
+    return { canon: typeof j.canon === 'string' ? j.canon.replace(/_/g, ' ').trim().slice(0, 120) : '', why: String(j.why || '').slice(0, 200) };
+}
 async function extractAppearance(name, description) {
     const sys = `你从角色设定里挑出画图用的外貌标签。只挑不会变的外貌：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身等。衣服另外放。
 ${PAIRS}
 NSFW 身体单独放进 nsfw：只给明确是成年人的角色写（未成年、年龄不明、非人类幼体一律留空 []）。写脱了衣服才看得到的身体特征：乳头 / 乳晕颜色和大小、阴毛、私处、男性的阴茎等；设定写了就照写，没写的按这个人的身材和气质补 2～4 个常见的。不要写动作和姿势。
-只输出 JSON：{"appearance": [...], "outfit": [...], "nsfw": [...]}。外貌和衣服设定里没写的不要编。`;
+如果这个角色是现有动画、漫画、游戏、小说里的角色（同人），canon 写 danbooru 上的角色标签，英文小写、空格代替下划线，可以再带作品标签，比如 "hatsune miku, vocaloid"、"saber (fate), fate/stay night"；原创角色或拿不准就写 ""。
+只输出 JSON：{"appearance": [...], "outfit": [...], "nsfw": [...], "canon": ""}。外貌和衣服设定里没写的不要编。`;
     const j = await askShrinking(sys, limit => `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000, fn: 'look' });
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x.en || '').trim(), zh: String(x.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
-    return { appearance: norm(j.appearance), outfit: norm(j.outfit), nsfw: norm(j.nsfw) };
+    return { appearance: norm(j.appearance), outfit: norm(j.outfit), nsfw: norm(j.nsfw), canon: typeof j.canon === 'string' ? j.canon.replace(/_/g, ' ').trim().slice(0, 120) : '' };
 }
 
 /** 设定很长时：先发 6 万字；模型说太长（上下文不够、请求太大、超时）就缩到 3 万、1.5 万再试。设定是按描述在前、世界书在后排的，缩的时候先丢后面的 */
@@ -3971,28 +3981,32 @@ async function extractCastFromChat(cardName, chatText) {
 外貌只挑不会变的：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身、角尾巴翅膀等。最近一次写到的衣服另外放。正文没写到的不要编；同一个人前后写法不同时以较新的为准。
 ${PAIRS}
 NSFW 身体单独放进 nsfw：只给明确是成年人的角色写（未成年、年龄不明、非人类幼体一律留空 []）。写脱了衣服才看得到的身体特征：乳头 / 乳晕颜色和大小、阴毛、私处、男性的阴茎等；设定写了就照写，没写的按这个人的身材和气质补 2～4 个常见的。不要写动作和姿势。
-只输出 JSON：{"people": [{"name": "正文里的名字", "aliases": ["昵称、称呼、别的叫法"], "appearance": [...], "outfit": [...], "nsfw": [...]}]}`;
+每个人如果是现有动画、漫画、游戏、小说里的角色（同人），canon 写 danbooru 上的角色标签，英文小写、空格代替下划线，可以带作品标签，比如 "hatsune miku, vocaloid"；原创角色或拿不准写 ""。
+只输出 JSON：{"people": [{"name": "正文里的名字", "aliases": ["昵称、称呼、别的叫法"], "appearance": [...], "outfit": [...], "nsfw": [...], "canon": ""}]}`;
     const j = await askShrinking(sys, limit => `卡名：${cardName}\n聊天正文（从旧到新）：\n${String(chatText || '').slice(-limit)}`, { maxTokens: 8000, fn: 'look' });
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
     return (Array.isArray(j.people) ? j.people : []).map(p => ({
         name: String(p?.name || '').trim().slice(0, 30),
         aliases: (Array.isArray(p?.aliases) ? p.aliases : []).map(a => String(a || '').trim()).filter(Boolean).slice(0, 6),
         appearance: norm(p?.appearance), outfit: norm(p?.outfit), nsfw: norm(p?.nsfw),
-    })).filter(p => p.name && !/^\{\{?user\}?\}$|^user$/i.test(p.name) && p.appearance.length);
+        canon: typeof p?.canon === 'string' ? p.canon.replace(/_/g, ' ').trim().slice(0, 120) : '',
+    })).filter(p => p.name && !/^\{\{?user\}?\}$|^user$/i.test(p.name) && (p.appearance.length || p.canon));
 }
 async function extractCast(cardName, description) {
     const sys = `你从角色卡和世界书里找出所有有外貌描写的角色（主角、配角都要，{{user}} / 玩家本人不要），每人挑画图用的外貌标签。
 外貌只挑不会变的：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身等。衣服另外放。设定里没写的不要编。
 ${PAIRS}
 NSFW 身体单独放进 nsfw：只给明确是成年人的角色写（未成年、年龄不明、非人类幼体一律留空 []）。写脱了衣服才看得到的身体特征：乳头 / 乳晕颜色和大小、阴毛、私处、男性的阴茎等；设定写了就照写，没写的按这个人的身材和气质补 2～4 个常见的。不要写动作和姿势。
-只输出 JSON：{"people": [{"name": "设定里的名字", "aliases": ["昵称、简称、别的叫法"], "appearance": [...], "outfit": [...], "nsfw": [...]}]}`;
+每个人如果是现有动画、漫画、游戏、小说里的角色（同人），canon 写 danbooru 上的角色标签，英文小写、空格代替下划线，可以带作品标签，比如 "hatsune miku, vocaloid"；原创角色或拿不准写 ""。
+只输出 JSON：{"people": [{"name": "设定里的名字", "aliases": ["昵称、简称、别的叫法"], "appearance": [...], "outfit": [...], "nsfw": [...], "canon": ""}]}`;
     const j = await askShrinking(sys, limit => `卡名：${cardName}\n设定：\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000, fn: 'look' });
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
     return (Array.isArray(j.people) ? j.people : []).map(p => ({
         name: String(p?.name || '').trim().slice(0, 30),
         aliases: (Array.isArray(p?.aliases) ? p.aliases : []).map(a => String(a || '').trim()).filter(Boolean).slice(0, 6),
         appearance: norm(p?.appearance), outfit: norm(p?.outfit), nsfw: norm(p?.nsfw),
-    })).filter(p => p.name && !/^\{\{?user\}?\}$|^user$/i.test(p.name) && p.appearance.length);
+        canon: typeof p?.canon === 'string' ? p.canon.replace(/_/g, ' ').trim().slice(0, 120) : '',
+    })).filter(p => p.name && !/^\{\{?user\}?\}$|^user$/i.test(p.name) && (p.appearance.length || p.canon));
 }
 
 /** 用户自己写的一句（中文也行）→ 一个或几个标签 */
@@ -4233,7 +4247,7 @@ ${PAIRS}
     if (!pose.length && !composition.length && !nsfw.length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
     return { pose, composition, nsfw };
 }
-return { AI_FNS, stopFetch, extractCastFromChat, apiFor, aiSeen, aiCfg, splitFormat, stToEntries, tavernPresets, entriesFor, currentTavernPreset, imagePose, imageToPrompt, zhForTags, extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
+return { AI_FNS, stopFetch, extractCastFromChat, identifyCanon, apiFor, aiSeen, aiCfg, splitFormat, stToEntries, tavernPresets, entriesFor, currentTavernPreset, imagePose, imageToPrompt, zhForTags, extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
 })();
 
 // ───── chars.js ─────
@@ -4389,7 +4403,7 @@ function currentCast() {
     return keys.map(([group, key]) => {
         const ch = getChar(key);
         if (!ch) return null;
-        const on = flags[key] ?? (ch.appearance.length > 0);
+        const on = flags[key] ?? !!lookTags(ch);
         return { key, char: ch, on, group };
     }).filter(Boolean);
 }
@@ -4410,7 +4424,7 @@ const tagText = list => (list || []).map(t => t.en).filter(Boolean).join(', ');
 function currentOutfit(c) { return c.outfits.find(o => o.id === c.outfitId) || c.outfits[0] || null; }
 /** 这个角色固定会发的标签（外貌 + 固定的衣服） */
 function fixedTags(c, { nsfw = false } = {}) {
-    const parts = [tagText(c.appearance)];
+    const parts = [lookTags(c)];
     // NSFW 身体：只有这张图是 NSFW 时才加
     if (nsfw) parts.push(tagText(c.nsfwBody));
     if (c.outfitMode === 'fixed') parts.push(tagText(currentOutfit(c)?.tags));
@@ -4418,6 +4432,15 @@ function fixedTags(c, { nsfw = false } = {}) {
 }
 
 const GENDER = { '1boy': 'boy', '1girl': 'girl', '1other': 'other' };
+/** 同人角色：开着时外貌只发性别词 + 角色名（danbooru 上的角色标签），让 NovelAI 照原作画 */
+const GENDER_WORD = /^1?(?:boy|girl|other)s?$/i;
+function lookTags(c) {
+    const tag = String(c?.canonTag || '').trim();
+    if (!c?.canonOn || !tag) return tagText(c?.appearance);
+    const g = (c.appearance || []).filter(x => GENDER_WORD.test(String(x.en || '').trim())).map(x => x.en);
+    const rest = c.canonKeepLook ? tagText((c.appearance || []).filter(x => !GENDER_WORD.test(String(x.en || '').trim()))) : '';
+    return [...g, tag, rest].filter(Boolean).join(', ');
+}
 function genderOf(c) {
     const t = c.appearance.map(x => x.en.toLowerCase()).find(x => GENDER[x]);
     return t ? GENDER[t] : '';
@@ -4577,7 +4600,7 @@ function fromZhihuijiOutfit(name, o) {
 function saveCharacterPost(payload, fallbackName) {
     const src = payload.character || {};
     const ours = Array.isArray(src.appearance)
-        ? { name: src.name, appearance: src.appearance, nsfwBody: Array.isArray(src.nsfwBody) ? src.nsfwBody : [], outfitMode: src.outfitMode || 'story', outfits: (src.outfits || []).map(o => ({ ...o, id: M.uid('o_') })), negative: src.negative || '' }
+        ? { name: src.name, appearance: src.appearance, nsfwBody: Array.isArray(src.nsfwBody) ? src.nsfwBody : [], ...(typeof src.canonTag === 'string' && src.canonTag ? { canonOn: !!src.canonOn, canonTag: src.canonTag.slice(0, 120), canonKeepLook: !!src.canonKeepLook } : {}), outfitMode: src.outfitMode || 'story', outfits: (src.outfits || []).map(o => ({ ...o, id: M.uid('o_') })), negative: src.negative || '' }
         : fromZhihuijiChar(src, payload.outfits || {});
     const c = blank({ key: 'free:' + M.uid(''), kind: 'free', name: uniqueName(ours.name || fallbackName) });
     Object.assign(c, ours, { name: c.name });
@@ -4594,7 +4617,7 @@ function outfitFromPost(payload, fallbackName) {
 
 /** 分享用的内容 */
 function characterPayload(c) {
-    return { character: { name: c.name, appearance: c.appearance, nsfwBody: c.nsfwBody || [], outfitMode: c.outfitMode, outfits: c.outfits.map(({ name, tags }) => ({ name, tags })), negative: c.negative } };
+    return { character: { name: c.name, appearance: c.appearance, nsfwBody: c.nsfwBody || [], ...(c.canonTag ? { canonOn: !!c.canonOn, canonTag: c.canonTag, canonKeepLook: !!c.canonKeepLook } : {}), outfitMode: c.outfitMode, outfits: c.outfits.map(({ name, tags }) => ({ name, tags })), negative: c.negative } };
 }
 
 /** 智绘姬里存的角色全搬过来，返回搬了几个 */
@@ -4624,6 +4647,7 @@ function copyLook(fromKey, toKey) {
     if (!a || !b) return;
     b.appearance = structuredClone(a.appearance);
     b.nsfwBody = structuredClone(a.nsfwBody || []);
+    b.canonTag = String(a.canonTag || ''); b.canonOn = !!a.canonOn; b.canonKeepLook = !!a.canonKeepLook;
     b.outfitMode = a.outfitMode;
     b.outfits = a.outfits.map(o => ({ ...structuredClone(o), id: M.uid('o_') }));
     b.outfitId = b.outfits[0]?.id || '';
@@ -4757,7 +4781,7 @@ function studioCastPick(e, nsfw = false) {
     const ch = getChar(e.key);
     if (!ch) return null;
     const out = e.outfit === '' ? null : (ch.outfits.find(o => o.id === e.outfit) || currentOutfit(ch));
-    const look = [tagText(ch.appearance), nsfw ? tagText(ch.nsfwBody) : ''].filter(Boolean).join(', ');
+    const look = [lookTags(ch), nsfw ? tagText(ch.nsfwBody) : ''].filter(Boolean).join(', ');
     const act = String(e.act || '').trim(), fit = tagText(out?.tags);
     // 分角色时：外貌 → 这个人的动作 → 衣服，动作别被一长串衣服挤到最后
     return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', look, act, fit, tags: [look, act, fit].filter(Boolean).join(', '), x: CAST_X[e.pos] ?? 0.5 };
@@ -4783,7 +4807,7 @@ function studioCastRefs(picks) {
     return [...new Set((picks || []).map(p => p.char.charRef).filter(id => id && d.charRefGroups?.[id]))];
 }
 
-return { studioCastPrompt, wardrobeGroups, outfitHolders, takeOffOutfit, deleteOutfitGroup, studioCastRefs, namesOf, castIn, markerPrompt, avatarUrl, stCards, stPersonas, currentPersonaKey, getChar, saveChar, descOf, descOfFull, sideKicks, addSideKick, deleteChar, chatId, currentCast, removeFromCast, setCastOn, tagText, currentOutfit, fixedTags, canSplit, buildChatPrompt, previewCast, generateForMessage, insertImage, parsePairs, freeChars, saveCharacterPost, outfitFromPost, characterPayload, importZhihuijiCharacters, copyLook, wardrobe, findOutfit, giveOutfit, deleteOutfit };
+return { studioCastPrompt, lookTags, wardrobeGroups, outfitHolders, takeOffOutfit, deleteOutfitGroup, studioCastRefs, namesOf, castIn, markerPrompt, avatarUrl, stCards, stPersonas, currentPersonaKey, getChar, saveChar, descOf, descOfFull, sideKicks, addSideKick, deleteChar, chatId, currentCast, removeFromCast, setCastOn, tagText, currentOutfit, fixedTags, canSplit, buildChatPrompt, previewCast, generateForMessage, insertImage, parsePairs, freeChars, saveCharacterPost, outfitFromPost, characterPayload, importZhihuijiCharacters, copyLook, wardrobe, findOutfit, giveOutfit, deleteOutfit };
 })();
 
 // ───── ui.js ─────
@@ -5320,7 +5344,7 @@ function renderView() {
     const scroll = body ? body.scrollTop : 0;
     ensureCfyCss();
     const navs = [['studio', '生图'], ['comfy', 'Comfy'], ['comic', '漫画'], ['book', '画师库'], ['vibe', '氛围'], ['cast', '角色'], ['lobby', '共享']];
-    const mainView = ['artist', 'group', 'batch'].includes(ui.view) ? 'book' : ['charedit', 'outfit'].includes(ui.view) ? 'cast' : ui.view;
+    const mainView = ['artist', 'group', 'batch'].includes(ui.view) ? 'book' : ['charedit', 'outfit', 'combine'].includes(ui.view) ? 'cast' : ui.view;
     root.innerHTML = `
     <div class="pc-shell">
       <header class="pc-head">
@@ -5534,7 +5558,7 @@ function castFold() {
         : split ? `<b>${n} 人：</b>每个人的外貌单独发给 NAI（分角色），发色瞳色不会串到别人身上；人数词自动补上。`
         : `<b>${n} 人：</b>现在的模型或通道（V3 / 酒馆里的 key）不能分角色，几个人的外貌会按顺序接在一起，容易串色。`;
     const rows = list.map(({ e, c }) => {
-        const look = C.tagText(c.appearance);
+        const look = C.lookTags(c);
         const ref = c.charRef && d.charRefGroups?.[c.charRef];
         const fitOn = id => e.outfit === undefined ? C.currentOutfit(c)?.id === id : e.outfit === id;
         const k = esc(e.key);
@@ -6654,7 +6678,7 @@ function openOutfitDesigner({ mesId = null } = {}) {
                 const c = charOf(r);
                 r.busy = true; draw();
                 try {
-                    const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', c ? C.tagText(c.appearance) : '1boy', C.tagText(r.tags), 'solo, full body, standing, looking at viewer, simple background, white background');
+                    const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', c ? C.lookTags(c) : '1boy', C.tagText(r.tags), 'solo, full body, standing, looking at viewer, simple background, white background');
                     const { positive, negative } = E.composeStudio({ pos, neg: c?.negative || '' });
                     r.image = await E.generateFull({ positive, negative, width: 768, height: 1344, director: c?.charRef ? await E.charRefs([c.charRef]) : undefined });
                 } catch (e) { toastr.error(e.message, '生成失败'); }
@@ -6838,11 +6862,12 @@ function viewWardrobe(d) {
         && (!q || (x.o.name + ' ' + C.tagText(x.o.tags) + ' ' + x.o.tags.map(t => t.zh).join(' ')).toLowerCase().includes(q)));
     return `${castTop()}
     <div class="pc-outmake">
-      <label class="pc-btn dark">${IMG_ICON} 图片<input type="file" accept="image/*" data-wardimg hidden></label>
+      <label class="pc-btn dark">${IMG_ICON} 图片<input type="file" accept="image/*" multiple data-wardimg hidden></label>
       <button class="pc-btn" data-act="wardai">✦ AI 设计</button>
       <button class="pc-btn" data-act="wardnew">＋ 自己写</button>
-      <button class="pc-btn" data-act="omimport">从穿搭管理器导入</button>
     </div>
+    ${WARD2_CSS}<div class="pc-outmake2"><button class="pc-btn" data-act="wardcombine">⊕ 配饰搭配</button><button class="pc-pill dashed tiny" data-act="omimport">从穿搭管理器导入</button></div>
+    ${ui.wardBatch ? `<div class="pc-castmode pc-mt-s">批量导入 ${ui.wardBatch.done} / ${ui.wardBatch.total} · 已存 ${ui.wardBatch.saved} 套${ui.wardBatch.skipped ? ' · ' + ui.wardBatch.skipped + ' 张读取失败' : ''}${ui.wardBatch.fail ? `（${ui.wardBatch.fail} 张没读出标签，存了图，打开改一下）` : ''}… <button class="pc-pill tiny dashed" data-act="wardbatchstop">${ui.wardBatch.stop ? '当前张处理完就停' : '停'}</button></div>` : '<div class="pc-dim small pc-mt-s">「图片」可以一次选好几张，每张存成一套。</div>'}
     <label class="pc-search pc-mt-s"><span class="pc-sr">搜索</span>${ICON.search}<input data-bind="wardSearch" value="${esc(ui.wardSearch)}" placeholder="搜衣服名、标签"></label>
     <div class="pc-chips">${[['all', '全部'], ...owners.map(c => [c.key, c.name]), ['none', '没给谁穿']].map(([k, t]) => `<button class="pc-pill ${ui.wardFilter === k ? 'on' : 'dashed'}" data-act="wardfilter" data-v="${esc(k)}">${esc(t)}</button>`).join('')}</div>
     <div class="pc-grid2 pc-mt-s">${list.map(({ o, owner, holders }) => `<article class="pc-ticket" data-act="openoutfit" data-owner="${esc(owner?.key || '')}" data-id="${esc(o.id)}">
@@ -6850,6 +6875,36 @@ function viewWardrobe(d) {
         <div class="pc-ticket-text"><b>${esc(o.name)}</b><small>${o.tags.length} 个标签</small><span class="pc-state ${owner ? '' : 'todo'}">${owner ? '穿在：' + esc(holders.map(h => h.owner.name).join('、')) : '还没给谁穿'}</span></div></article>`).join('')
         || empty('衣柜是空的', '点上面「图片」放一张图，AI 会把衣服写成标签；也可以让 AI 设计，或者自己写。')}</div>
     <div style="height:24px"></div>`;
+}
+
+const WARD2_CSS = `<style>.pc-outmake2{display:flex;gap:8px;align-items:center;margin-top:8px}.pc-outmake2 .pc-btn{flex:1 1 auto;min-height:40px;font-size:14px}.pc-outmake2 .pc-pill{flex:none;white-space:nowrap}.pc-cbbase{display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;padding:2px 0 6px}.pc-cbbase::-webkit-scrollbar{display:none}.pc-cbbase button{flex:none;width:86px;display:flex;flex-direction:column;gap:4px;align-items:center;padding:6px;border-radius:14px;border:1.5px dashed var(--pc-dash);background:transparent;color:var(--pc-ink);font:inherit;font-size:12px;cursor:pointer}.pc-cbbase button.on{border-style:solid;border-color:var(--pc-ink)}.pc-cbbase .th{width:72px;height:72px;border-radius:10px;background:var(--pc-paper-2, rgba(128,128,128,.18));object-fit:cover;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--pc-ink-soft)}.pc-cbbase b{font-weight:600;max-width:74px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pc-cbacc{display:flex;flex-wrap:wrap;gap:6px}.pc-cbacc button{border-radius:99px;border:1.5px dashed var(--pc-dash);background:transparent;color:var(--pc-ink);padding:5px 11px;font-size:12px;cursor:pointer}.pc-cbacc button.on{border-style:solid;background:var(--pc-ink);color:var(--pc-paper, #fff)}.pc-cbacc em{font-style:normal;opacity:.7;margin-left:4px}</style>`;
+/** 配饰搭配：一套当底（只取整体），再从所有衣服的配饰里挑，存成新的一套 */
+function viewCombine(d) {
+    const g = (ui.combine ||= { base: '', acc: [], q: '' });
+    const groups = C.wardrobeGroups();
+    const base = groups.find(x => x.o.id === g.base)?.o || null;
+    const pool = new Map();
+    for (const x of groups) for (const t of x.o.tags) if (t.en && isAcc(t) && !pool.has(t.en.toLowerCase())) pool.set(t.en.toLowerCase(), { t, from: x.o.name });
+    const q = String(g.q || '').trim().toLowerCase();
+    const sel = new Set(g.acc);
+    const accs = [...pool.entries()].filter(([k, a]) => !q || sel.has(k) || (k + ' ' + (a.t.zh || '') + ' ' + a.from).toLowerCase().includes(q));
+    const body = base ? base.tags.filter(t => !isAcc(t)) : [];
+    const picked = [...pool.entries()].filter(([k]) => sel.has(k)).map(([, a]) => a.t);
+    const src = o => o.image ? (o.image.startsWith('data:') ? o.image : '/' + o.image.replace(/^\/+/, '')) : '';
+    return `
+    ${WARD2_CSS}<div class="pc-dhead"><button class="pc-round" data-act="cbback" aria-label="返回">‹</button><div class="pc-dtitle" style="border:0">配饰搭配</div></div>
+    <section class="pc-card pc-pad">
+      <div class="pc-dim small">选一套当底，再从别的衣服里挑配饰加上，存成新的一套。</div>
+      <div class="pc-promptsec" style="margin-top:12px">底子（只用它的「整体」）</div>
+      <div class="pc-cbbase"><button class="${!g.base ? 'on' : ''}" data-act="cbbase" data-id=""><span class="th">不要</span><b>不要底子</b></button>${groups.map(({ o }) => `<button class="${g.base === o.id ? 'on' : ''}" data-act="cbbase" data-id="${esc(o.id)}">${src(o) ? `<img class="th" src="${esc(src(o))}" alt="" loading="lazy">` : '<span class="th">没图</span>'}<b>${esc(o.name)}</b></button>`).join('')}</div>
+      <div class="pc-promptsec" style="margin-top:12px">配饰（所有衣服里的配饰，点一下选上）· 选了 ${picked.length} 个</div>
+      ${pool.size > 12 ? `<label class="pc-search" style="margin-bottom:8px"><span class="pc-sr">搜配饰</span>${ICON.search}<input data-bind="combine.q" value="${esc(g.q || '')}" placeholder="搜配饰，中英文都行"></label>` : ''}
+      <div class="pc-cbacc">${accs.map(([k, a]) => `<button class="${sel.has(k) ? 'on' : ''}" data-act="cbacc" data-k="${esc(k)}" title="来自「${esc(a.from)}」">${esc(a.t.en)}${a.t.zh ? `<em>${esc(a.t.zh)}</em>` : ''}</button>`).join('') || '<span class="pc-dim small">衣柜里还没有配饰标签</span>'}</div>
+      <div class="pc-promptsec" style="margin-top:14px">会存成</div>
+      <div class="mono small" style="line-height:1.6;word-break:break-word">${esc([...body, ...picked].map(t => t.en).join(', ')) || '<span class="pc-dim">先选底子或配饰</span>'}</div>
+      <button class="pc-btn dark pc-mt" style="width:100%" data-act="cbsave" ${body.length || picked.length ? '' : 'disabled'}>存成新的一套 →</button>
+      <div class="pc-dim small" style="margin-top:6px">存之前会进这套的页面，可以改名、给谁穿、生成展示图。</div>
+    </section>`;
 }
 
 /** 一套衣服的页面（新的草稿也用这页） */
@@ -6906,7 +6961,7 @@ function viewCast(d) {
         if (src.kind === 'free') return `<article class="pc-ticket" data-act="openchar" data-key="${esc(src.key)}">
           <div class="pc-ticket-img">${c.image ? `<img src="${esc(c.image)}" loading="lazy" alt="" onerror="this.remove()">` : '<span>没有图</span>'}</div>
           <div class="pc-ticket-text"><b>${esc(src.name)}</b><span class="pc-state">${C.currentCast().some(x => x.key === src.key) ? '在这次聊天里' : '没绑定角色卡'}</span></div></article>`;
-        const ok = c.appearance.length > 0;
+        const ok = !!C.lookTags(c);
         return `<article class="pc-ticket" data-act="openchar" data-key="${esc(src.key)}">
           <div class="pc-ticket-img">${C.avatarUrl(c) ? `<img src="${esc(C.avatarUrl(c))}" loading="lazy" alt="" onerror="this.remove()">` : ''}</div>
           <div class="pc-ticket-text"><b>${esc(src.name)}</b><span class="pc-state ${ok ? '' : 'todo'}">${ok ? '外貌已写' + (side ? ` · ${side} 个配角` : '') : '还没写外貌，点一下写'}</span></div></article>`;
@@ -7009,6 +7064,11 @@ function viewCharEdit(d) {
       <div class="pc-dim small">头发、眼睛、脸、身材这类不会变的。第一个写 1boy 或 1girl。点标签可以改，× 删掉。</div>
       ${c.kind === 'char' || c.kind === 'side' ? `<button class="pc-pill dashed tiny pc-mt-s" data-act="readcast" ${busy ? 'disabled' : ''}>${busy === 'cast' ? '<span class="pc-busy">读取中</span>' : '读出这张卡里所有人（含世界书）'}</button><button class="pc-pill dashed tiny pc-mt-s" style="margin-left:6px" data-act="readchatcast" ${busy ? 'disabled' : ''}>${busy === 'chatcast' ? '<span class="pc-busy">读取中</span>' : '从聊天正文读出人物（最近 40 楼）'}</button>` : ''}
       <label class="pc-field pc-mt-s"><span>别名（逗号隔开）· 图片角色标记可使用名字或别名</span><input data-charalias value="${esc(c.aliases || '')}" placeholder="比如 小秋，秋秋"></label>
+      <label class="pc-switch pc-mt-s"><input type="checkbox" data-charcanon ${c.canonOn ? 'checked' : ''}><span></span>同人角色：直接写原作角色名<small>原作里有的角色，写 danbooru 上的角色名，NovelAI 认得就会照原作的长相画。打开后外貌只发性别词 + 角色名，衣服照常。</small></label>
+      ${c.canonOn ? `<label class="pc-field"><span>角色名标签（英文，可以带作品名）</span><input class="mono" data-charcanontag value="${esc(c.canonTag || '')}" placeholder="hatsune miku, vocaloid"></label>
+      <div class="pc-chips wrap" style="margin-top:-2px"><button class="pc-pill dashed tiny" data-act="canonai" ${busy ? 'disabled' : ''}>${busy === 'canon' ? '<span class="pc-busy">认人中</span>' : '✦ 让 AI 认是谁'}</button></div>
+      <label class="pc-switch"><input type="checkbox" data-charcanonlook ${c.canonKeepLook ? 'checked' : ''}><span></span>外貌标签也一起发<small>冷门角色 NovelAI 认不准时打开，用下面的外貌补</small></label>
+      ${'<div class="pc-hint">角色名空着时照常发外貌。不知道怎么写就去 danbooru 搜这个角色，用它的角色标签，空格代替下划线，比如 hatsune miku；同名的会带作品名，比如 saber (fate)。</div>'}` : ''}
       ${(() => { const n = charPairs(c).filter(t => !t.zh).length; return n ? `<div class="pc-chips wrap"><button class="pc-pill dashed tiny" data-act="zhtags" ${busy ? 'disabled' : ''}>${busy === 'zh' ? '<span class="pc-busy">翻译中</span>' : `译成中文 · ${n} 个没有中文`}</button></div>` : ''; })()}
       <div class="pc-pairs">${pairChips(c.appearance, 'app') || '<span class="pc-dim small">还没有</span>'}</div>
       <div class="pc-addrow"><textarea rows="1" data-bind="addText.app" placeholder="自己加，中文也行，可以一次粘贴好几个" data-enter="addpair-app">${esc(ui.addText.app)}</textarea><button class="pc-btn dark" data-act="addpair" data-where="app" ${busy ? 'disabled' : ''}>${busy === 'app' ? '…' : '加'}</button></div>
@@ -7109,6 +7169,21 @@ async function charAction(act, el) {
         }
         case 'openoutfit': ui.outfit = { owner: el.dataset.owner, id: el.dataset.id }; ui.view = 'outfit'; ui.addText.ward = ''; render(); root.querySelector('.pc-body')?.scrollTo(0, 0); return true;
         case 'outback': ui.view = 'cast'; ui.castTop = 'wardrobe'; ui.outfit = null; render(); return true;
+        case 'wardcombine': ui.combine = { base: '', acc: [], q: '' }; ui.view = 'combine'; render(); return true;
+        case 'cbback': ui.view = 'cast'; ui.castTop = 'wardrobe'; render(); return true;
+        case 'cbbase': ui.combine.base = el.dataset.id || ''; render(); return true;
+        case 'cbacc': { const k = el.dataset.k, a = ui.combine.acc; ui.combine.acc = a.includes(k) ? a.filter(x => x !== k) : [...a, k]; render(); return true; }
+        case 'cbsave': {
+            const g = ui.combine, groups = C.wardrobeGroups();
+            const base = groups.find(x => x.o.id === g.base)?.o;
+            const pool = new Map();
+            for (const x of groups) for (const t of x.o.tags) if (t.en && isAcc(t) && !pool.has(t.en.toLowerCase())) pool.set(t.en.toLowerCase(), t);
+            const tags = [...(base ? base.tags.filter(t => !isAcc(t)).map(t => ({ ...t, acc: false })) : []), ...g.acc.map(k => pool.get(k)).filter(Boolean).map(t => ({ ...t, acc: true }))];
+            if (!tags.length) return true;
+            ui.outfit = { draft: true, name: base ? `${base.name}·搭配`.slice(0, 20) : '配饰搭配', tags, image: '', dest: '' };
+            ui.combine = null; ui.view = 'outfit'; render(); return true;
+        }
+        case 'wardbatchstop': if (ui.wardBatch) ui.wardBatch.stop = true; render(); return true;
         case 'outdest': ui.outfit.dest = el.dataset.v; ui.outfit.destChosen = true; render(); return true;
         case 'outsave': {
             const u = ui.outfit;
@@ -7136,7 +7211,7 @@ async function charAction(act, el) {
             const owner = ui.outfit.draft ? C.getChar(ui.outfit.dest) : C.findOutfit(ui.outfit.owner, ui.outfit.id)?.owner;
             ui.outfit.busy = 'gen'; render();
             try {
-                const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', owner ? C.tagText(owner.appearance) : '1boy, solo, male focus, adult', C.tagText(o.tags), 'solo, full body, standing, looking at viewer, simple background, white background');
+                const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', owner ? C.lookTags(owner) : '1boy, solo, male focus, adult', C.tagText(o.tags), 'solo, full body, standing, looking at viewer, simple background, white background');
                 const { positive, negative } = E.composeStudio({ pos, neg: owner?.negative || '' });
                 const img = await E.generateFull({ positive, negative, width: 768, height: 1344, director: owner?.charRef ? await E.charRefs([owner.charRef]) : undefined });
                 if (ui.outfit.draft) o.image = img;
@@ -7219,7 +7294,7 @@ async function charAction(act, el) {
                 }
                 if (!people.length) { toastr.warning('AI 没在设定里找到写了外貌的人', '角色'); return true; }
                 if (!stillCurrent()) return true;
-                const made = [], filled = [], kept = [];
+                const made = [], filled = [], kept = [], canonHits = [];
                 for (const p of people) {
                     if (fromChat && p.name === startContext.name1) continue;
                     const all = [main, ...C.sideKicks(cardAvatar)];
@@ -7227,6 +7302,7 @@ async function charAction(act, el) {
                     if (!ch) { ch = C.addSideKick(cardAvatar, p.name); made.push(p.name); }
                     else if (ch.appearance.length) { kept.push(ch.name); }
                     else filled.push(ch.name);
+                    if (p.canon && !ch.canonTag) { ch.canonTag = p.canon; ch.canonOn = true; canonHits.push(`${ch.name}（${p.canon}）`); }
                     if (!ch.appearance.length) {
                         ch.appearance = p.appearance;
                         if (p.nsfw?.length && !(ch.nsfwBody || []).length) ch.nsfwBody = p.nsfw;
@@ -7237,9 +7313,26 @@ async function charAction(act, el) {
                     ch.aliases = [...al].join('，');
                     C.saveChar(ch);
                 }
-                toastr.success([made.length ? `新加配角：${made.join('、')}` : '', filled.length ? `填了外貌：${filled.join('、')}` : '', kept.length ? `已有外貌没动：${kept.join('、')}` : ''].filter(Boolean).join('；'), '读出卡里的人', { timeOut: 8000 });
+                toastr.success([made.length ? `新加配角：${made.join('、')}` : '', filled.length ? `填了外貌：${filled.join('、')}` : '', kept.length ? `已有外貌没动：${kept.join('、')}` : '', canonHits.length ? `认出同人角色：${canonHits.join('、')}` : ''].filter(Boolean).join('；'), '读出卡里的人', { timeOut: 8000 });
             } catch (e) { toastr.error(e.message, '读取失败'); }
             finally { ui.charBusy = ''; render(); }
+            return true;
+        }
+        case 'canonai': {
+            if (ui.charBusy) return true;
+            const startKey = ui.charKey, startChat = C.chatId();
+            const original = JSON.stringify([c.name, c.aliases, c.canonOn, c.canonTag, c.canonKeepLook]);
+            const current = () => !stopped && getData() === d && d.characters[c.key] === c && ui.charKey === startKey && C.chatId() === startChat && JSON.stringify([c.name, c.aliases, c.canonOn, c.canonTag, c.canonKeepLook]) === original;
+            ui.charBusy = 'canon'; render();
+            try {
+                const desc = await C.descOfFull(c).catch(() => '');
+                if (!current()) return true;
+                const r = await T.identifyCanon(c.name, c.aliases || '', desc);
+                if (!current()) return true;
+                if (r.canon) { c.canonTag = r.canon; c.canonOn = true; C.saveChar(c); toastr.success(`认出是「${r.canon}」${r.why ? '：' + r.why : ''}`, '同人角色', { timeOut: 5000 }); }
+                else toastr.info(`AI 认为不是现有作品的角色${r.why ? '：' + r.why : ''}。是的话可以自己填 danbooru 上的角色名`, '同人角色', { timeOut: 5000 });
+            } catch (e) { if (current()) toastr.error(e.message, '认人失败'); }
+            finally { if (ui.charKey === startKey && ui.charBusy === 'canon') ui.charBusy = ''; if (!stopped) render(); }
             return true;
         }
         case 'readcard': {
@@ -7253,6 +7346,7 @@ async function charAction(act, el) {
                 const r = await T.extractAppearance(c.name, desc);
                 c.appearance = r.appearance;
                 if (r.nsfw?.length) c.nsfwBody = r.nsfw;
+                if (r.canon && !c.canonTag) { c.canonTag = r.canon; c.canonOn = true; toastr.info(`认出是同人角色「${r.canon}」，已经打开「同人角色」，不对可以关掉`, '读外貌', { timeOut: 4000 }); }
                 if (r.outfit.length && !c.outfits.length) { const o = { id: M.uid('o_'), name: '默认', tags: r.outfit }; c.outfits.push(o); c.outfitId = o.id; }
                 toastr.success(`读到 ${r.appearance.length} 个外貌标签${r.outfit.length ? `，${r.outfit.length} 个衣服标签（存在「默认」这套里）` : ''}`, '角色');
             } catch (e) { toastr.error(e.message, '读取失败'); }
@@ -7340,7 +7434,7 @@ async function charAction(act, el) {
             const o = C.currentOutfit(c);
             ui.charBusy = 'outtest'; render();
             try {
-                const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', C.tagText(c.appearance), C.tagText(o?.tags), 'solo, full body, standing, looking at viewer, simple background, white background');
+                const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', C.lookTags(c), C.tagText(o?.tags), 'solo, full body, standing, looking at viewer, simple background, white background');
                 const { positive, negative } = E.composeStudio({ pos, neg: c.negative });
                 ui.outTestImg = await E.generateFull({ positive, negative, width: 768, height: 1344, director: c.charRef ? await E.charRefs([c.charRef]) : undefined });
             } catch (e) { toastr.error(e.message, '生成失败'); }
@@ -7983,7 +8077,7 @@ function viewComic(d) {
       <section class="pc-card pc-pad pc-mt"><h3 class="pc-h3">漫画设置</h3><div id="pc-comic-view"></div></section>
       <div style="height:24px"></div>`;
 }
-const VIEWS = { comfy: viewComfy, aipreset: viewAiPreset, comic: viewComic, cast: viewCast, charedit: viewCharEdit, outfit: viewOutfit, studio: viewStudio, book: viewBook, artist: viewArtist, group: viewGroup, batch: viewBatch, vibe: viewVibe, lobby: viewLobby, settings: viewSettings };
+const VIEWS = { comfy: viewComfy, aipreset: viewAiPreset, comic: viewComic, cast: viewCast, charedit: viewCharEdit, outfit: viewOutfit, combine: viewCombine, studio: viewStudio, book: viewBook, artist: viewArtist, group: viewGroup, batch: viewBatch, vibe: viewVibe, lobby: viewLobby, settings: viewSettings };
 
 // ═════════════════════ 事件 ═════════════════════
 
@@ -8861,7 +8955,7 @@ function onInput(ev) {
     if (el.dataset?.i2i) { (ui.studio.i2i ||= {})[el.dataset.i2i] = Number(el.value); const o = root.querySelector(`[data-i2i-out="${el.dataset.i2i}"]`); if (o) o.textContent = Math.round(Number(el.value) * 100) + '%'; }
     if (el.dataset.bind) {
         setPath(ui, el.dataset.bind, el.value);
-        if (el.dataset.bind === 'studio.sceneQ') { clearTimeout(onInput.sq); onInput.sq = setTimeout(render, 250); }
+        if (el.dataset.bind === 'studio.sceneQ' || el.dataset.bind === 'combine.q') { clearTimeout(onInput.sq); onInput.sq = setTimeout(render, 250); }
         if (el.dataset.bind === 'studio.pos') { const w = root.querySelector('#pc-pos-ban'); if (w) w.innerHTML = banWarn(getData(), el.value) + lintHtml(el.value); }
         if (el.dataset.bind === 'batch.text') { const w = root.querySelector('#pc-batch-ban'); if (w) w.innerHTML = batchBanWarn(getData(), el.value); }
         if (String(el.dataset.bind).startsWith('cfy.')) { clearTimeout(onInput.cf); onInput.cf = setTimeout(saveCfy, 600); }
@@ -8877,6 +8971,8 @@ function onInput(ev) {
         else { const h = u && C.findOutfit(u.owner, u.id); if (h) { h.o.name = el.value.trim(); if (h.owner) C.saveChar(h.owner); else commit({ silent: true }); } }
         return;
     }
+    if (el.dataset.charcanon !== undefined || el.dataset.charcanonlook !== undefined) { const c = C.getChar(ui.charKey); if (c) { if (el.dataset.charcanon !== undefined) c.canonOn = el.checked; else c.canonKeepLook = el.checked; C.saveChar(c); render(); if (el.dataset.charcanon !== undefined && c.canonOn && !String(c.canonTag || '').trim()) root.querySelector('[data-act="canonai"]')?.click(); } return; }
+    if (el.dataset.charcanontag !== undefined) { const c = C.getChar(ui.charKey); if (c) { c.canonTag = el.value.trim(); C.saveChar(c); } return; }
     if (el.dataset.charneg !== undefined) { const c = C.getChar(ui.charKey); if (c) { c.negative = el.value; C.saveChar(c); } return; }
     if (el.dataset.charalias !== undefined) { const c = C.getChar(ui.charKey); if (c) { c.aliases = el.value.trim(); C.saveChar(c); } return; }
     if (el.dataset.bindGroup) { d.groups[el.dataset.bindGroup][el.dataset.field] = el.value; commit({ silent: true }); return; }
@@ -8892,6 +8988,41 @@ function onInput(ev) {
     }
 }
 
+/** 批量读衣服：顺序处理；停止后完成当前张，停用扩展或切换数据后不再保存。 */
+async function importWardrobeImages(files) {
+    if (ui.wardBatch || stopped) return;
+    const d = getData(), b = ui.wardBatch = { total: files.length, done: 0, saved: 0, fail: 0, skipped: 0, stop: false };
+    const current = () => !stopped && getData() === d && ui.wardBatch === b;
+    render();
+    try {
+        for (const f of files) {
+            if (b.stop || !current()) break;
+            let tags = [], name = f.name.replace(/\.[^.]+$/, '').slice(0, 20), image = '';
+            try {
+                const du = await shrinkDataUrl(await fileToDataUrl(f), 1024, 0.88);
+                if (!current()) break;
+                try { const r = await T.outfitFromImage(du); tags = Array.isArray(r.tags) ? r.tags : []; if (r.name) name = String(r.name).slice(0, 20); }
+                catch (e) { console.warn('[智库] 批量导入：读图失败', e); }
+                if (!current()) break;
+                const small = await shrinkDataUrl(du, 768);
+                if (!current()) break;
+                try { image = (await uploadImage(small, 'outfit_' + M.uid(''))).path || ''; } catch { /* 保留本地缩略图 */ }
+                if (!current()) break;
+                if (!image) { const fallback = await shrinkDataUrl(du, 512, 0.8); if (fallback.length < 600000) image = fallback; }
+            } catch (e) { console.warn('[智库] 批量导入：图片读不出来', e); }
+            if (!current()) break;
+            if (tags.length || image) {
+                const o = { id: M.uid('o_'), name: name || '导入的衣服', tags, ...(image ? { image } : {}) };
+                (d.outfits ||= {})[o.id] = o; b.saved++; if (!tags.length) b.fail++;
+                commit({ silent: true });
+            } else b.skipped++;
+            b.done++; render();
+        }
+        if (!current()) return;
+        const msg = (b.stop ? '停了，' : '') + '存下 ' + b.saved + ' 套' + (b.fail ? '，' + b.fail + ' 套没读出标签' : '') + (b.skipped ? '，' + b.skipped + ' 张图片读取失败' : '');
+        commit(); toastr[b.fail || b.skipped ? 'warning' : 'success'](msg, '衣柜', { timeOut: 4000 });
+    } finally { if (ui.wardBatch === b) ui.wardBatch = null; if (!stopped) render(); }
+}
 async function onChangeEv(ev) {
     const el = ev.target;
     const d = getData();
@@ -8929,6 +9060,10 @@ async function onChangeEv(ev) {
     }
     if (el.dataset.i2i) { const g = (ui.studio.i2i ||= {}); g[el.dataset.i2i] = Number(el.value); render(); return; }
     if (el.dataset.castact) { const k = el.dataset.castact, v = el.value.trim(); setStudioCast(studioCast().map(e => e.key === k ? { ...e, act: v } : e)); updateStudioPreview?.(); return; }
+    if (el.dataset.wardimg !== undefined && ui.wardBatch) { el.value = ''; toastr.info('上一批还在导入', '衣柜'); return; }
+    if (el.dataset.wardimg !== undefined && el.files?.length > 1) {
+        const files = [...el.files]; el.value = ''; await importWardrobeImages(files); return;
+    }
     if (el.dataset.wardimg !== undefined || el.dataset.outimg !== undefined) {
         const f = el.files[0];
         el.value = '';
