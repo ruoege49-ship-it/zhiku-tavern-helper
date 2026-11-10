@@ -3026,6 +3026,48 @@ patch(`                if (r.nsfw?.length) c.nsfwBody = r.nsfw;`,`              
                 if (r.canon && !c.canonTag) { c.canonTag = r.canon; c.canonOn = true; toastr.info(\`认出是同人角色「\${r.canon}」，已经打开「同人角色」，不对可以关掉\`, '读外貌', { timeOut: 4000 }); }`);
 patch(`return { character: { name: c.name, appearance: c.appearance, nsfwBody: c.nsfwBody || [], `,`return { character: { name: c.name, appearance: c.appearance, nsfwBody: c.nsfwBody || [], ...(c.canonTag ? { canonOn: !!c.canonOn, canonTag: c.canonTag, canonKeepLook: !!c.canonKeepLook } : {}), `);
 patch(`? { name: src.name, appearance: src.appearance, nsfwBody: Array.isArray(src.nsfwBody) ? src.nsfwBody : [], `,`? { name: src.name, appearance: src.appearance, nsfwBody: Array.isArray(src.nsfwBody) ? src.nsfwBody : [], ...(typeof src.canonTag === 'string' && src.canonTag ? { canonOn: !!src.canonOn, canonTag: src.canonTag.slice(0, 120), canonKeepLook: !!src.canonKeepLook } : {}), `);
+// 0.8.36：同人角色自动识别（读卡里所有人 / 从正文读人物 / 让 AI 认是谁）
+patch(`只输出 JSON：{"people": [{"name": "正文里的名字", "aliases": ["昵称、称呼、别的叫法"], "appearance": [...], "outfit": [...], "nsfw": [...]}]}\`;`,`每个人如果是现有动画、漫画、游戏、小说里的角色（同人），canon 写 danbooru 上的角色标签，英文小写、空格代替下划线，可以带作品标签，比如 "hatsune miku, vocaloid"；原创角色或拿不准写 ""。
+只输出 JSON：{"people": [{"name": "正文里的名字", "aliases": ["昵称、称呼、别的叫法"], "appearance": [...], "outfit": [...], "nsfw": [...], "canon": ""}]}\`;`);
+patch(`只输出 JSON：{"people": [{"name": "设定里的名字", "aliases": ["昵称、简称、别的叫法"], "appearance": [...], "outfit": [...], "nsfw": [...]}]}\`;`,`每个人如果是现有动画、漫画、游戏、小说里的角色（同人），canon 写 danbooru 上的角色标签，英文小写、空格代替下划线，可以带作品标签，比如 "hatsune miku, vocaloid"；原创角色或拿不准写 ""。
+只输出 JSON：{"people": [{"name": "设定里的名字", "aliases": ["昵称、简称、别的叫法"], "appearance": [...], "outfit": [...], "nsfw": [...], "canon": ""}]}\`;`);
+{ const a=`        appearance: norm(p?.appearance), outfit: norm(p?.outfit), nsfw: norm(p?.nsfw),
+    })).filter(p => p.name && !/^\\{\\{?user\\}?\\}$|^user$/i.test(p.name) && p.appearance.length);`; assert(s.split(a).length===3, 'patchall '+a.slice(0,40)); s=s.split(a).join(`        appearance: norm(p?.appearance), outfit: norm(p?.outfit), nsfw: norm(p?.nsfw),
+        canon: typeof p?.canon === 'string' ? p.canon.replace(/_/g, ' ').trim().slice(0, 120) : '',
+    })).filter(p => p.name && !/^\\{\\{?user\\}?\\}$|^user$/i.test(p.name) && (p.appearance.length || p.canon));`); }
+patch(`async function extractAppearance(name, description) {`,`/** 认同人角色：是现有作品里的角色就给 danbooru 角色标签，不是给 '' */
+async function identifyCanon(name, aliases, description) {
+    const sys = \`你判断一个角色是不是现有动画、漫画、游戏、小说、虚拟主播里的角色（同人角色）。
+是的话，canon 写 danbooru 上这个角色的标签，英文小写、空格代替下划线，后面可以再带作品标签，比如 "hatsune miku, vocaloid"、"saber (fate), fate/stay night"、"raiden shogun, genshin impact"。
+原创角色、只是同名、或者拿不准，都写 ""，不要编。
+只输出 JSON：{"canon": "", "why": "一句话说依据"}\`;
+    const j = await askShrinking(sys, limit => \`角色名：\${name}\${aliases ? \`\\n别名：\${aliases}\` : ''}\\n设定：\\n\${String(description || '（没有设定，只看名字）').slice(0, limit)}\`, { maxTokens: 2000, fn: 'look' });
+    return { canon: typeof j.canon === 'string' ? j.canon.replace(/_/g, ' ').trim().slice(0, 120) : '', why: String(j.why || '').slice(0, 200) };
+}
+async function extractAppearance(name, description) {`);
+patch(`return { AI_FNS, stopFetch, extractCastFromChat,`,`return { AI_FNS, stopFetch, extractCastFromChat, identifyCanon,`);
+patch(`                    if (!ch.appearance.length) {
+                        ch.appearance = p.appearance;`,`                    if (p.canon && !ch.canonTag) { ch.canonTag = p.canon; ch.canonOn = true; canonHits.push(\`\${ch.name}（\${p.canon}）\`); }
+                    if (!ch.appearance.length) {
+                        ch.appearance = p.appearance;`);
+patch(`kept.length ? \`已有外貌没动：\${kept.join('、')}\` : ''].filter(Boolean)`,`kept.length ? \`已有外貌没动：\${kept.join('、')}\` : '', canonHits.length ? \`认出同人角色：\${canonHits.join('、')}\` : ''].filter(Boolean)`);
+patch(`                const made = [], filled = [], kept = [];`,`                const made = [], filled = [], kept = [], canonHits = [];`);
+patch(`<input class="mono" data-charcanontag value="\${esc(c.canonTag || '')}" placeholder="hatsune miku, vocaloid"></label>`,`<input class="mono" data-charcanontag value="\${esc(c.canonTag || '')}" placeholder="hatsune miku, vocaloid"></label>
+      <div class="pc-chips wrap" style="margin-top:-2px"><button class="pc-pill dashed tiny" data-act="canonai" \${busy ? 'disabled' : ''}>\${busy === 'canon' ? '<span class="pc-busy">认人中</span>' : '✦ 让 AI 认是谁'}</button></div>`);
+patch(`      <label class="pc-switch pc-mt-s"><input type="checkbox" data-charcanon \${c.canonOn ? 'checked' : ''}><span></span>同人角色：直接写原作角色名`,`      <label class="pc-switch pc-mt-s"><input type="checkbox" data-charcanon \${c.canonOn ? 'checked' : ''}><span></span>同人角色：直接写原作角色名`);
+patch(`if (el.dataset.charcanon !== undefined) c.canonOn = el.checked; else c.canonKeepLook = el.checked; C.saveChar(c); render(); } return; }`,`if (el.dataset.charcanon !== undefined) c.canonOn = el.checked; else c.canonKeepLook = el.checked; C.saveChar(c); render(); if (el.dataset.charcanon !== undefined && c.canonOn && !String(c.canonTag || '').trim()) root.querySelector('[data-act="canonai"]')?.click(); } return; }`);
+patch(`        case 'readcard': {`,`        case 'canonai': {
+            ui.charBusy = 'canon'; render();
+            try {
+                const desc = await C.descOfFull(c).catch(() => '');
+                const r = await T.identifyCanon(c.name, c.aliases || '', desc);
+                if (r.canon) { c.canonTag = r.canon; c.canonOn = true; C.saveChar(c); toastr.success(\`认出是「\${r.canon}」\${r.why ? '：' + r.why : ''}\`, '同人角色', { timeOut: 5000 }); }
+                else toastr.info(\`AI 认为不是现有作品的角色\${r.why ? '：' + r.why : ''}。是的话可以自己填 danbooru 上的角色名\`, '同人角色', { timeOut: 5000 });
+            } catch (e) { toastr.error(e.message, '认人失败'); }
+            ui.charBusy = ''; render();
+            return true;
+        }
+        case 'readcard': {`);
 s=applyImg2imgCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
