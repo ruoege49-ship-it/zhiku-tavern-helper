@@ -1,3 +1,4 @@
+import {applyImg2imgCompatibility} from './img2img-compat.mjs';
 import {applyTauriFetchCompatibility} from './tauri-fetch-compat.mjs';
 import {applyPoseInputCompatibility} from './pose-input-compat.mjs';
 import {applySharingWardrobeCompatibility} from './sharing-wardrobe-compat.mjs';
@@ -2859,7 +2860,7 @@ patch(`      \${saved.length ? '<div class="pc-promptsec">存下的固定提示�
         const curP = saved.find(p => sceneSig(p) === sceneSig(sceneSnapshot()));
         const chip = (v, t) => \`<button class="pc-pill tiny \${f === v ? 'on' : 'dashed'}" data-act="scenetag" data-v="\${esc(v)}">\${esc(t)}</button>\`;
         return \`<details class="pc-recent-scenes pc-saved-scenes" \${st.open.savedScenes ? 'open' : ''} data-fold="savedScenes"><summary>存下的固定提示词 \${saved.length} 条\${curP ? \` · 在用「\${esc(curP.name || '没起名')}」\` : ''} ▸</summary>
-          \${saved.length > 3 ? \`<label class="pc-search pc-mt-s"><span class="pc-sr">搜固定提示词</span>\${ICON.search}<input data-bind="studio.sceneQ" value="\${esc(st.sceneQ || '')}" placeholder="搜名字、标签、提示词"></label>\` : ''}
+          \${saved.length > 0 ? \`<label class="pc-search pc-mt-s"><span class="pc-sr">搜固定提示词</span>\${ICON.search}<input data-bind="studio.sceneQ" value="\${esc(st.sceneQ || '')}" placeholder="搜名字、标签、提示词"></label>\` : ''}
           \${all.length ? \`<div class="pc-chips wrap" style="margin-top:8px">\${chip('', '全部')}\${all.map(t => chip(t, t)).join('')}\${saved.some(p => !tagsOf(p).length) ? chip('__none', '没标签') : ''}</div>\` : '<div class="pc-dim small" style="margin-top:6px">点每条的「标签」可以分类，比如 证件照、NSFW、双人</div>'}
           \${rows.map(([p, i]) => sceneRow(p, i, 'saved')).join('') || '<div class="pc-dim small" style="margin-top:8px">没有对得上的</div>'}</details>\`;
       })() : ''}`);
@@ -2903,6 +2904,7 @@ patch(`    if (el.dataset.wardimg !== undefined || el.dataset.outimg !== undefin
     if (el.dataset.wardimg !== undefined || el.dataset.outimg !== undefined) {`);
 patch(`.pc-i2i{display:flex;gap:10px;align-items:flex-start}`,`.pc-i2i{display:flex;gap:10px;align-items:flex-start}
 .pc-castact{width:100%;box-sizing:border-box;margin-top:6px;padding:7px 12px;border-radius:12px;border:1.5px dashed var(--pc-dash);background:transparent;color:var(--pc-ink);font-size:12px}`);
+s=applyImg2imgCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;

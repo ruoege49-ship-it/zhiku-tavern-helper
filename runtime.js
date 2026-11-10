@@ -2928,7 +2928,10 @@ async function comfyUseWorkflow(kind, name = '', raw = null) {
 }
 async function generateRequest(opts) {
     const s = settings();
-    if (opts.backend === 'comfy') return comfyGenerate(opts, s);
+    if (opts.backend === 'comfy') {
+        if (opts.i2i?.image) throw new Error('ComfyUI 通道暂不支持这里的垫图，请使用 NovelAI 通道');
+        return comfyGenerate(opts, s);
+    }
     if (!opts.comic && s.naiMode === 'site' && String(s.naiSiteSimple) === 'true') {
         const cs = opts.chars || [];
         opts = {
@@ -2944,8 +2947,9 @@ async function generateRequest(opts) {
     if (opts.i2i?.image) {
         if (s.naiMode === 'tavern') throw new Error('「用酒馆里的 key」不能垫图，到智库设置 → NovelAI 改成「填我的 key」');
         params.image = opts.i2i.image;
-        params.strength = Number(opts.i2i.strength) || 0.7;
-        params.noise = Number(opts.i2i.noise) || 0;
+        const unit = (v, fallback) => v != null && Number.isFinite(Number(v)) ? Math.max(0, Math.min(1, Number(v))) : fallback;
+        params.strength = unit(opts.i2i.strength, 0.7);
+        params.noise = unit(opts.i2i.noise, 0);
         params.extra_noise_seed = params.seed;
     }
     const sent = {
@@ -4432,7 +4436,7 @@ function countTags(chars) {
 const snap = v => { const g = [0.1, 0.3, 0.5, 0.7, 0.9]; v = Number(v); return Number.isFinite(v) ? g.reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a) : 0.5; };
 
 /** 能不能分角色（酒馆转发和 V3 不行） */
-function canSplit({ chat = true } = {}) {
+function canSplit() {
     const s = N.settings();
     return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3' && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');
 }
@@ -5597,9 +5601,9 @@ function sceneSnapshot() {
 }
 const sceneSig = p => String(p.scene || '').toLowerCase().replace(/[\s，,]+/g, ',');
 const sceneName = text => String(text || '').split(/[,，\n]/).map(s => s.trim()).filter(s => s && !/quality|masterpiece|highres|absurdres|detailed/i.test(s)).slice(0, 3).join(', ').slice(0, 24);
-function rememberScene() {
-    const st = ui.studio, p = sceneSnapshot();
-    if (st.sceneOn === false || !p.scene) return;
+function rememberScene(p = sceneSnapshot(), enabled = ui.studio.sceneOn !== false) {
+    const st = ui.studio;
+    if (!enabled || !p.scene) return;
     const sig = sceneSig(p);
     if ((st.scenes || []).some(x => sceneSig(x) === sig)) return; // 已经存下的就不再记
     st.recentScenes = [p, ...(st.recentScenes || []).filter(x => sceneSig(x) !== sig)].slice(0, 20);
@@ -5653,7 +5657,7 @@ function sceneLibrary() {
         const curP = saved.find(p => sceneSig(p) === sceneSig(sceneSnapshot()));
         const chip = (v, t) => `<button class="pc-pill tiny ${f === v ? 'on' : 'dashed'}" data-act="scenetag" data-v="${esc(v)}">${esc(t)}</button>`;
         return `<details class="pc-recent-scenes pc-saved-scenes" ${st.open.savedScenes ? 'open' : ''} data-fold="savedScenes"><summary>存下的固定提示词 ${saved.length} 条${curP ? ` · 在用「${esc(curP.name || '没起名')}」` : ''} ▸</summary>
-          ${saved.length > 3 ? `<label class="pc-search pc-mt-s"><span class="pc-sr">搜固定提示词</span>${ICON.search}<input data-bind="studio.sceneQ" value="${esc(st.sceneQ || '')}" placeholder="搜名字、标签、提示词"></label>` : ''}
+          ${saved.length > 0 ? `<label class="pc-search pc-mt-s"><span class="pc-sr">搜固定提示词</span>${ICON.search}<input data-bind="studio.sceneQ" value="${esc(st.sceneQ || '')}" placeholder="搜名字、标签、提示词"></label>` : ''}
           ${all.length ? `<div class="pc-chips wrap" style="margin-top:8px">${chip('', '全部')}${all.map(t => chip(t, t)).join('')}${saved.some(p => !tagsOf(p).length) ? chip('__none', '没标签') : ''}</div>` : '<div class="pc-dim small" style="margin-top:6px">点每条的「标签」可以分类，比如 证件照、NSFW、双人</div>'}
           ${rows.map(([p, i]) => sceneRow(p, i, 'saved')).join('') || '<div class="pc-dim small" style="margin-top:8px">没有对得上的</div>'}</details>`;
       })() : ''}
@@ -5670,10 +5674,21 @@ async function i2iImage(dataUrl, w, h) {
 }
 /** 按底图比例算尺寸：64 的倍数，不超过 1024×1024 的像素数（Opus 免费档以内） */
 function i2iFitSize(iw, ih) {
-    const r = iw / ih, area = 1024 * 1024;
-    let h = Math.floor(Math.sqrt(area / r) / 64) * 64, w = Math.floor(h * r / 64) * 64;
-    w = Math.max(64, Math.min(w, 1600)); h = Math.max(64, Math.min(h, 1600));
-    return [w, h];
+    if (!(Number.isFinite(iw) && Number.isFinite(ih) && iw > 0 && ih > 0)) return [1024, 1024];
+    const scale = Math.min(1600 / iw, 1600 / ih, Math.sqrt(1024 * 1024 / (iw * ih)));
+    return [iw, ih].map(v => Math.max(64, Math.floor(v * scale / 64) * 64));
+}
+let i2iLoadSeq = 0;
+async function loadI2i(source, file = false) {
+    const seq = ++i2iLoadSeq, st = ui.studio;
+    const current = () => seq === i2iLoadSeq && ui.studio === st && !stopped;
+    try {
+        const du = file ? await shrinkDataUrl(await fileToDataUrl(source), 1600, 0.92) : source;
+        const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = du; });
+        if (!current()) return false;
+        st.i2i = { strength: 0.7, noise: 0, ...(st.i2i || {}), image: du, iw: im.width, ih: im.height };
+        st.open.i2i = true; render(); return true;
+    } catch { if (current()) toastr.error('这张图读不出来，换一张试试', '垫图'); return false; }
 }
 function i2iFold(s) {
     const g = ui.studio.i2i || {};
@@ -8027,8 +8042,8 @@ async function onClick(ev, outside = false) {
             }
             case 'switcher': openSwitcher(); break;
             case 'pickartist': openSwitcher({ onPick: ref => { applyArtistToStudio(ref); render(); } }); break;
-            case 'i2iresult': { const r = ui.studio.result; if (!r) break; const im = new Image(); im.onload = () => { ui.studio.i2i = { ...(ui.studio.i2i || {}), image: r, iw: im.width, ih: im.height }; ui.studio.open.i2i = true; render(); }; im.src = r; toastr.info('用这张垫图了，调一下重绘强度再生成', '垫图', { timeOut: 2000 }); break; }
-            case 'i2ioff': ui.studio.i2i = { ...(ui.studio.i2i || {}), image: '' }; render(); break;
+            case 'i2iresult': { const r = ui.studio.result; if (r && await loadI2i(r)) toastr.info('用这张垫图了，调一下重绘强度再生成', '垫图', { timeOut: 2000 }); break; }
+            case 'i2ioff': ++i2iLoadSeq; ui.studio.i2i = { ...(ui.studio.i2i || {}), image: '' }; render(); break;
             case 'i2ifit': { const g = ui.studio.i2i; if (!g?.iw) break; const [w, h] = i2iFitSize(g.iw, g.ih); const n = N.settings(); n.novelai_width = String(w); n.novelai_height = String(h); N.save(); render(); break; }
             case 'studiosize': { const [w, h] = el.dataset.size.split('x'); const n = N.settings(); n.novelai_width = w; n.novelai_height = h; N.save(); render(); break; }
             case 'insertai': case 'replaceai': {
@@ -8842,7 +8857,8 @@ function onInput(ev) {
     const el = ev.target;
     const d = getData();
     if (el.dataset.ucpCustom !== undefined) { N.settings().UCP_custom = el.value; N.save(); updateStudioPreview(); return; }
-    if (el.dataset?.i2i) { const o = root.querySelector(`[data-i2i-out="${el.dataset.i2i}"]`); if (o) o.textContent = Math.round(Number(el.value) * 100) + '%'; }
+    if (el.dataset.castact) { const k = el.dataset.castact; setStudioCast(studioCast().map(e => e.key === k ? { ...e, act: el.value.trim() } : e)); updateStudioPreview(); return; }
+    if (el.dataset?.i2i) { (ui.studio.i2i ||= {})[el.dataset.i2i] = Number(el.value); const o = root.querySelector(`[data-i2i-out="${el.dataset.i2i}"]`); if (o) o.textContent = Math.round(Number(el.value) * 100) + '%'; }
     if (el.dataset.bind) {
         setPath(ui, el.dataset.bind, el.value);
         if (el.dataset.bind === 'studio.sceneQ') { clearTimeout(onInput.sq); onInput.sq = setTimeout(render, 250); }
@@ -8909,13 +8925,7 @@ async function onChangeEv(ev) {
     if (el.dataset.crtype) { const [g, i] = el.dataset.crtype.split(':'); d.charRefGroups[g].refs[Number(i)].type = el.value; commit({ silent: true }); return; }
     if (el.dataset.i2iimg !== undefined) {
         const f = el.files?.[0]; el.value = ''; if (!f) return;
-        try {
-            const du = await shrinkDataUrl(await fileToDataUrl(f), 1600, 0.92);
-            const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = du; });
-            ui.studio.i2i = { strength: 0.7, noise: 0, ...(ui.studio.i2i || {}), image: du, iw: im.width, ih: im.height };
-            ui.studio.open.i2i = true;
-        } catch { toastr.error('这张图读不出来，换一张试试', '垫图'); }
-        render(); return;
+        await loadI2i(f, true); return;
     }
     if (el.dataset.i2i) { const g = (ui.studio.i2i ||= {}); g[el.dataset.i2i] = Number(el.value); render(); return; }
     if (el.dataset.castact) { const k = el.dataset.castact, v = el.value.trim(); setStudioCast(studioCast().map(e => e.key === k ? { ...e, act: v } : e)); updateStudioPreview?.(); return; }
@@ -9114,6 +9124,9 @@ async function onChangeEv(ev) {
 
 async function doGenerate() {
     const st = ui.studio;
+    if (st.generating || st.busy) return;
+    st.generating = true;
+    try {
     if (!N.isReady()) { toastr.warning('先到设置里填 NovelAI key', '生成图片'); ui.view = 'settings'; render(); return; }
     if (!st.pos.trim() && !studioCast().length) { toastr.warning('正面提示词是空的', '生成图片'); return; }
     if (T.hasChinese(st.pos.replace(/（[^（）]*）/g, ''))) {
@@ -9126,24 +9139,24 @@ async function doGenerate() {
     saveStudio();
     st.busy = true; render();
     try {
-        const g = st.i2i, ns = N.settings();
-        const i2i = g?.image ? { image: await i2iImage(g.image, Number(ns.novelai_width) || 832, Number(ns.novelai_height) || 1216), strength: g.strength ?? 0.7, noise: g.noise ?? 0 } : null;
-        const cast = studioCast();
-        if (cast.length) {
-            const p = C.studioCastPrompt(studioParts(), cast);
-            const ids = C.studioCastRefs(p.picks);
-            st.result = await E.generateFull({ ...studioParts(), i2i, positive: p.positive, negative: p.negative, chars: p.chars, director: ids.length ? await E.charRefs(ids) : null });
-        } else st.result = await E.generate({ ...studioParts(), i2i });
+        const g = { ...st.i2i }, ns = N.settings();
+        const width = Number(ns.novelai_width) || 832, height = Number(ns.novelai_height) || 1216;
+        const parts = studioParts(), scene = sceneSnapshot(), sceneOn = st.sceneOn !== false;
+        const cast = studioCast(), p = cast.length ? C.studioCastPrompt(parts, cast) : E.composeStudio(parts);
+        const ids = cast.length ? C.studioCastRefs(p.picks) : null;
+        const i2i = g.image ? { image: await i2iImage(g.image, width, height), strength: g.strength ?? 0.7, noise: g.noise ?? 0 } : null;
+        st.result = await E.generateFull({ i2i, width, height, positive: p.positive, negative: p.negative, chars: p.chars || [], director: ids ? (ids.length ? await E.charRefs(ids) : null) : undefined });
         st.sent = E.runtime.lastSent;
-        rememberScene();
+        rememberScene(scene, sceneOn);
         // 存起来（默认本地浏览器），记到历史生图里；关掉智库、刷新页面后也能找回来
-        const shot = { dataUrl: st.result, raw: st.pos, sent: st.sent, from: 'studio' };
+        const shot = { dataUrl: st.result, raw: parts.pos, sent: st.sent, from: 'studio' };
         pcStoreImage(shot.dataUrl, 'studio_' + Date.now()).then(r => pcRecordImage({ ...shot, url: r.url })).catch(e => console.warn('[智库] 历史生图没存上', e));
     } catch (e) {
         toastr.error(e.message, '生成失败', { timeOut: 8000 });
     } finally {
         st.busy = false; render();
     }
+    } finally { st.generating = false; }
 }
 
 async function saveStudioResult() {
