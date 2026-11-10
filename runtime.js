@@ -7805,15 +7805,33 @@ async function queueVibeThumbs(groups) {
 const AUD = ['BL', 'BG', 'GB', 'GL'];
 /** 共享用的标签：只能从这里选 */
 const LOBBY_TAGS = [
-    ['性向', ['男性向', '女性向', '全性向'], true],
+    ['NSFW 图里是谁·有 NSFW 才选，都有就两个都选', ['男性NSFW', '女性NSFW'], false],
     ['题材', ['BL', 'BG', 'GB', 'GL'], false],
-    ['画风', ['厚涂', '半厚涂', '平涂', '赛璐璐', '水彩', '写实', '2.5D', '古风', '日系', '韩系', '欧美', '像素', 'Q版', '线稿', '暗黑', '清新', '柔和', '华丽'], false],
+    ['画风·拿不准就不选', ['厚涂', '半厚涂', '平涂', '赛璐璐', '水彩', '写实', '2.5D', '古风', '日系', '韩系', '欧美', '像素', 'Q版', '线稿', '暗黑', '清新', '柔和', '华丽'], false],
 ];
-const ORIENT = LOBBY_TAGS[0][1];
+const NSFW_WHO = LOBBY_TAGS[0][1];
+/** 旧标签（性向）也照样隐藏，不在标签栏里出现 */
+const ORIENT = [...NSFW_WHO, '男性向', '女性向', '全性向'];
+const tagLabel = t => ({ '男性NSFW': '男性', '女性NSFW': '女性' })[t] || t;
+/** 这条分享的 NSFW 图里是谁：新标签直接看；旧的按性向、题材推 */
+function postWho(p) {
+    const t = new Set(p.tags || []), who = new Set();
+    if (t.has('男性NSFW')) who.add('male');
+    if (t.has('女性NSFW')) who.add('female');
+    if (!who.size) {
+        if (t.has('女性向') || t.has('BL')) who.add('male');
+        if (t.has('男性向') || t.has('GL')) who.add('female');
+        if (t.has('全性向') || t.has('BG') || t.has('GB')) { who.add('male'); who.add('female'); }
+    }
+    return who;
+}
+const postHasNsfw = p => !!(p.nsfw || (p.images || []).some(i => i.nsfw));
+/** 共享里看哪种 NSFW：sfw 不看 / male 男性的 / female 女性的 / all 全都看 */
+const lobbyNsfwMode = () => { const o = getData().options; return ['sfw', 'male', 'female', 'all'].includes(o.lobbyNsfwMode) ? o.lobbyNsfwMode : (o.lobbyShowNsfw ? 'all' : 'sfw'); };
 const LOBBY_TAG_SET = new Set(LOBBY_TAGS.flatMap(g => g[1]));
 function lobbyTagPicker(sel = []) {
     const on = new Set(sel);
-    return LOBBY_TAGS.map(([title, list, single]) => `<div class="pc-field"><span>${title}${single ? '（必选一个）' : '（可多选）'}</span><div class="pc-chips wrap" data-tagset="${title}" ${single ? 'data-single' : ''}>${list.map(t => `<button type="button" class="pc-pill ${on.has(t) ? 'on' : 'dashed'}" data-tagpick="${esc(t)}">${esc(t)}</button>`).join('')}</div></div>`).join('');
+    return LOBBY_TAGS.map(([title, list, single]) => `<div class="pc-field"><span>${title}${single ? '（必选一个）' : '（可多选）'}</span><div class="pc-chips wrap" data-tagset="${title}" ${single ? 'data-single' : ''}>${list.map(t => `<button type="button" class="pc-pill ${on.has(t) ? 'on' : 'dashed'}" data-tagpick="${esc(t)}">${esc(tagLabel(t))}</button>`).join('')}</div></div>`).join('');
 }
 function wireTagPicker(root) {
     root.addEventListener('click', ev => {
@@ -7837,7 +7855,6 @@ function chooseLobbyTags(sel = []) {
             if (x === 'no') { box.closeModal(); resolve(null); }
             if (x === 'ok') {
                 const tags = pickedTags(box);
-                if (!tags.some(t => ORIENT.includes(t))) { box.querySelector('[data-tagerr]').textContent = '先选一个性向：男性向、女性向或全性向'; return; }
                 box.closeModal(); resolve(tags);
             }
         });
@@ -7866,7 +7883,10 @@ function viewLobby(d) {
     const blocked = new Set(d.blockedTags || []);
     const view = d.options.lobbyView || 'grid';
     const blk = lobbyBlock();
-    const items = lb.items.filter(p => (p.mine || (!p.tags.some(t => blocked.has(t)) && !blk.users.includes(p.nickname) && !blk.posts.includes(p.id))) && (!lb.tag2 || p.tags.includes(lb.tag2)));
+    const nm = lobbyNsfwMode();
+    // 只看男性 / 女性的 NSFW：带 NSFW 的分享只留对得上的；没有 NSFW 的照常显示
+    const whoOk = p => p.mine || nm === 'all' || nm === 'sfw' || !postHasNsfw(p) || postWho(p).has(nm);
+    const items = lb.items.filter(p => (p.mine || (!p.tags.some(t => blocked.has(t)) && !blk.users.includes(p.nickname) && !blk.posts.includes(p.id))) && (!lb.tag2 || p.tags.includes(lb.tag2)) && whoOk(p));
     const tags = lb.tags.map(t => t.tag).filter(t => t !== 'NSFW' && !AUD.includes(t) && !ORIENT.includes(t));
     for (const t of blocked) if (!tags.includes(t)) tags.push(t);
     return `
@@ -7880,9 +7900,9 @@ function viewLobby(d) {
       <button class="pc-pill ${lb.mine ? 'on' : 'dashed'}" data-act="lobbymine">我分享的</button>
     </div>
     <div class="pc-chips">
-      ${[...ORIENT, ...AUD].map(t => `<button class="pc-pill ${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="${t}">${t}</button>`).join('')}
-      <button class="pc-pill nsfw ${d.options.lobbyShowNsfw ? 'on' : 'dashed'}" data-act="nsfwtoggle" title="只管共享里别人的图，你自己的例图一直显示">NSFW ${d.options.lobbyShowNsfw ? '开' : '关'}</button>
+      <span class="pc-dim small" style="align-self:center">NSFW</span>${[['sfw', '不看'], ['male', '男性的'], ['female', '女性的'], ['all', '全都看']].map(([k, t]) => `<button class="pc-pill ${k !== 'sfw' ? 'nsfw' : ''} ${nm === k ? 'on' : 'dashed'}" data-act="lobbynsfw" data-v="${k}" title="只管共享里别人的图，你自己的例图一直显示">${t}</button>`).join('')}
     </div>
+    <div class="pc-chips">${AUD.map(t => `<button class="pc-pill ${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="${t}">${t}</button>`).join('')}</div>
     ${tags.length ? `<div class="pc-chips">${tags.slice(0, 24).map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag2 === t ? 'on' : 'dashed'}" data-act="lobbytag2" data-tag="${esc(t)}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${esc(t)}</button>`).join('')}</div>
     <div class="pc-tip">点标签 = 只看这类　长按 = 屏蔽，带这个标签的都不显示</div>` : ''}
     <div class="pc-sort"><button class="${lb.sort === 'new' ? 'on' : ''}" data-act="lobbysort" data-sort="new">最新</button><button class="${lb.sort === 'hot' ? 'on' : ''}" data-act="lobbysort" data-sort="hot">最多人保存</button><button data-act="lobbyrefresh">刷新</button></div>
@@ -8870,6 +8890,7 @@ async function onClick(ev, outside = false) {
             case 'lobbyupload': openSharedUpload(); break;
             case 'lobbyrefresh': case 'lobbysearch': loadLobby(); break;
             case 'lobbymore': loadLobby({ more: true }); break;
+            case 'lobbynsfw': d.options.lobbyNsfwMode = el.dataset.v; d.options.lobbyShowNsfw = el.dataset.v !== 'sfw'; commit(); loadLobby(); break;
             case 'nsfwtoggle':
                 d.options.lobbyShowNsfw = !d.options.lobbyShowNsfw;
                 commit(); loadLobby();
@@ -9820,7 +9841,7 @@ function openSharedUpload(pre = {}) {
         const nsfw = form.elements.namedItem('nsfw').checked;
         const mark = !!form.elements.namedItem('mark')?.checked;
         const tags = pickedTags(box).filter(t => LOBBY_TAG_SET.has(t));
-        if (!tags.some(t => ORIENT.includes(t))) { say('先在标签里选一个性向：男性向、女性向或全性向。'); return; }
+        if (nsfw && !tags.some(t => NSFW_WHO.includes(t))) { say('含 NSFW 的话，在标签里选一下 NSFW 图里是男性还是女性（都有就两个都选）。'); return; }
         const note = value('note');
         busy = true;
         Array.from(form.elements).forEach(el => { el.disabled = true; });
@@ -9837,7 +9858,7 @@ function openSharedUpload(pre = {}) {
             const post = { nickname, name, kind: members.length === 1 ? 'artist' : 'group', note, tags, nsfw, content: { artistString, members, ...(negative ? { negative } : {}) }, images };
             await L.createPost(post);
             d.lobby.nickname = nickname;
-            if (nsfw) d.options.lobbyShowNsfw = true;
+            if (nsfw && lobbyNsfwMode() === 'sfw') { d.options.lobbyShowNsfw = true; d.options.lobbyNsfwMode = 'all'; }
             commit();
             box.closeModal();
             Object.assign(ui.lobby, { mine: true, q: '', tag: '', tag2: '', kind: '', sort: 'new' });

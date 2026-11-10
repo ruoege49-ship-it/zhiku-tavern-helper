@@ -3194,6 +3194,44 @@ patch(`      <div class="pc-dim small">翻译、补全细节、读角色外貌�
       \${apiChips()}
       <label class="pc-field"><span>回复长度上限（token，所有 AI 功能共用）</span><input type="number" min="256" step="1000" inputmode="numeric" data-optstr="aiMaxTokens" value="\${esc(String(d.options.aiMaxTokens || ''))}" placeholder="不填 = 16000"></label>
       <div class="pc-hint">只是上限，用多少算多少，填大不会多花。带思考的模型（deepseek 思考、gemini 思考这类）思考也算在里面，回复空了、读卡读不全（人多时名字和外貌缺一截）就调大。模型不收这么大时会报错，再改小。</div>`);
+// 0.8.36：共享里 NSFW 按男性的 / 女性的 / 全都看来筛，代替男性向女性向
+patch(`    ['画风', ['厚涂',`,`    ['画风·拿不准就不选', ['厚涂',`);
+patch(`    ['性向', ['男性向', '女性向', '全性向'], true],`,`    ['NSFW 图里是谁·有 NSFW 才选，都有就两个都选', ['男性NSFW', '女性NSFW'], false],`);
+patch(`const ORIENT = LOBBY_TAGS[0][1];`,`const NSFW_WHO = LOBBY_TAGS[0][1];
+/** 旧标签（性向）也照样隐藏，不在标签栏里出现 */
+const ORIENT = [...NSFW_WHO, '男性向', '女性向', '全性向'];
+const tagLabel = t => ({ '男性NSFW': '男性', '女性NSFW': '女性' })[t] || t;
+/** 这条分享的 NSFW 图里是谁：新标签直接看；旧的按性向、题材推 */
+function postWho(p) {
+    const t = new Set(p.tags || []), who = new Set();
+    if (t.has('男性NSFW')) who.add('male');
+    if (t.has('女性NSFW')) who.add('female');
+    if (!who.size) {
+        if (t.has('女性向') || t.has('BL')) who.add('male');
+        if (t.has('男性向') || t.has('GL')) who.add('female');
+        if (t.has('全性向') || t.has('BG') || t.has('GB')) { who.add('male'); who.add('female'); }
+    }
+    return who;
+}
+const postHasNsfw = p => !!(p.nsfw || (p.images || []).some(i => i.nsfw));
+/** 共享里看哪种 NSFW：sfw 不看 / male 男性的 / female 女性的 / all 全都看 */
+const lobbyNsfwMode = () => { const o = getData().options; return ['sfw', 'male', 'female', 'all'].includes(o.lobbyNsfwMode) ? o.lobbyNsfwMode : (o.lobbyShowNsfw ? 'all' : 'sfw'); };`);
+patch(`data-tagpick="\${esc(t)}">\${esc(t)}</button>\`).join('')}</div></div>\`).join('');`,`data-tagpick="\${esc(t)}">\${esc(tagLabel(t))}</button>\`).join('')}</div></div>\`).join('');`);
+patch(`                if (!tags.some(t => ORIENT.includes(t))) { box.querySelector('[data-tagerr]').textContent = '先选一个性向：男性向、女性向或全性向'; return; }
+`,``);
+patch(`        if (!tags.some(t => ORIENT.includes(t))) { say('先在标签里选一个性向：男性向、女性向或全性向。'); return; }`,`        if (nsfw && !tags.some(t => NSFW_WHO.includes(t))) { say('含 NSFW 的话，在标签里选一下 NSFW 图里是男性还是女性（都有就两个都选）。'); return; }`);
+patch(`            if (nsfw) d.options.lobbyShowNsfw = true;`,`            if (nsfw && lobbyNsfwMode() === 'sfw') { d.options.lobbyShowNsfw = true; d.options.lobbyNsfwMode = 'all'; }`);
+patch(`    const items = lb.items.filter(p => (p.mine || (!p.tags.some(t => blocked.has(t)) && !blk.users.includes(p.nickname) && !blk.posts.includes(p.id))) && (!lb.tag2 || p.tags.includes(lb.tag2)));`,`    const nm = lobbyNsfwMode();
+    // 只看男性 / 女性的 NSFW：带 NSFW 的分享只留对得上的；没有 NSFW 的照常显示
+    const whoOk = p => p.mine || nm === 'all' || nm === 'sfw' || !postHasNsfw(p) || postWho(p).has(nm);
+    const items = lb.items.filter(p => (p.mine || (!p.tags.some(t => blocked.has(t)) && !blk.users.includes(p.nickname) && !blk.posts.includes(p.id))) && (!lb.tag2 || p.tags.includes(lb.tag2)) && whoOk(p));`);
+patch(`      \${[...ORIENT, ...AUD].map(t => \`<button class="pc-pill \${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}">\${t}</button>\`).join('')}
+      <button class="pc-pill nsfw \${d.options.lobbyShowNsfw ? 'on' : 'dashed'}" data-act="nsfwtoggle" title="只管共享里别人的图，你自己的例图一直显示">NSFW \${d.options.lobbyShowNsfw ? '开' : '关'}</button>
+    </div>`,`      <span class="pc-dim small" style="align-self:center">NSFW</span>\${[['sfw', '不看'], ['male', '男性的'], ['female', '女性的'], ['all', '全都看']].map(([k, t]) => \`<button class="pc-pill \${k !== 'sfw' ? 'nsfw' : ''} \${nm === k ? 'on' : 'dashed'}" data-act="lobbynsfw" data-v="\${k}" title="只管共享里别人的图，你自己的例图一直显示">\${t}</button>\`).join('')}
+    </div>
+    <div class="pc-chips">\${AUD.map(t => \`<button class="pc-pill \${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}">\${t}</button>\`).join('')}</div>`);
+patch(`            case 'nsfwtoggle':`,`            case 'lobbynsfw': d.options.lobbyNsfwMode = el.dataset.v; d.options.lobbyShowNsfw = el.dataset.v !== 'sfw'; commit(); loadLobby(); break;
+            case 'nsfwtoggle':`);
 s=applyImg2imgCompatibility(s);
 s=applyWardrobeCanonCompatibility(s);
 s=applyBatchScenesCompatibility(s);
