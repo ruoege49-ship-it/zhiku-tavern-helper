@@ -3876,10 +3876,11 @@ const PAIRS = `每个标签写成 {"en": "英文 Danbooru 标签", "zh": "简短
 async function extractAppearance(name, description) {
     const sys = `你从角色设定里挑出画图用的外貌标签。只挑不会变的外貌：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身等。衣服另外放。
 ${PAIRS}
-只输出 JSON：{"appearance": [...], "outfit": [...]}。设定里没写的不要编。`;
+NSFW 身体单独放进 nsfw：只给明确是成年人的角色写（未成年、年龄不明、非人类幼体一律留空 []）。写脱了衣服才看得到的身体特征：乳头 / 乳晕颜色和大小、阴毛、私处、男性的阴茎等；设定写了就照写，没写的按这个人的身材和气质补 2～4 个常见的。不要写动作和姿势。
+只输出 JSON：{"appearance": [...], "outfit": [...], "nsfw": [...]}。外貌和衣服设定里没写的不要编。`;
     const j = await askShrinking(sys, limit => `角色名：${name}\n设定（可能有好几个人，只挑「${name}」的）：\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000, fn: 'look' });
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x.en || '').trim(), zh: String(x.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
-    return { appearance: norm(j.appearance), outfit: norm(j.outfit) };
+    return { appearance: norm(j.appearance), outfit: norm(j.outfit), nsfw: norm(j.nsfw) };
 }
 
 /** 设定很长时：先发 6 万字；模型说太长（上下文不够、请求太大、超时）就缩到 3 万、1.5 万再试。设定是按描述在前、世界书在后排的，缩的时候先丢后面的 */
@@ -3921,26 +3922,28 @@ async function extractCastFromChat(cardName, chatText) {
     const sys = `你从聊天正文里找出所有出场过、并且写到了外貌的角色（主角、配角、路人都算，{{user}} / 玩家本人不要），每人挑画图用的外貌标签。
 外貌只挑不会变的：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身、角尾巴翅膀等。最近一次写到的衣服另外放。正文没写到的不要编；同一个人前后写法不同时以较新的为准。
 ${PAIRS}
-只输出 JSON：{"people": [{"name": "正文里的名字", "aliases": ["昵称、称呼、别的叫法"], "appearance": [...], "outfit": [...]}]}`;
+NSFW 身体单独放进 nsfw：只给明确是成年人的角色写（未成年、年龄不明、非人类幼体一律留空 []）。写脱了衣服才看得到的身体特征：乳头 / 乳晕颜色和大小、阴毛、私处、男性的阴茎等；设定写了就照写，没写的按这个人的身材和气质补 2～4 个常见的。不要写动作和姿势。
+只输出 JSON：{"people": [{"name": "正文里的名字", "aliases": ["昵称、称呼、别的叫法"], "appearance": [...], "outfit": [...], "nsfw": [...]}]}`;
     const j = await askShrinking(sys, limit => `卡名：${cardName}\n聊天正文（从旧到新）：\n${String(chatText || '').slice(-limit)}`, { maxTokens: 8000, fn: 'look' });
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
     return (Array.isArray(j.people) ? j.people : []).map(p => ({
         name: String(p?.name || '').trim().slice(0, 30),
         aliases: (Array.isArray(p?.aliases) ? p.aliases : []).map(a => String(a || '').trim()).filter(Boolean).slice(0, 6),
-        appearance: norm(p?.appearance), outfit: norm(p?.outfit),
+        appearance: norm(p?.appearance), outfit: norm(p?.outfit), nsfw: norm(p?.nsfw),
     })).filter(p => p.name && !/^\{\{?user\}?\}$|^user$/i.test(p.name) && p.appearance.length);
 }
 async function extractCast(cardName, description) {
     const sys = `你从角色卡和世界书里找出所有有外貌描写的角色（主角、配角都要，{{user}} / 玩家本人不要），每人挑画图用的外貌标签。
 外貌只挑不会变的：性别人数（1boy / 1girl）、年龄感、发型发色、眼睛、脸部特征、身材、肤色、明显的痣疤纹身等。衣服另外放。设定里没写的不要编。
 ${PAIRS}
-只输出 JSON：{"people": [{"name": "设定里的名字", "aliases": ["昵称、简称、别的叫法"], "appearance": [...], "outfit": [...]}]}`;
+NSFW 身体单独放进 nsfw：只给明确是成年人的角色写（未成年、年龄不明、非人类幼体一律留空 []）。写脱了衣服才看得到的身体特征：乳头 / 乳晕颜色和大小、阴毛、私处、男性的阴茎等；设定写了就照写，没写的按这个人的身材和气质补 2～4 个常见的。不要写动作和姿势。
+只输出 JSON：{"people": [{"name": "设定里的名字", "aliases": ["昵称、简称、别的叫法"], "appearance": [...], "outfit": [...], "nsfw": [...]}]}`;
     const j = await askShrinking(sys, limit => `卡名：${cardName}\n设定：\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000, fn: 'look' });
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
     return (Array.isArray(j.people) ? j.people : []).map(p => ({
         name: String(p?.name || '').trim().slice(0, 30),
         aliases: (Array.isArray(p?.aliases) ? p.aliases : []).map(a => String(a || '').trim()).filter(Boolean).slice(0, 6),
-        appearance: norm(p?.appearance), outfit: norm(p?.outfit),
+        appearance: norm(p?.appearance), outfit: norm(p?.outfit), nsfw: norm(p?.nsfw),
     })).filter(p => p.name && !/^\{\{?user\}?\}$|^user$/i.test(p.name) && p.appearance.length);
 }
 
@@ -4225,7 +4228,7 @@ function currentPersonaKey() {
 
 const blank = src => ({
     key: src.key, kind: src.kind, name: src.name, avatar: src.avatar || '', card: src.card || '',
-    appearance: [], outfitMode: 'story', outfits: [], outfitId: '', negative: '', charRef: '',
+    appearance: [], nsfwBody: [], outfitMode: 'story', outfits: [], outfitId: '', negative: '', charRef: '',
 });
 
 /** 取一个角色（还没写过外貌的也给一份空的，存档时才写进数据） */
@@ -4356,8 +4359,10 @@ function setCastOn(key, on) {
 const tagText = list => (list || []).map(t => t.en).filter(Boolean).join(', ');
 function currentOutfit(c) { return c.outfits.find(o => o.id === c.outfitId) || c.outfits[0] || null; }
 /** 这个角色固定会发的标签（外貌 + 固定的衣服） */
-function fixedTags(c) {
+function fixedTags(c, { nsfw = false } = {}) {
     const parts = [tagText(c.appearance)];
+    // NSFW 身体：只有这张图是 NSFW 时才加
+    if (nsfw) parts.push(tagText(c.nsfwBody));
     if (c.outfitMode === 'fixed') parts.push(tagText(currentOutfit(c)?.tags));
     return parts.filter(Boolean).join(', ');
 }
@@ -4390,21 +4395,21 @@ function canSplit() {
  * 拼出这一张的提示词。
  * scene：AI 写的场景；picks：[{ char, tags, x, y }]
  */
-function buildChatPrompt(scene, picks) {
+function buildChatPrompt(scene, picks, { nsfw = /(?:^|[,;\s])nsfw(?:$|[,;\s])/i.test(String(scene || '')) } = {}) {
     const d = getData();
     const artist = d.active ? M.ticketString(d, d.active) : '';
     const chars = picks.map(p => p.char);
     const base = M.mergeTags(artist, /\b(?:\d+(?:boys?|girls?|others?)|no humans)\b/i.test(scene) ? '' : countTags(chars), scene, d.options.chatPositive || '');
     const chatNeg = [d.active ? M.ticketNeg(d, d.active) : '', d.options.chatNegative || ''].filter(Boolean).join(', ');
     if (d.options.chatNoSplit || !canSplit() || picks.length === 0) {
-        const flat = M.mergeTags(base, ...picks.map(p => [fixedTags(p.char), p.tags].filter(Boolean).join(', ')));
+        const flat = M.mergeTags(base, ...picks.map(p => [fixedTags(p.char, { nsfw }), p.tags].filter(Boolean).join(', ')));
         const { positive, negative } = E.composeStudio({ pos: flat, neg: [chatNeg, ...picks.flatMap(p => [p.char.negative, p.uc])].filter(Boolean).join(', ') });
         return { positive, negative, chars: [] };
     }
     const { positive, negative } = E.composeStudio({ pos: base, neg: chatNeg });
     return {
         positive, negative,
-        chars: picks.map(p => ({ prompt: soloize([fixedTags(p.char), p.tags].filter(Boolean).join(', ')), uc: [p.char.negative, p.uc].filter(Boolean).join(', '), center: { x: snap(p.x), y: snap(p.y) } })),
+        chars: picks.map(p => ({ prompt: soloize([fixedTags(p.char, { nsfw }), p.tags].filter(Boolean).join(', ')), uc: [p.char.negative, p.uc].filter(Boolean).join(', '), center: { x: snap(p.x), y: snap(p.y) } })),
     };
 }
 
@@ -4423,8 +4428,8 @@ function markerPrompt(prompt, { story } = {}) {
     const plan = readIllustrationPlan(prompt);
     const parsed = plan ? compileIllustrationPlan(plan, currentCast(), story === undefined ? undefined : imageStoryText(story)) : resolveImageCharacters(prompt, currentCast());
     if (parsed.unknown?.length) toastr.info(`「${parsed.unknown.join('、')}」没在角色页登记（或这次聊天没开），按图里写的标签画`, '智库', { timeOut: 4000 });
-    const built = buildChatPrompt(parsed.scene, parsed.picks);
     const rating = plan?.rating?.toLowerCase() || (/^nsfw(?:,|$)/i.test(parsed.scene) ? 'nsfw' : undefined);
+    const built = buildChatPrompt(parsed.scene, parsed.picks, { nsfw: rating === 'nsfw' });
     return { ...built, positive: applyIllustrationRating(built.positive, rating), cast: parsed.cast };
 }
 
@@ -4506,6 +4511,8 @@ function fromZhihuijiChar(ch, outfits = {}) {
     return {
         name: ch.nameCN || ch.nameEN || '角色',
         appearance: parsePairs([ch.facialFeatures, ch.characterTraits && !T.hasChinese(String(ch.characterTraits).replace(/（[^（）]*）/g, '')) ? ch.characterTraits : ''].filter(Boolean).join(', ')),
+        // 智绘姬里带 nsfw 的字段（NSFW 身体特征）放进「NSFW 身体」
+        nsfwBody: parsePairs(Object.entries(ch || {}).filter(([k, v]) => /nsfw/i.test(k) && typeof v === 'string' && v.trim() && !T.hasChinese(v.replace(/（[^（）]*）/g, ''))).map(([, v]) => v).join(', ')),
         outfitMode: Object.keys(outfits).length ? 'fixed' : 'story',
         outfits: Object.entries(outfits).map(([n, o]) => fromZhihuijiOutfit(n, o)),
         negative: '',
@@ -4519,7 +4526,7 @@ function fromZhihuijiOutfit(name, o) {
 function saveCharacterPost(payload, fallbackName) {
     const src = payload.character || {};
     const ours = Array.isArray(src.appearance)
-        ? { name: src.name, appearance: src.appearance, outfitMode: src.outfitMode || 'story', outfits: (src.outfits || []).map(o => ({ ...o, id: M.uid('o_') })), negative: src.negative || '' }
+        ? { name: src.name, appearance: src.appearance, nsfwBody: Array.isArray(src.nsfwBody) ? src.nsfwBody : [], outfitMode: src.outfitMode || 'story', outfits: (src.outfits || []).map(o => ({ ...o, id: M.uid('o_') })), negative: src.negative || '' }
         : fromZhihuijiChar(src, payload.outfits || {});
     const c = blank({ key: 'free:' + M.uid(''), kind: 'free', name: uniqueName(ours.name || fallbackName) });
     Object.assign(c, ours, { name: c.name });
@@ -4536,7 +4543,7 @@ function outfitFromPost(payload, fallbackName) {
 
 /** 分享用的内容 */
 function characterPayload(c) {
-    return { character: { name: c.name, appearance: c.appearance, outfitMode: c.outfitMode, outfits: c.outfits.map(({ name, tags }) => ({ name, tags })), negative: c.negative } };
+    return { character: { name: c.name, appearance: c.appearance, nsfwBody: c.nsfwBody || [], outfitMode: c.outfitMode, outfits: c.outfits.map(({ name, tags }) => ({ name, tags })), negative: c.negative } };
 }
 
 /** 智绘姬里存的角色全搬过来，返回搬了几个 */
@@ -4565,6 +4572,7 @@ function copyLook(fromKey, toKey) {
     const a = getChar(fromKey), b = getChar(toKey);
     if (!a || !b) return;
     b.appearance = structuredClone(a.appearance);
+    b.nsfwBody = structuredClone(a.nsfwBody || []);
     b.outfitMode = a.outfitMode;
     b.outfits = a.outfits.map(o => ({ ...structuredClone(o), id: M.uid('o_') }));
     b.outfitId = b.outfits[0]?.id || '';
@@ -4694,14 +4702,15 @@ function deleteOutfit(ownerKey, id) {
 
 /** 生图页选的入画角色 → 提示词。cast：[{ key, pos: 'L'|'C'|'R', outfit?: 衣服 id，'' = 不穿固定衣服 }] */
 const CAST_X = { L: 0.3, C: 0.5, R: 0.7 };
-function studioCastPick(e) {
+function studioCastPick(e, nsfw = false) {
     const ch = getChar(e.key);
     if (!ch) return null;
     const out = e.outfit === '' ? null : (ch.outfits.find(o => o.id === e.outfit) || currentOutfit(ch));
-    return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', tags: [tagText(ch.appearance), tagText(out?.tags)].filter(Boolean).join(', '), x: CAST_X[e.pos] ?? 0.5 };
+    return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', tags: [tagText(ch.appearance), nsfw ? tagText(ch.nsfwBody) : '', tagText(out?.tags)].filter(Boolean).join(', '), x: CAST_X[e.pos] ?? 0.5 };
 }
 function studioCastPrompt({ pos = '', neg = '', scene = '' }, cast) {
-    const picks = (cast || []).map(studioCastPick).filter(Boolean);
+    const nsfw = /(?:^|[,;\s])nsfw(?:$|[,;\s])/i.test(String(pos || ''));
+    const picks = (cast || []).map(e => studioCastPick(e, nsfw)).filter(Boolean);
     if (!picks.length) return { ...E.composeStudio({ pos, neg, scene }), chars: [], picks };
     const chars = picks.map(p => p.char);
     const hasCount = /\b(?:\d+(?:boys?|girls?|others?)|no humans)\b/i.test(pos);
@@ -5126,7 +5135,7 @@ const ui = {
     studio: { loaded: false, pos: '', neg: '', lastExtra: '', prompt: '', promptEn: '', transErr: '', expand: true, scene: '', sceneOn: true, sceneEn: '', sceneSrc: '', sceneExpand: false, sceneBusy: false, busy: false, result: null, sent: null, open: {} },
     naiTest: null,
     setOpen: {},
-    castTab: 'char', castSearch: '', castTop: 'chars', wardFilter: 'all', wardSearch: '', outfit: null, charKey: '', charBusy: '', addText: { app: '', out: '' },
+    castTab: 'char', castSearch: '', castTop: 'chars', wardFilter: 'all', wardSearch: '', outfit: null, charKey: '', charBusy: '', addText: { app: '', nsfw: '', out: '' },
     showKey: false,
     lobby: { sort: 'new', tag: '', tag2: '', kind: '', q: '', items: [], total: 0, loading: false, error: '', tags: [], mine: false },
     batch: { text: '', rating: 'sfw', shot: 'all', skipExisting: true, state: null },
@@ -6836,7 +6845,7 @@ function newOutfitBox(defName) {
 }
 
 /** 一个角色的全部标签：外貌 + 每一套衣服 */
-const charPairs = c => [...(c.appearance || []), ...(c.outfits || []).flatMap(o => o.tags || [])];
+const charPairs = c => [...(c.appearance || []), ...(c.nsfwBody || []), ...(c.outfits || []).flatMap(o => o.tags || [])];
 /** 给没有中文的标签补上中文；quiet 时出错不弹窗 */
 async function fillZh(c, { quiet = false } = {}) {
     const need = charPairs(c).filter(t => t.en && !t.zh).map(t => ({ tag: t, en: t.en }));
@@ -6874,6 +6883,13 @@ function viewCharEdit(d) {
       ${(() => { const n = charPairs(c).filter(t => !t.zh).length; return n ? `<div class="pc-chips wrap"><button class="pc-pill dashed tiny" data-act="zhtags" ${busy ? 'disabled' : ''}>${busy === 'zh' ? '<span class="pc-busy">翻译中</span>' : `译成中文 · ${n} 个没有中文`}</button></div>` : ''; })()}
       <div class="pc-pairs">${pairChips(c.appearance, 'app') || '<span class="pc-dim small">还没有</span>'}</div>
       <div class="pc-addrow"><textarea rows="1" data-bind="addText.app" placeholder="自己加，中文也行，可以一次粘贴好几个" data-enter="addpair-app">${esc(ui.addText.app)}</textarea><button class="pc-btn dark" data-act="addpair" data-where="app" ${busy ? 'disabled' : ''}>${busy === 'app' ? '…' : '加'}</button></div>
+    </section>
+
+    <section class="pc-card pc-pad pc-mt">
+      <div class="pc-row-between"><b>NSFW 身体</b><span class="pc-dim small">只在 NSFW 图里发</span></div>
+      <div class="pc-dim small">脱了衣服才看得到的：乳头、阴毛、私处这类。只有这张图是 NSFW（标记里带 nsfw、提示词里有 nsfw）时才加进去，SFW 的图不会发。读卡时 AI 会给成年角色顺便写上。</div>
+      <div class="pc-pairs">${pairChips(c.nsfwBody || [], 'nsfw') || '<span class="pc-dim small">还没有</span>'}</div>
+      <div class="pc-addrow"><textarea rows="1" data-bind="addText.nsfw" placeholder="自己加，比如 pink nipples, pubic hair，中文也行" data-enter="addpair-nsfw">${esc(ui.addText.nsfw || '')}</textarea><button class="pc-btn dark" data-act="addpair" data-where="nsfw" ${busy ? 'disabled' : ''}>${busy === 'nsfw' ? '…' : '加'}</button></div>
     </section>
 
     <section class="pc-card pc-pad pc-mt">
@@ -7084,6 +7100,7 @@ async function charAction(act, el) {
                     else filled.push(ch.name);
                     if (!ch.appearance.length) {
                         ch.appearance = p.appearance;
+                        if (p.nsfw?.length && !(ch.nsfwBody || []).length) ch.nsfwBody = p.nsfw;
                         if (p.outfit.length && !ch.outfits.length) { const o = { id: M.uid('o_'), name: '默认', tags: p.outfit }; ch.outfits.push(o); ch.outfitId = o.id; }
                     }
                     const al = new Set(String(ch.aliases || '').split(/[,，、;；\s]+/).filter(Boolean));
@@ -7106,6 +7123,7 @@ async function charAction(act, el) {
             try {
                 const r = await T.extractAppearance(c.name, desc);
                 c.appearance = r.appearance;
+                if (r.nsfw?.length) c.nsfwBody = r.nsfw;
                 if (r.outfit.length && !c.outfits.length) { const o = { id: M.uid('o_'), name: '默认', tags: r.outfit }; c.outfits.push(o); c.outfitId = o.id; }
                 toastr.success(`读到 ${r.appearance.length} 个外貌标签${r.outfit.length ? `，${r.outfit.length} 个衣服标签（存在「默认」这套里）` : ''}`, '角色');
             } catch (e) { toastr.error(e.message, '读取失败'); }
@@ -7120,6 +7138,7 @@ async function charAction(act, el) {
             try {
                 const pairs = await T.textToPairs(text);
                 if (where === 'app') { for (const p of pairs) if (!c.appearance.some(x => x.en === p.en)) c.appearance.push(p); }
+                else if (where === 'nsfw') { c.nsfwBody ||= []; for (const p of pairs) if (!c.nsfwBody.some(x => x.en === p.en)) c.nsfwBody.push(p); }
                 else { const list = C.currentOutfit(c)?.tags; if (list) addToOutfit(list, pairs, where === 'outacc'); }
                 ui.addText[where] = '';
             } catch (e) { toastr.error(e.message, '加不进去'); }
@@ -7138,7 +7157,7 @@ async function charAction(act, el) {
             return true;
         }
         case 'editpair': {
-            const list = el.dataset.where === 'app' ? c.appearance : C.currentOutfit(c)?.tags;
+            const list = el.dataset.where === 'app' ? c.appearance : el.dataset.where === 'nsfw' ? (c.nsfwBody ||= []) : C.currentOutfit(c)?.tags;
             const t = list?.[Number(el.dataset.i)];
             if (!t) return true;
             const en = await promptText(`改这个标签${t.zh ? `（${t.zh}）` : ''}`, t.en);
@@ -7150,7 +7169,7 @@ async function charAction(act, el) {
             return true;
         }
         case 'delpair': {
-            const list = el.dataset.where === 'app' ? c.appearance : C.currentOutfit(c)?.tags;
+            const list = el.dataset.where === 'app' ? c.appearance : el.dataset.where === 'nsfw' ? (c.nsfwBody ||= []) : C.currentOutfit(c)?.tags;
             list?.splice(Number(el.dataset.i), 1);
             save();
             return true;
@@ -9208,7 +9227,7 @@ function showImg2Prompt(r, from) {
 function showPose(r) {
     const st = ui.studio;
     const all = [...r.pose.map(p => ({ ...p, g: '姿势' })), ...r.composition.map(p => ({ ...p, g: '构图' })), ...(r.nsfw || []).map(p => ({ ...p, g: 'NSFW' }))];
-    const picked = new Set(all.map((p, i) => p.g === 'NSFW' ? -1 : i).filter(i => i >= 0));
+    const picked = new Set(all.map((_, i) => i));
     const box = modal('<div data-pose></div>');
     const draw = () => {
         const grp = g => all.map((p, i) => [p, i]).filter(([p]) => p.g === g).map(([p, i]) => `<button class="pc-pair-pick ${picked.has(i) ? 'on' : ''}" data-pi="${i}"><span class="mono">${esc(p.en)}</span>${p.zh ? `<em>${esc(p.zh)}</em>` : ''}</button>`).join('') || '<span class="pc-dim small">没读出来</span>';
@@ -9216,7 +9235,7 @@ function showPose(r) {
           <h3 class="pc-h3">图里的姿势和构图</h3><div class="pc-dim small">点标签选上 / 取消，选上的才会用。</div>
           <div class="pc-label">姿势</div><div>${grp('姿势')}</div>
           <div class="pc-label">构图</div><div>${grp('构图')}</div>
-          ${all.some(p => p.g === 'NSFW') ? `<div class="pc-label">NSFW（默认不选，要用就点上）</div><div>${grp('NSFW')}</div>` : ''}
+          ${all.some(p => p.g === 'NSFW') ? `<div class="pc-label">NSFW（默认选上，不要就点掉）</div><div>${grp('NSFW')}</div>` : ''}
           <div class="pc-actions wrap">
             <button class="pc-btn dark" data-pa="pos">接在正面后面</button>
             <button class="pc-btn" data-pa="scene">换成固定提示词</button>

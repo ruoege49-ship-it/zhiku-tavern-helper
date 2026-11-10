@@ -118,6 +118,16 @@ await assert.rejects(adapter.generate(JSON.stringify(plan),{story:'正文没有�
 await adapter.generate('$小红-nsfw-upperbody$, standing');assert(requests.at(-1).positive.startsWith('nsfw,'),'legacy rating metadata survives character expansion');
 await adapter.generate('${"name":"小红","angle":"from front","upperBody":"nsfw","lowerBody":"hidden"}$, standing');assert(requests.at(-1).positive.startsWith('nsfw,'),'JSON body rating metadata survives');
 await adapter.generate('Scene Composition: sfw, library; Character 1 Prompt: $小红-sfw-upperbody$, standing; Character 1 UC: nsfw;');assert(!requests.at(-1).positive.startsWith('nsfw,'),'negative tags do not change positive content rating');
+// NSFW 身体标签：只在 NSFW 图里加
+d.characters[people[0].key].nsfwBody=[{en:'pink nipples',zh:'粉色乳头'}];
+await adapter.generate('Scene Composition: sfw, library; Character 1 Prompt: $小红-sfw-upperbody$, standing;');
+assert(!JSON.stringify(requests.at(-1).payload).includes('pink nipples'),'SFW image leaves NSFW body out');
+await adapter.generate('$小红-nsfw-upperbody$, lying');
+assert(JSON.stringify(requests.at(-1).payload).includes('pink nipples'),'NSFW image adds NSFW body');
+plan.rating='nsfw';await adapter.generate(JSON.stringify(plan),{story:plan.source});
+assert.match(requests.at(-1).payload.characterPrompts[0].prompt,/pink nipples/,'plan rating nsfw adds NSFW body');
+plan.rating='sfw';await adapter.generate(JSON.stringify(plan),{story:plan.source});
+assert.doesNotMatch(requests.at(-1).payload.characterPrompts[0].prompt,/pink nipples/);
 for (const rating of ['sfw','nsfw']) {
     await adapter.generate(`$红红-from side-${rating}-fullbody$, standing`);
     const request=requests.at(-1);
