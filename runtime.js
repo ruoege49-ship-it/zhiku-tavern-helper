@@ -3824,7 +3824,7 @@ async function askLLM(system, user, { maxTokens = 800, fn = '' } = {}) {
     const raw = await readBody(res);
     if (!res.ok) throw new Error(`AI 请求失败（${res.status}）：${raw.slice(0, 160)}`);
     let json;
-    try { json = JSON.parse(raw); } catch { throw new Error('AI 返回的不是正常格式：' + raw.slice(0, 120)); }
+    try { json = JSON.parse(raw); } catch { throw new Error(/^\s*<(?:!doctype|html)/i.test(raw) ? 'AI 请求拿回来的是一张网页，不是 AI 的回复：多半是请求没到后端（客户端或别的插件拦了），或者 AI 地址填成了网页地址（OpenAI 兼容的地址一般以 /v1 结尾）' : 'AI 返回的不是正常格式：' + raw.slice(0, 120)); }
     if (json.error) throw new Error('AI 报错：' + (json.error.message || JSON.stringify(json.error)).slice(0, 160));
     const ch = json.choices?.[0] || {};
     const content = String(ch.message?.content ?? ch.text ?? '');
@@ -4083,7 +4083,7 @@ async function readChat(r) {
     const raw = await readBody(r);
     if (!r.ok) throw new Error(`AI 请求失败（${r.status}）：${raw.slice(0, 160)}。如果这个模型不能看图，到设置 → 翻译和 AI 换一个`);
     let json;
-    try { json = JSON.parse(raw); } catch { throw new Error('AI 返回的不是正常格式：' + raw.slice(0, 120)); }
+    try { json = JSON.parse(raw); } catch { throw new Error(/^\s*<(?:!doctype|html)/i.test(raw) ? 'AI 请求拿回来的是一张网页，不是 AI 的回复：多半是请求没到后端（客户端或别的插件拦了），或者 AI 地址填成了网页地址（OpenAI 兼容的地址一般以 /v1 结尾）' : 'AI 返回的不是正常格式：' + raw.slice(0, 120)); }
     if (json.error) throw new Error('AI 报错：' + (json.error.message || JSON.stringify(json.error)).slice(0, 160) + '。可能这个模型不能看图');
     const c = json.choices?.[0]?.message?.content ?? json.content?.[0]?.text ?? '';
     return String(Array.isArray(c) ? c.map(x => x.text || '').join('') : c);

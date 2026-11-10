@@ -2725,6 +2725,23 @@ patch(`                if (where === 'app') { for (const p of pairs) if (!c.appe
                 else if (where === 'nsfw') { c.nsfwBody ||= []; for (const p of pairs) if (!c.nsfwBody.some(x => x.en === p.en)) c.nsfwBody.push(p); }`);
 { const a=`            const list = el.dataset.where === 'app' ? c.appearance : C.currentOutfit(c)?.tags;`; assert(s.split(a).length===3, 'patchall '+a.slice(0,40)); s=s.split(a).join(`            const list = el.dataset.where === 'app' ? c.appearance : el.dataset.where === 'nsfw' ? (c.nsfwBody ||= []) : C.currentOutfit(c)?.tags;`); }
 s=applyPoseInputCompatibility(s);
+// 0.8.36：TauriTavern 里本地 /api/ 走页面的 fetch（借来的干净 fetch 拿到的是网页）
+patch(`        return zkCleanFetch(...args);
+    } catch { return fetch(...args); }
+}`,`        // TauriTavern 之类的客户端：/api/ 是靠改写 window.fetch 接到后端的，借来的干净 fetch 会拿到网页本身，所以本地 /api/ 走原来的 fetch
+        const url = String(args[0]?.url ?? args[0] ?? '');
+        const local = /^\\/api\\//.test(url) || url.startsWith(location.origin + '/api/');
+        const W = typeof window !== 'undefined' ? window : globalThis;
+        if (local && (W.__TAURI__ || W.__TAURI_INTERNALS__ || W.top?.__TAURI_INTERNALS__ || /TauriTavern/i.test(DOC.title || ''))) return fetch(...args);
+        if (!local) return zkCleanFetch(...args);
+        return zkCleanFetch(...args).then(r => {
+            // 拿到的是网页（不是接口的回复）：换回原来的 fetch 再发一次
+            if (/text\\/html/i.test(r.headers.get('content-type') || '')) { console.warn('[智库] 干净 fetch 拿到网页，改用页面的 fetch', url); return fetch(...args); }
+            return r;
+        }, () => fetch(...args));
+    } catch { return fetch(...args); }
+}`);
+{ const a=`try { json = JSON.parse(raw); } catch { throw new Error('AI 返回的不是正常格式：' + raw.slice(0, 120)); }`; assert(s.split(a).length===3,'html msg'); s=s.split(a).join(`try { json = JSON.parse(raw); } catch { throw new Error(/^\\s*<(?:!doctype|html)/i.test(raw) ? 'AI 请求拿回来的是一张网页，不是 AI 的回复：多半是请求没到后端（客户端或别的插件拦了），或者 AI 地址填成了网页地址（OpenAI 兼容的地址一般以 /v1 结尾）' : 'AI 返回的不是正常格式：' + raw.slice(0, 120)); }`); }
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
