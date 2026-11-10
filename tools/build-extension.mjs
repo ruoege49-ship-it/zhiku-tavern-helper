@@ -2880,6 +2880,29 @@ patch(`            case 'scenerename': {`,`            case 'scenetag': ui.studi
                 saveStudio(); render(); break;
             }
             case 'scenerename': {`);
+// 0.8.36：生图页双人每人单独写动作；固定提示词排到衣服前面；生图页不受「聊天不分角色」影响
+patch(`    return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', tags: [tagText(ch.appearance), nsfw ? tagText(ch.nsfwBody) : '', tagText(out?.tags)].filter(Boolean).join(', '), x: CAST_X[e.pos] ?? 0.5 };
+}`,`    const look = [tagText(ch.appearance), nsfw ? tagText(ch.nsfwBody) : ''].filter(Boolean).join(', ');
+    const act = String(e.act || '').trim(), fit = tagText(out?.tags);
+    // 分角色时：外貌 → 这个人的动作 → 衣服，动作别被一长串衣服挤到最后
+    return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', look, act, fit, tags: [look, act, fit].filter(Boolean).join(', '), x: CAST_X[e.pos] ?? 0.5 };
+}`);
+patch(`    if (picks.length === 1 || !canSplit()) {
+        const lead = picks.length === 1 ? 'solo' : (hasCount ? '' : countTags(chars));
+        return { ...E.composeStudio({ pos: M.mergeTags(pos, lead, ...picks.map(p => p.tags)), neg: negAll, scene }), chars: [], picks };
+    }`,`    if (picks.length === 1 || !canSplit({ chat: false })) {
+        const lead = picks.length === 1 ? 'solo' : (hasCount ? '' : countTags(chars));
+        // 固定提示词（动作、镜头）放在外貌后面、衣服前面：NovelAI 越靠前越听话，原来排在一长串衣服后面容易被忽略
+        return { ...E.composeStudio({ pos: M.mergeTags(pos, lead, ...picks.map(p => [p.look, p.act].filter(Boolean).join(', ')), scene, ...picks.map(p => p.fit)), neg: negAll, scene: '' }), chars: [], picks };
+    }`);
+patch(`    const n = list.length, split = C.canSplit();`,`    const n = list.length, split = C.canSplit({ chat: false });`);
+patch(`          <div class="pc-casttags mono">\${look ? esc(look) : '这个角色还没写外貌：去「角色」页写一下，或者在提示词里自己写'}</div>`,`          <div class="pc-casttags mono">\${look ? esc(look) : '这个角色还没写外貌：去「角色」页写一下，或者在提示词里自己写'}</div>
+          \${n > 1 ? \`<input class="pc-castact mono" data-castact="\${k}" value="\${esc(e.act || '')}" placeholder="\${esc(c.name)}自己的动作、表情">\` : ''}`);
+patch(`      <div class="pc-castmode">\${mode}</div>\${rows}`,`      <div class="pc-castmode">\${mode}</div>\${n > 1 ? \`<div class="pc-dim small" style="margin-top:6px">\${split ? '两个人容易弄错谁在做什么：' : ''}每个人的动作、表情写在他自己那一栏，固定提示词里只放镜头、场景这类大家共用的。两人之间的动作用 NovelAI 的互动写法：做的人写 <span class="mono">source#hug</span>，被做的人写 <span class="mono">target#hug</span>，一起做写 <span class="mono">mutual#hug</span>。</div>\` : ''}\${rows}`);
+patch(`    if (el.dataset.wardimg !== undefined || el.dataset.outimg !== undefined) {`,`    if (el.dataset.castact) { const k = el.dataset.castact, v = el.value.trim(); setStudioCast(studioCast().map(e => e.key === k ? { ...e, act: v } : e)); updateStudioPreview?.(); return; }
+    if (el.dataset.wardimg !== undefined || el.dataset.outimg !== undefined) {`);
+patch(`.pc-i2i{display:flex;gap:10px;align-items:flex-start}`,`.pc-i2i{display:flex;gap:10px;align-items:flex-start}
+.pc-castact{width:100%;box-sizing:border-box;margin-top:6px;padding:7px 12px;border-radius:12px;border:1.5px dashed var(--pc-dash);background:transparent;color:var(--pc-ink);font-size:12px}`);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;

@@ -4432,7 +4432,7 @@ function countTags(chars) {
 const snap = v => { const g = [0.1, 0.3, 0.5, 0.7, 0.9]; v = Number(v); return Number.isFinite(v) ? g.reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a) : 0.5; };
 
 /** 能不能分角色（酒馆转发和 V3 不行） */
-function canSplit() {
+function canSplit({ chat = true } = {}) {
     const s = N.settings();
     return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3' && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');
 }
@@ -4753,7 +4753,10 @@ function studioCastPick(e, nsfw = false) {
     const ch = getChar(e.key);
     if (!ch) return null;
     const out = e.outfit === '' ? null : (ch.outfits.find(o => o.id === e.outfit) || currentOutfit(ch));
-    return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', tags: [tagText(ch.appearance), nsfw ? tagText(ch.nsfwBody) : '', tagText(out?.tags)].filter(Boolean).join(', '), x: CAST_X[e.pos] ?? 0.5 };
+    const look = [tagText(ch.appearance), nsfw ? tagText(ch.nsfwBody) : ''].filter(Boolean).join(', ');
+    const act = String(e.act || '').trim(), fit = tagText(out?.tags);
+    // 分角色时：外貌 → 这个人的动作 → 衣服，动作别被一长串衣服挤到最后
+    return { char: ch, pos: CAST_X[e.pos] ? e.pos : 'C', look, act, fit, tags: [look, act, fit].filter(Boolean).join(', '), x: CAST_X[e.pos] ?? 0.5 };
 }
 function studioCastPrompt({ pos = '', neg = '', scene = '' }, cast) {
     const nsfw = hasNsfwRating([pos, scene].filter(Boolean).join(', '));
@@ -4762,9 +4765,10 @@ function studioCastPrompt({ pos = '', neg = '', scene = '' }, cast) {
     const chars = picks.map(p => p.char);
     const hasCount = /\b(?:\d+(?:boys?|girls?|others?)|no humans)\b/i.test(pos);
     const negAll = [neg, ...chars.map(c => c.negative)].filter(Boolean).join(', ');
-    if (picks.length === 1 || !canSplit()) {
+    if (picks.length === 1 || !canSplit({ chat: false })) {
         const lead = picks.length === 1 ? 'solo' : (hasCount ? '' : countTags(chars));
-        return { ...E.composeStudio({ pos: M.mergeTags(pos, lead, ...picks.map(p => p.tags)), neg: negAll, scene }), chars: [], picks };
+        // 固定提示词（动作、镜头）放在外貌后面、衣服前面：NovelAI 越靠前越听话，原来排在一长串衣服后面容易被忽略
+        return { ...E.composeStudio({ pos: M.mergeTags(pos, lead, ...picks.map(p => [p.look, p.act].filter(Boolean).join(', ')), scene, ...picks.map(p => p.fit)), neg: negAll, scene: '' }), chars: [], picks };
     }
     const r = E.composeStudio({ pos: M.mergeTags(hasCount ? '' : countTags(chars), pos), neg, scene });
     return { ...r, chars: picks.map(p => ({ prompt: soloize(p.tags), uc: p.char.negative || '', center: { x: p.x, y: 0.5 } })), picks };
@@ -5520,7 +5524,7 @@ const CAST_CSS = `<style>
 function castFold() {
     const d = getData();
     const list = studioCast().map(e => ({ e, c: C.getChar(e.key) }));
-    const n = list.length, split = C.canSplit();
+    const n = list.length, split = C.canSplit({ chat: false });
     const mode = n === 0 ? '<b>不选人：</b>就按上面的提示词画，跟以前一样。'
         : n === 1 ? '<b>单人：</b>把这个人的外貌、衣服接在提示词后面（加 solo）。'
         : split ? `<b>${n} 人：</b>每个人的外貌单独发给 NAI（分角色），发色瞳色不会串到别人身上；人数词自动补上。`
@@ -5534,11 +5538,12 @@ function castFold() {
             ${n > 1 && split ? `<span class="pc-seg pc-castseg">${['L', 'C', 'R'].map(v => `<button class="${(e.pos || 'C') === v ? 'on' : ''}" data-act="castpos" data-key="${k}" data-v="${v}">${CAST_POS[v]}</button>`).join('')}</span>` : ''}
             <button class="pc-x" data-act="castrm" data-key="${k}" aria-label="不画${esc(c.name)}">×</button></div>
           <div class="pc-casttags mono">${look ? esc(look) : '这个角色还没写外貌：去「角色」页写一下，或者在提示词里自己写'}</div>
+          ${n > 1 ? `<input class="pc-castact mono" data-castact="${k}" value="${esc(e.act || '')}" placeholder="${esc(c.name)}自己的动作、表情">` : ''}
           ${c.outfits.length ? `<div class="pc-chips wrap">${c.outfits.map(o => `<button class="pc-pill tiny ${fitOn(o.id) ? 'on' : 'dashed'}" data-act="castfit" data-key="${k}" data-id="${esc(o.id)}">${esc(o.name)}</button>`).join('')}<button class="pc-pill tiny ${e.outfit === '' ? 'on' : 'dashed'}" data-act="castfit" data-key="${k}" data-id="">不穿固定衣服</button></div>` : ''}
           ${ref ? `<div class="pc-dim small" style="margin-top:6px">带上长相参考「${esc(ref.name)}」${N.charRefSupported() ? '' : '（现在的模型用不了，这次不带）'}</div>` : ''}</div>`;
     }).join('');
     return CAST_CSS + fold('cast', '入画角色', n ? list.map(x => x.c.name).join('、') : '不画指定的人', `
-      <div class="pc-castmode">${mode}</div>${rows}
+      <div class="pc-castmode">${mode}</div>${n > 1 ? `<div class="pc-dim small" style="margin-top:6px">${split ? '两个人容易弄错谁在做什么：' : ''}每个人的动作、表情写在他自己那一栏，固定提示词里只放镜头、场景这类大家共用的。两人之间的动作用 NovelAI 的互动写法：做的人写 <span class="mono">source#hug</span>，被做的人写 <span class="mono">target#hug</span>，一起做写 <span class="mono">mutual#hug</span>。</div>` : ''}${rows}
       <button class="pc-castadd" data-act="castopen">＋ 从角色库里选人</button>
       <label class="pc-switch"><input type="checkbox" data-cast-memo ${castMemoOn() ? 'checked' : ''}><span></span>记住这次聊天选的人<small>下次打开同一个聊天，自动选好</small></label>`);
 }
@@ -5635,6 +5640,7 @@ function sceneLibrary() {
 .pc-scenetags{display:flex;flex-wrap:wrap;gap:4px;margin:3px 0 2px}
 .pc-scenetags i{font-style:normal;font-size:11px;padding:1px 8px;border-radius:99px;border:1px solid var(--pc-dash);color:var(--pc-ink-soft)}
 .pc-i2i{display:flex;gap:10px;align-items:flex-start}
+.pc-castact{width:100%;box-sizing:border-box;margin-top:6px;padding:7px 12px;border-radius:12px;border:1.5px dashed var(--pc-dash);background:transparent;color:var(--pc-ink);font-size:12px}
 .pc-i2i img{width:84px;max-height:120px;object-fit:cover;border-radius:12px;cursor:zoom-in}
 .pc-i2i input[type=range]{width:100%}
 </style>
@@ -8912,6 +8918,7 @@ async function onChangeEv(ev) {
         render(); return;
     }
     if (el.dataset.i2i) { const g = (ui.studio.i2i ||= {}); g[el.dataset.i2i] = Number(el.value); render(); return; }
+    if (el.dataset.castact) { const k = el.dataset.castact, v = el.value.trim(); setStudioCast(studioCast().map(e => e.key === k ? { ...e, act: v } : e)); updateStudioPreview?.(); return; }
     if (el.dataset.wardimg !== undefined || el.dataset.outimg !== undefined) {
         const f = el.files[0];
         el.value = '';
