@@ -1,3 +1,4 @@
+import {applyAiBudgetCompatibility} from './ai-budget-compat.mjs';
 import {applyBatchScenesCompatibility} from './batch-scenes-compat.mjs';
 import {applyWardrobeCanonCompatibility} from './wardrobe-canon-compat.mjs';
 import {applyImg2imgCompatibility} from './img2img-compat.mjs';
@@ -3161,6 +3162,7 @@ async function askRoomy(sys, user, opts) {
 s=applyImg2imgCompatibility(s);
 s=applyWardrobeCanonCompatibility(s);
 s=applyBatchScenesCompatibility(s);
+s=applyAiBudgetCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;

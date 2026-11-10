@@ -3854,13 +3854,27 @@ async function readBody(res) {
 }
 /** 带思考的模型会先把限长用在思考上：一开始就给够 8000（只是上限，用不到不花），不再空了重试——重试等于再思考一次，白费额度 */
 const LLM_MIN_TOKENS = 8000;
-const TOO_BIG_TOKENS = /max_tokens|max tokens|max_completion|maximum.{0,20}tokens|tokens.{0,20}(?:exceed|limit|too large)/i;
+// Only an explicit validation rejection can be safely retried with a smaller budget.
+function aiRequestError(message, status, detail) {
+    return Object.assign(new Error(message), { status: Number(status), providerMessage: String(detail || message) });
+}
+function tokenBudgetRejected(e) {
+    if (e?.emptyLength || ![400, 422].includes(e?.status)) return false;
+    const text = String(e.providerMessage || e.message || '');
+    return /max[_ ](?:completion[_ ])?tokens|maximum output|output[_ ]token/i.test(text)
+        && /exceed|too (?:large|high|many)|at most|less than|cannot be greater|must be.{0,40}(?:<=|≤|between)|maximum.{0,20}(?:is|allowed|supported)/i.test(text)
+        && !/context|unsupported|not supported|unknown parameter/i.test(text);
+}
+function inputContextRejected(e) {
+    return !e?.emptyLength && [400, 413, 422].includes(e?.status)
+        && /context.{0,80}(?:length|window|limit)|(?:input|prompt|messages?).{0,80}(?:too long|too large|exceed)|(?:exceed|longer than).{0,80}context/i.test(String(e.providerMessage || e.message || ''));
+}
 async function askLLM(system, user, opts = {}) {
     const want = Math.max(LLM_MIN_TOKENS, opts.maxTokens || 800);
     try { return await askLLMOnce(system, user, { ...opts, maxTokens: want }); }
     catch (e) {
-        // 模型不收这么大的长度（请求直接被拒，没花额度）：按原来的长度发
-        if (want > (opts.maxTokens || 800) && !e.emptyLength && TOO_BIG_TOKENS.test(String(e?.message))) return askLLMOnce(system, user, opts);
+        // 接口明确拒绝输出长度时，按原来的长度重发一次
+        if (want > (opts.maxTokens || 800) && tokenBudgetRejected(e)) return askLLMOnce(system, user, opts);
         if (e.emptyLength) throw Object.assign(new Error(`AI 回复是空的（${e.diag || '没有更多信息'}）。带思考的模型会先把长度用在思考上：换不带思考的模型，或者在 AI 设置里把思考关掉`), { emptyLength: true, diag: e.diag });
         throw e;
     }
@@ -3899,7 +3913,7 @@ async function askLLMOnce(system, user, { maxTokens = 800, fn = '' } = {}) {
         });
     }
     const raw = await readBody(res);
-    if (!res.ok) throw new Error(`AI 请求失败（${res.status}）：${raw.slice(0, 160)}`);
+    if (!res.ok) throw aiRequestError(`AI 请求失败（${res.status}）：${raw.slice(0, 160)}`, res.status, raw);
     let json;
     try { json = JSON.parse(raw); } catch { throw new Error(/^\s*<(?:!doctype|html)/i.test(raw) ? 'AI 请求拿回来的是一张网页，不是 AI 的回复：多半是请求没到后端（客户端或别的插件拦了），或者 AI 地址填成了网页地址（OpenAI 兼容的地址一般以 /v1 结尾）' : 'AI 返回的不是正常格式：' + raw.slice(0, 120)); }
     if (json.error) throw new Error('AI 报错：' + (json.error.message || JSON.stringify(json.error)).slice(0, 160));
@@ -3973,7 +3987,6 @@ NSFW 身体单独放进 nsfw：只给明确是成年人的角色写（未成年�
 /** 设定很长时：先发 6 万字；模型说太长（上下文不够、请求太大、超时）就缩到 3 万、1.5 万再试。设定是按描述在前、世界书在后排的，缩的时候先丢后面的 */
 /** 去掉思考部分后还有没有内容；思考没写完（只有 <think> 没有 </think>）也算空 */
 const answerOf = raw => String(raw || '').replace(/<think>[\s\S]*?<\/think>/g, '').replace(/^\s*<think>[\s\S]*$/, '').trim();
-/** 回复是空的就给大很多的长度再试一次（思考模型要先思考，2000 不够用） */
 /** 只问一次：askLLM 已经给够长度，空了就照实报，不再重试 */
 async function askRoomy(sys, user, opts) {
     const raw = await askLLM(sys, user, opts);
@@ -3981,14 +3994,13 @@ async function askRoomy(sys, user, opts) {
     throw new Error('AI 回复只有思考、没有正文。换不带思考的模型，或者在 AI 设置里把思考关掉');
 }
 async function askShrinking(sys, userFor, opts) {
-    const TOO_LONG = /context|length|too long|too large|token|maximum|exceed|413|504|524|timeout|超出|过长|太长|上限/i;
     let last;
     for (const limit of [60000, 30000, 15000]) {
         let raw;
         try { raw = await askRoomy(sys, userFor(limit), opts); }
         catch (e) {
             last = e;
-            if (!TOO_LONG.test(String(e?.message || e))) throw e;
+            if (!inputContextRejected(e)) throw e;
             console.warn(`[智库] 设定 ${limit} 字太长，缩短再试`, e);
             continue;
         }
@@ -4134,7 +4146,7 @@ ${PAIRS}
 async function askVision(system, text, imageDataUrl, opts = {}) {
     const want = Math.max(LLM_MIN_TOKENS, opts.maxTokens || 800);
     try { return await askVisionOnce(system, text, imageDataUrl, { ...opts, maxTokens: want }); }
-    catch (e) { if (want > (opts.maxTokens || 800) && TOO_BIG_TOKENS.test(String(e?.message))) return askVisionOnce(system, text, imageDataUrl, opts); throw e; }
+    catch (e) { if (want > (opts.maxTokens || 800) && tokenBudgetRejected(e)) return askVisionOnce(system, text, imageDataUrl, opts); throw e; }
 }
 async function askVisionOnce(system, text, imageDataUrl, { maxTokens = 800, fn = '' } = {}) {
     const api = apiFor(fn);
@@ -4171,7 +4183,7 @@ async function askVisionOnce(system, text, imageDataUrl, { maxTokens = 800, fn =
 }
 async function readChat(r) {
     const raw = await readBody(r);
-    if (!r.ok) throw new Error(`AI 请求失败（${r.status}）：${raw.slice(0, 160)}。如果这个模型不能看图，到设置 → 翻译和 AI 换一个`);
+    if (!r.ok) throw aiRequestError(`AI 请求失败（${r.status}）：${raw.slice(0, 160)}。如果这个模型不能看图，到设置 → 翻译和 AI 换一个`, r.status, raw);
     let json;
     try { json = JSON.parse(raw); } catch { throw new Error(/^\s*<(?:!doctype|html)/i.test(raw) ? 'AI 请求拿回来的是一张网页，不是 AI 的回复：多半是请求没到后端（客户端或别的插件拦了），或者 AI 地址填成了网页地址（OpenAI 兼容的地址一般以 /v1 结尾）' : 'AI 返回的不是正常格式：' + raw.slice(0, 120)); }
     if (json.error) throw new Error('AI 报错：' + (json.error.message || JSON.stringify(json.error)).slice(0, 160) + '。可能这个模型不能看图');
