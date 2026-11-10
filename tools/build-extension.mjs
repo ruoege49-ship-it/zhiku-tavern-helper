@@ -3159,6 +3159,41 @@ async function askRoomy(sys, user, opts) {
     if (answerOf(raw) || String(raw || '').includes('{')) return raw;
     throw new Error('AI 回复只有思考、没有正文。换不带思考的模型，或者在 AI 设置里把思考关掉');
 }`);
+// 0.8.36：回复长度上限可以自己填，默认 16000
+patch(`const LLM_MIN_TOKENS = 8000;
+const TOO_BIG_TOKENS = /max_tokens|max tokens|max_completion|maximum.{0,20}tokens|tokens.{0,20}(?:exceed|limit|too large)/i;
+async function askLLM(system, user, opts = {}) {
+    const want = Math.max(LLM_MIN_TOKENS, opts.maxTokens || 800);
+    try { return await askLLMOnce(system, user, { ...opts, maxTokens: want }); }
+    catch (e) {
+        // 模型不收这么大的长度（请求直接被拒，没花额度）：按原来的长度发
+        if (want > (opts.maxTokens || 800) && !e.emptyLength && TOO_BIG_TOKENS.test(String(e?.message))) return askLLMOnce(system, user, opts);`,`const LLM_DEFAULT_TOKENS = 16000;
+const TOO_BIG_TOKENS = /max_tokens|max tokens|max_completion|maximum.{0,20}tokens|tokens.{0,20}(?:exceed|limit|too large)/i;
+/** 回复长度上限：设置里自己填了就用它，没填默认 16000（只是上限，用不到不花） */
+const userMaxTokens = () => { const n = Math.round(Number(getData().options.aiMaxTokens)); return n >= 256 ? Math.min(n, 200000) : 0; };
+const wantTokens = opts => userMaxTokens() || Math.max(LLM_DEFAULT_TOKENS, opts.maxTokens || 800);
+/** 模型不收这么大的长度（请求直接被拒，没花额度）：依次降到 8000、4000 再试；自己填了长度就不动 */
+async function withTokenFallback(once, opts) {
+    const want = wantTokens(opts), steps = userMaxTokens() ? [want] : [want, 8000, 4000].filter((n, i, a) => n <= want && a.indexOf(n) === i);
+    let last;
+    for (const n of steps) {
+        try { return await once({ ...opts, maxTokens: n }); }
+        catch (e) { last = e; if (e.emptyLength || !TOO_BIG_TOKENS.test(String(e?.message))) throw e; console.warn('[智库] 模型不收', n, '的长度，降一点再试'); }
+    }
+    throw Object.assign(new Error(String(last?.message || last) + '。到设置 → 翻译和 AI 把「回复长度上限」改小一点'), { diag: last?.diag });
+}
+async function askLLM(system, user, opts = {}) {
+    try { return await withTokenFallback(o => askLLMOnce(system, user, o), opts); }
+    catch (e) {`);
+patch(`    const want = Math.max(LLM_MIN_TOKENS, opts.maxTokens || 800);
+    try { return await askVisionOnce(system, text, imageDataUrl, { ...opts, maxTokens: want }); }
+    catch (e) { if (want > (opts.maxTokens || 800) && TOO_BIG_TOKENS.test(String(e?.message))) return askVisionOnce(system, text, imageDataUrl, opts); throw e; }`,`    return withTokenFallback(o => askVisionOnce(system, text, imageDataUrl, o), opts);`);
+patch(`带思考的模型会先把长度用在思考上：换不带思考的模型，或者在 AI 设置里把思考关掉\`), { emptyLength: true, diag: e.diag });`,`带思考的模型会先把长度用在思考上：到设置 → 翻译和 AI 把「回复长度上限」调大，或者换不带思考的模型\`), { emptyLength: true, diag: e.diag });`);
+patch(`      <div class="pc-dim small">翻译、补全细节、读角色外貌、聊天生图都用这个。点一下就切换，可以存好几个。</div>
+      \${apiChips()}`,`      <div class="pc-dim small">翻译、补全细节、读角色外貌、聊天生图都用这个。点一下就切换，可以存好几个。</div>
+      \${apiChips()}
+      <label class="pc-field"><span>回复长度上限（token，所有 AI 功能共用）</span><input type="number" min="256" step="1000" inputmode="numeric" data-optstr="aiMaxTokens" value="\${esc(String(d.options.aiMaxTokens || ''))}" placeholder="不填 = 16000"></label>
+      <div class="pc-hint">只是上限，用多少算多少，填大不会多花。带思考的模型（deepseek 思考、gemini 思考这类）思考也算在里面，回复空了、读卡读不全（人多时名字和外貌缺一截）就调大。模型不收这么大时会报错，再改小。</div>`);
 s=applyImg2imgCompatibility(s);
 s=applyWardrobeCanonCompatibility(s);
 s=applyBatchScenesCompatibility(s);
