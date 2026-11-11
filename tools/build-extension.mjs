@@ -3357,6 +3357,135 @@ patch(`    const metaBox = box.querySelector('[data-share-meta]');`,`    const m
         if (roll === 'note') { const n = form.elements.namedItem('note'); n.value = (n.value.trim() ? n.value.replace(/\\s*$/, '\\n') : '') + \`\${pickOne(NOTE_A)}，\${pickOne(NOTE_B)}。\`; return; }
         if (tpl) { const n = form.elements.namedItem('note'); if (!n.value.includes(TPL[tpl].split('：')[0] + '：')) n.value = (n.value.trim() ? n.value.replace(/\\s*$/, '\\n') : '') + TPL[tpl]; n.focus(); return; }
     });`);
+// 0.8.36：OpenAI 兼容生图通道；漫画正文没有分镜时自动改编
+patch(`        const blocks = comicBlocks(srcOf(msg));
+        if (!blocks.length) return;
+        render(id);`,`        const blocks = comicBlocks(srcOf(msg));
+        if (!blocks.length) {
+            // 正文没有分镜：自动让 AI 改编（只管最新一楼，每楼只试一次，免得翻旧聊天时一楼楼改）
+            const k = \`\${id}:\${msg.send_date || ''}:\${msg.swipe_id ?? 0}\`;
+            if (!manual && opts().comicAutoAdapt !== false && id === (getContext().chat?.length || 0) - 1 && !autoAdapted.has(k) && String(msg.mes || '').trim().length > 40) {
+                autoAdapted.add(k);
+                try { await adapt(id); } catch (e) { console.warn('[智库] 漫画自动改编', e); }
+            }
+            return;
+        }
+        render(id);`);
+patch(`    async function process(id, { manual = false } = {}) {`,`    const autoAdapted = new Set();
+    async function process(id, { manual = false } = {}) {`);
+patch(`              \${sw('comicAuto', '回复写完自动出图', '关掉的话，在楼层里点「生成这一页」再画', true)}`,`              \${sw('comicAuto', '回复写完自动出图', '关掉的话，在楼层里点「生成这一页」再画', true)}
+              \${sw('comicAutoAdapt', '正文没有分镜时自动改编', '回复里没有 &lt;image&gt;@page 分镜块时，自动让 AI 把正文改成分镜再画（每楼多一次 AI 调用）；关掉就要在楼层里点「画成漫画」', true)}`);
+patch(`function isReady() {
+    const s = settings();
+    if (s.naiMode === 'tavern') return true;`,`function isReady() {
+    const s = settings();
+    if (s.naiMode === 'tavern') return true;
+    if (s.naiMode === 'gpt') return !!String(s.gptUrl || '').trim();`);
+patch(`    if (opts.backend === 'comfy') return comfyGenerate(opts, s);
+    if (!opts.comic && s.naiMode === 'site' && String(s.naiSiteSimple) === 'true') {`,`    if (opts.backend === 'comfy') return comfyGenerate(opts, s);
+    if (s.naiMode === 'gpt') return gptGenerate(opts, s);
+    if (!opts.comic && s.naiMode === 'site' && String(s.naiSiteSimple) === 'true') {`);
+patch(`async function comfyGenerate(opts, s) {`,`/** ── OpenAI 兼容生图（/images/generations、/images/edits）：没有 NovelAI 的人也能出图 ── */
+const GPT_DROP = /^(?:masterpiece|best quality|very aesthetic|aesthetic|absurdres|incredibly absurdres|highres|high resolution|ultra-detailed|amazing quality|great quality|good quality|normal quality|newest|very awa|official art|no text|lowres|screentone|halftone|year \\d{4}|rating:\\s*\\w+|location|-?\\d+(?:\\.\\d+)?)$/i;
+function gptClean(text) {
+    const t = String(text || '').replace(/-?\\d+(?:\\.\\d+)?::([\\s\\S]*?)::/g, '$1').replace(/[{}\\[\\]]/g, '').replace(/\\|/g, ',');
+    return t.split(/\\s*,\\s*/).map(x => x.trim()).filter(x => x && !/^artist:/i.test(x) && !GPT_DROP.test(x)).join(', ');
+}
+const gptBase = s => String(s.gptUrl || '').trim().replace(/\\/+$/, '').replace(/\\/images\\/(?:generations|edits)$/, '');
+function gptSize(s, w, h) {
+    const v = String(s.gptSize || 'ratio').trim();
+    if (v === 'ratio') return w > h * 1.15 ? '1536x1024' : h > w * 1.15 ? '1024x1536' : '1024x1024';
+    return v || 'auto';
+}
+function b64ToBlob(b64, type = 'image/png') {
+    const bin = atob(String(b64).replace(/^data:[^,]+,/, '')), u = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    return new Blob([u], { type });
+}
+const b64Mime = b => /^\\/9j\\//.test(b) ? 'jpeg' : /^UklGR/.test(b) ? 'webp' : /^R0lGOD/.test(b) ? 'gif' : 'png';
+async function gptPrompt(opts, s) {
+    const where = c => { const x = Number(c.center?.x ?? 0.5); return x < 0.4 ? ' (on the left)' : x > 0.6 ? ' (on the right)' : ''; };
+    const cs = (opts.chars || []).filter(c => c.prompt);
+    const tags = [gptClean(opts.positive) && \`Scene: \${gptClean(opts.positive)}\`, ...cs.map((c, i) => \`Character \${i + 1}\${cs.length > 1 ? where(c) : ''}: \${gptClean(c.prompt)}\`)].filter(Boolean).join('\\n');
+    const style = String(s.gptStyle ?? 'anime illustration').trim();
+    let body = tags;
+    if (String(s.gptRewrite) === 'true' && typeof __mod_translate !== 'undefined') {
+        try {
+            const r = await __mod_translate.askLLM(\`You turn Danbooru-style tags (a scene line plus one line per character) into one clear English prompt for an image model. Keep every concrete detail: how many people, each person's looks, clothes, pose, expression, camera angle and framing, background, lighting, panel layout and any dialogue text in quotes. Keep each character's details attached to that character. Do not invent anything. Write plain prose, no lists, no tags. Output only the prompt.\`, tags, { fn: 'translate' });
+            const out = String(r || '').replace(/<think[\\s\\S]*?<\\/think>/gi, '').trim();
+            if (out) body = out;
+        } catch (e) { console.warn('[智库] 改写成英文描述失败，照标签发', e); }
+    }
+    return [style && \`\${style}.\`, opts.comic ? 'A manga page with several panels.' : '', body].filter(Boolean).join(' ');
+}
+async function gptGenerate(opts, s) {
+    const base = gptBase(s);
+    if (!base) throw new Error('还没填 OpenAI 兼容生图的地址，到智库「设置 → NovelAI」选「OpenAI 兼容」填');
+    const model = String(s.gptModel || '').trim() || 'gpt-image-1';
+    const w = Number(opts.width || s.novelai_width) || 832, h = Number(opts.height || s.novelai_height) || 1216;
+    const size = gptSize(s, w, h), prompt = await gptPrompt(opts, s);
+    const headers = String(s.gptKey || '').trim() ? { Authorization: \`Bearer \${String(s.gptKey).trim()}\` } : {};
+    const refs = String(s.gptRefs) === 'false' ? [] : [opts.i2i?.image, ...(opts.director || []).map(d => d.data)].filter(Boolean).slice(0, 4);
+    const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 180000);
+    let res;
+    try {
+        if (refs.length) {
+            const fd = new FormData();
+            fd.append('model', model); fd.append('prompt', prompt); fd.append('size', size); fd.append('n', '1');
+            refs.forEach((b, i) => fd.append(refs.length > 1 ? 'image[]' : 'image', b64ToBlob(b, \`image/\${b64Mime(b)}\`), \`ref\${i}.\${b64Mime(b) === 'jpeg' ? 'jpg' : b64Mime(b)}\`));
+            res = await fetch(\`\${base}/images/edits\`, { method: 'POST', headers, body: fd, signal: ctrl.signal });
+        } else {
+            res = await fetch(\`\${base}/images/generations\`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, size, n: 1, ...(/^dall-e/i.test(model) ? { response_format: 'b64_json' } : {}) }), signal: ctrl.signal });
+        }
+    } catch (e) {
+        throw new Error(e?.name === 'AbortError' ? '等了 3 分钟还没出图，站点可能太忙，等一下再试' : \`连不上生图站点：\${e?.message || e}（地址不对，或者站点不允许网页直接访问）\`);
+    } finally { clearTimeout(timer); }
+    const raw = await res.text();
+    let j = null; try { j = JSON.parse(raw); } catch {}
+    if (!res.ok) throw new Error(\`生图站点返回 \${res.status}：\${j?.error?.message || j?.message || raw.slice(0, 200)}\`);
+    const d0 = j?.data?.[0];
+    let image = '';
+    if (d0?.b64_json) image = \`data:image/\${b64Mime(d0.b64_json)};base64,\${d0.b64_json}\`;
+    else if (d0?.url) {
+        try { const b = await (await fetch(d0.url)).blob(); image = await new Promise((ok, no) => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.onerror = no; fr.readAsDataURL(b); }); }
+        catch { image = d0.url; }
+    }
+    if (!image) throw new Error('生图站点没有返回图片：' + raw.slice(0, 200));
+    const sent = { prompt, negative: '', size: \`\${size}（要的是 \${w}×\${h}）\`, chars: [], seed: 0, model: 'OpenAI 兼容 · ' + model, director: refs.length };
+    return { image, sent };
+}
+async function comfyGenerate(opts, s) {`);
+patch(`function vibeSupported() {
+    const s = settings();
+    return s.naiMode !== 'tavern' && `,`function vibeSupported() {
+    const s = settings();
+    return s.naiMode !== 'tavern' && s.naiMode !== 'gpt' && `);
+patch(`    const s = settings();
+    try {
+        if (s.naiMode === 'tavern') {`,`    const s = settings();
+    try {
+        if (s.naiMode === 'gpt') {
+            const base = gptBase(s);
+            if (!base) return { ok: false, text: '还没填地址' };
+            const r = await fetch(\`\${base}/models\`, { headers: String(s.gptKey || '').trim() ? { Authorization: \`Bearer \${String(s.gptKey).trim()}\` } : {} });
+            if (!r.ok) return { ok: false, text: \`站点返回 \${r.status}\` };
+            const ids = ((await r.json().catch(() => ({})))?.data || []).map(m => m.id).filter(Boolean);
+            const img = ids.filter(x => /image|dall|flux|sd|draw|midj|kolors|seedream|imagen/i.test(x));
+            return { ok: true, warn: !img.length, text: img.length ? \`连上了，能生图的模型：\${img.slice(0, 6).join('、')}\` : \`连上了（\${ids.length} 个模型），但没看出哪个能生图，自己填模型名\` };
+        }
+        if (s.naiMode === 'tavern') {`);
+patch(`        if (!opts.noVibe && opts.director === undefined) opts.director = await charRefs();`,`        if (N.settings().naiMode === 'gpt' && opts.backend !== 'comfy') opts.refs = null;
+        if (!opts.noVibe && opts.director === undefined) opts.director = await charRefs();`);
+patch(`      <div class="pc-seg three">\${modeBtn('key', '填我的 key')}\${modeBtn('tavern', '用酒馆里的')}\${modeBtn('site', '第三方站点')}</div>`,`      <div class="pc-seg four" style="grid-template-columns:repeat(2,minmax(0,1fr));border-radius:22px;margin-top:6px">\${modeBtn('key', '填我的 key')}\${modeBtn('tavern', '用酒馆里的')}\${modeBtn('site', '第三方站点')}\${modeBtn('gpt', 'OpenAI 兼容')}</div>
+      \${n.naiMode === 'gpt' ? \`
+      <div class="pc-hint">没有 NovelAI 也能出图：走 OpenAI 格式的生图接口（gpt-image、dall-e，或者中转 / 公益站给的生图模型）。生图页、聊天生图、漫画都会走这里。标签会去掉质量词、画师名和权重，分角色合成一段发；不支持氛围、局部重绘，角色参考图只当参考，脸锁不住。</div>
+      <label class="pc-field"><span>地址（要带 /v1 这类后缀）</span><input data-st="gptUrl" value="\${esc(n.gptUrl || '')}" placeholder="https://api.xxx.com/v1"></label>
+      <label class="pc-field"><span>Key</span><input data-st="gptKey" type="password" value="\${esc(n.gptKey || '')}" autocomplete="off"></label>
+      <label class="pc-field"><span>模型</span><input data-st="gptModel" value="\${esc(n.gptModel || '')}" placeholder="gpt-image-1"></label>
+      <label class="pc-field"><span>尺寸</span><select data-st="gptSize">\${[['ratio', '按现在的宽高比自动选（1024×1536 / 1536×1024 / 1024×1024）'], ['auto', '让模型自己定（auto）'], ['1024x1024', '1024×1024'], ['1024x1536', '1024×1536'], ['1536x1024', '1536×1024'], ['1024x1792', '1024×1792（dall-e-3）'], ['1792x1024', '1792×1024（dall-e-3）']].map(([v, t]) => \`<option value="\${v}" \${String(n.gptSize || 'ratio') === v ? 'selected' : ''}>\${t}</option>\`).join('')}</select></label>
+      <label class="pc-field"><span>画风开头（加在提示词最前面）</span><input data-st="gptStyle" value="\${esc(n.gptStyle ?? 'anime illustration')}" placeholder="anime illustration"></label>
+      <label class="pc-switch"><input type="checkbox" data-st-check="gptRewrite" \${String(n.gptRewrite) === 'true' ? 'checked' : ''}><span></span>先让 AI 把标签改写成一段英文描述<small>这类模型看整句英文比看标签准、纹理也少（每张图多一次 AI 调用，用「翻译和 AI」里的接口）</small></label>
+      <label class="pc-switch"><input type="checkbox" data-st-check="gptRefs" \${String(n.gptRefs) !== 'false' ? 'checked' : ''}><span></span>有角色参考图 / 垫图时一起发<small>走 /images/edits；站点不支持就关掉</small></label>\` : ''}`);
 s=applyImg2imgCompatibility(s);
 s=applyWardrobeCanonCompatibility(s);
 s=applyBatchScenesCompatibility(s);
