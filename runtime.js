@@ -2464,7 +2464,7 @@ async function call(path, { method = 'GET', body } = {}) {
     });
     let json = null;
     try { json = await res.json(); } catch { /* 空响应 */ }
-    if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`);
+    if (!res.ok) throw Object.assign(new Error(json?.error?.message || json?.error || `HTTP ${res.status}`), { status: res.status });
     return json;
 }
 
@@ -8061,14 +8061,14 @@ function lobbyGridCard(p) {
 /** 点卡片：看全部例图、画师串，保存 / 点赞 / 举报 */
 /** 编辑记录：最新的在上面；只列这次改了的东西 */
 function lobbyHistoryHtml(p) {
-    const h = Array.isArray(p.content?.history) ? p.content.history : [];
+    const h = Array.isArray(p.content?.history) ? p.content.history.filter(e => e && typeof e === 'object') : [];
     if (!h.length) return '';
     const edits = h.filter(e => !e.publish).length;
     const fmt = t => { const d = new Date(Number(t) || 0); return isNaN(d) ? '' : `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
     const rows = h.slice().reverse().map(e => {
-        const ch = (e.changed || []).join('、');
+        const ch = (Array.isArray(e.changed) ? e.changed : []).join('、');
         if (e.publish) return `<li><b>${esc(fmt(e.at))}</b> · 发布</li>`;
-        return `<li><b>${esc(fmt(e.at))}</b>${ch ? ` · 改了${esc(ch)}` : ''}${e.what && e.what !== `改了${ch}` ? `<br>${esc(e.what)}` : ''}${e.artistString && (e.changed || []).includes('画师串') ? `<br><span class="mono">原来：${esc(String(e.artistString).slice(0, 300))}</span>` : ''}${e.name && (e.changed || []).includes('名称') ? `<br>原来叫「${esc(e.name)}」` : ''}</li>`;
+        return `<li><b>${esc(fmt(e.at))}</b>${ch ? ` · 改了${esc(ch)}` : ''}${e.what && e.what !== `改了${ch}` ? `<br>${esc(e.what)}` : ''}${e.artistString && (Array.isArray(e.changed) ? e.changed : []).includes('画师串') ? `<br><span class="mono">原来：${esc(String(e.artistString).slice(0, 300))}</span>` : ''}${e.name && (Array.isArray(e.changed) ? e.changed : []).includes('名称') ? `<br>原来叫「${esc(e.name)}」` : ''}</li>`;
     }).join('');
     return `<details class="pc-details pc-mt-s" open><summary class="pc-dim small">编辑记录 · ${edits ? `改过 ${edits} 次` : '还没改过'}</summary><ol class="pc-dim small" style="padding-left:1.2em;margin:6px 0;line-height:1.6">${rows}</ol></details>`;
 }
@@ -8108,7 +8108,14 @@ function editLobbyPost(p) {
         });
     });
 }
+const lobbyEditing = new Set();
 async function saveLobbyEdit(p, f) {
+    if (!p.mine) throw new Error('只能修改自己的分享');
+    if (lobbyEditing.has(p.id)) return null;
+    lobbyEditing.add(p.id);
+    try { return await saveLobbyEditRequest(p, f); } finally { lobbyEditing.delete(p.id); }
+}
+async function saveLobbyEditRequest(p, f) {
     const changed = [];
     if (f.name !== p.name) changed.push('名称');
     if (f.note !== (p.note || '')) changed.push('说明');
@@ -8117,23 +8124,24 @@ async function saveLobbyEdit(p, f) {
     if ([...f.tags].sort().join() !== [...(p.tags || [])].sort().join()) changed.push('标签');
     if (!changed.length && !f.what) { toastr.info('什么都没改', '共享'); return null; }
     const entry = { at: Date.now(), changed, what: f.what || `改了${changed.join('、') || '内容'}`, name: p.name, note: p.note || '', artistString: p.content?.artistString || '', negative: p.content?.negative || '', tags: p.tags || [] };
-    const content = { ...(p.content || {}), ...(f.artistString !== undefined ? { artistString: f.artistString } : {}), ...(f.negative !== undefined ? (f.negative ? { negative: f.negative } : { negative: undefined }) : {}), history: [...(Array.isArray(p.content?.history) ? p.content.history : []), entry].slice(-30), editedAt: entry.at };
+    const content = { ...(p.content || {}), ...(f.artistString !== undefined ? { artistString: f.artistString, members: M.parseArtistString(f.artistString).members } : {}), ...(f.negative !== undefined ? (f.negative ? { negative: f.negative } : { negative: undefined }) : {}), history: [...(Array.isArray(p.content?.history) && p.content.history.length ? p.content.history : [{ at: p.createdAt, publish: true, what: '发布' }]), entry].slice(-30), editedAt: entry.at };
     if (content.negative === undefined) delete content.negative;
-    const body = { name: f.name, note: f.note, tags: f.tags, content };
+    const body = { name: f.name, note: f.note, tags: f.tags, content, expectedEditedAt: p.content?.editedAt || 0 };
     try {
-        await L.updatePost(p.id, body);
-        return { ...p, ...body };
+        const updated = await L.updatePost(p.id, body);
+        return { ...p, name: body.name, note: body.note, tags: body.tags, content, ...(updated?.id === p.id ? updated : {}) };
     } catch (e) {
         // 服务器还不支持直接改：重新上传一条，再删掉旧的（点赞和保存数会清零）
-        if (!/404|405|501|not found|method|cannot put/i.test(String(e?.message || e))) throw e;
+        if (![405, 501].includes(e?.status) && !(e?.status === 404 && /接口不存在|cannot put/i.test(String(e?.message || '')))) throw e;
         if (!(await confirmBox('共享服务器还不支持直接修改，要重新上传一条再删掉旧的吗？编辑记录会带过去，点赞和保存数会清零。'))) return null;
         const images = [];
         for (const img of p.images || []) {
-            try { images.push({ data: await shrinkDataUrl(await urlToDataUrl(L.lobbyImgUrl(img.url))), nsfw: !!img.nsfw }); } catch { /* 读不到的图跳过 */ }
+            images.push({ data: await shrinkDataUrl(await urlToDataUrl(L.lobbyImgUrl(img.url))), nsfw: !!img.nsfw });
         }
         const r = await L.createPost({ kind: p.kind, ...body, nsfw: postHasNsfw(p), images });
-        await L.deletePost(p.id);
-        return { reupload: true, id: r?.id };
+        if (!r?.id || r.id === p.id) throw new Error('服务器未返回新分享 ID，已保留旧分享，请刷新核对');
+        try { await L.deletePost(p.id); } catch { throw new Error('新分享已上传（' + r.id + '），旧分享未确认删除；请刷新核对，不要重复提交'); }
+        return { reupload: true, id: r.id };
     }
 }
 function openLobbySheet(p) {
@@ -10533,8 +10541,8 @@ function editAiEntry(e, { isNew = false } = {}) {
 /** 预设条目：按住 ⋮⋮ 拖动排序 */
 function startAiDrag(ev, handle) {
     const row = handle.closest('.pc-aient'), list = [...row.parentElement.querySelectorAll('.pc-aient')];
-    const from = list.indexOf(row);
-    if (from < 0) return;
+    const from = list.indexOf(row), cfg = T.aiCfg(), active = cfg.active, preset = cfg.list[active], entries = preset?.ents?.slice();
+    if (from < 0 || !entries || entries.length !== list.length) return;
     ev.preventDefault();
     handle.setPointerCapture?.(ev.pointerId);
     const y0 = ev.clientY, rects = list.map(r => r.getBoundingClientRect());
@@ -10553,11 +10561,11 @@ function startAiDrag(ev, handle) {
         }
         list.forEach((r, k) => { if (r === row) return; r.classList.toggle('shift-down', k >= to && k < from); r.classList.toggle('shift-up', k <= to && k > from); });
     };
-    const up = () => {
+    const up = ev => {
         handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); handle.removeEventListener('pointercancel', up);
         list.forEach(r => { r.classList.remove('shift-up', 'shift-down', 'dragging'); r.style.transform = ''; });
         const p = T.aiCfg().list[T.aiCfg().active];
-        if (p && to !== from) { const [it] = p.ents.splice(from, 1); p.ents.splice(to, 0, it); commit(); }
+        if (ev.type !== 'pointercancel' && T.aiCfg().active === active && p === preset && p.ents.length === entries.length && entries.every((e,i)=>p.ents[i]===e) && to !== from) { const [it] = p.ents.splice(from, 1); p.ents.splice(to, 0, it); commit(); }
         render();
     };
     handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', up); handle.addEventListener('pointercancel', up);
