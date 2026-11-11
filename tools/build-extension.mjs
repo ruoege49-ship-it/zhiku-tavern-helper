@@ -1,4 +1,5 @@
 import {applyAiBudgetCompatibility} from './ai-budget-compat.mjs';
+import {applyImageChannelCompatibility} from './image-channel-compat.mjs';
 import {applyBatchScenesCompatibility} from './batch-scenes-compat.mjs';
 import {applyWardrobeCanonCompatibility} from './wardrobe-canon-compat.mjs';
 import {applyImg2imgCompatibility} from './img2img-compat.mjs';
@@ -3159,10 +3160,380 @@ async function askRoomy(sys, user, opts) {
     if (answerOf(raw) || String(raw || '').includes('{')) return raw;
     throw new Error('AI 回复只有思考、没有正文。换不带思考的模型，或者在 AI 设置里把思考关掉');
 }`);
+// 0.8.36：回复长度上限可以自己填，默认 16000
+patch(`const LLM_MIN_TOKENS = 8000;
+const TOO_BIG_TOKENS = /max_tokens|max tokens|max_completion|maximum.{0,20}tokens|tokens.{0,20}(?:exceed|limit|too large)/i;
+async function askLLM(system, user, opts = {}) {
+    const want = Math.max(LLM_MIN_TOKENS, opts.maxTokens || 800);
+    try { return await askLLMOnce(system, user, { ...opts, maxTokens: want }); }
+    catch (e) {
+        // 模型不收这么大的长度（请求直接被拒，没花额度）：按原来的长度发
+        if (want > (opts.maxTokens || 800) && !e.emptyLength && TOO_BIG_TOKENS.test(String(e?.message))) return askLLMOnce(system, user, opts);`,`const LLM_DEFAULT_TOKENS = 16000;
+const TOO_BIG_TOKENS = /max_tokens|max tokens|max_completion|maximum.{0,20}tokens|tokens.{0,20}(?:exceed|limit|too large)/i;
+/** 回复长度上限：设置里自己填了就用它，没填默认 16000（只是上限，用不到不花） */
+const userMaxTokens = () => { const n = Math.round(Number(getData().options.aiMaxTokens)); return n >= 256 ? Math.min(n, 200000) : 0; };
+const wantTokens = opts => userMaxTokens() || Math.max(LLM_DEFAULT_TOKENS, opts.maxTokens || 800);
+/** 模型不收这么大的长度（请求直接被拒，没花额度）：依次降到 8000、4000 再试；自己填了长度就不动 */
+async function withTokenFallback(once, opts) {
+    const want = wantTokens(opts), steps = userMaxTokens() ? [want] : [want, 8000, 4000].filter((n, i, a) => n <= want && a.indexOf(n) === i);
+    let last;
+    for (const n of steps) {
+        try { return await once({ ...opts, maxTokens: n }); }
+        catch (e) { last = e; if (e.emptyLength || !TOO_BIG_TOKENS.test(String(e?.message))) throw e; console.warn('[智库] 模型不收', n, '的长度，降一点再试'); }
+    }
+    throw Object.assign(new Error(String(last?.message || last) + '。到设置 → 翻译和 AI 把「回复长度上限」改小一点'), { diag: last?.diag });
+}
+async function askLLM(system, user, opts = {}) {
+    try { return await withTokenFallback(o => askLLMOnce(system, user, o), opts); }
+    catch (e) {`);
+patch(`    const want = Math.max(LLM_MIN_TOKENS, opts.maxTokens || 800);
+    try { return await askVisionOnce(system, text, imageDataUrl, { ...opts, maxTokens: want }); }
+    catch (e) { if (want > (opts.maxTokens || 800) && TOO_BIG_TOKENS.test(String(e?.message))) return askVisionOnce(system, text, imageDataUrl, opts); throw e; }`,`    return withTokenFallback(o => askVisionOnce(system, text, imageDataUrl, o), opts);`);
+patch(`带思考的模型会先把长度用在思考上：换不带思考的模型，或者在 AI 设置里把思考关掉\`), { emptyLength: true, diag: e.diag });`,`带思考的模型会先把长度用在思考上：到设置 → 翻译和 AI 把「回复长度上限」调大，或者换不带思考的模型\`), { emptyLength: true, diag: e.diag });`);
+patch(`      <div class="pc-dim small">翻译、补全细节、读角色外貌、聊天生图都用这个。点一下就切换，可以存好几个。</div>
+      \${apiChips()}`,`      <div class="pc-dim small">翻译、补全细节、读角色外貌、聊天生图都用这个。点一下就切换，可以存好几个。</div>
+      \${apiChips()}
+      <label class="pc-field"><span>回复长度上限（token，所有 AI 功能共用）</span><input type="number" min="256" step="1000" inputmode="numeric" data-optstr="aiMaxTokens" value="\${esc(String(d.options.aiMaxTokens || ''))}" placeholder="不填 = 16000"></label>
+      <div class="pc-hint">只是上限，用多少算多少，填大不会多花。带思考的模型（deepseek 思考、gemini 思考这类）思考也算在里面，回复空了、读卡读不全（人多时名字和外貌缺一截）就调大。模型不收这么大时会报错，再改小。</div>`);
+// 0.8.36：共享里 NSFW 按男性的 / 女性的 / 全都看来筛，代替男性向女性向
+patch(`    ['画风', ['厚涂',`,`    ['画风·拿不准就不选', ['厚涂',`);
+patch(`    ['性向', ['男性向', '女性向', '全性向'], true],`,`    ['NSFW 图里是谁·有 NSFW 才选，都有就两个都选', ['男性NSFW', '女性NSFW'], false],`);
+patch(`const ORIENT = LOBBY_TAGS[0][1];`,`const NSFW_WHO = LOBBY_TAGS[0][1];
+/** 旧标签（性向）也照样隐藏，不在标签栏里出现 */
+const ORIENT = [...NSFW_WHO, '男性向', '女性向', '全性向'];
+const tagLabel = t => ({ '男性NSFW': '男性', '女性NSFW': '女性' })[t] || t;
+/** 这条分享的 NSFW 图里是谁：新标签直接看；旧的按性向、题材推 */
+function postWho(p) {
+    const t = new Set(p.tags || []), who = new Set();
+    if (t.has('男性NSFW')) who.add('male');
+    if (t.has('女性NSFW')) who.add('female');
+    if (!who.size) {
+        if (t.has('女性向') || t.has('BL')) who.add('male');
+        if (t.has('男性向') || t.has('GL')) who.add('female');
+        if (t.has('全性向') || t.has('BG') || t.has('GB')) { who.add('male'); who.add('female'); }
+    }
+    return who;
+}
+const postHasNsfw = p => !!(p.nsfw || (p.images || []).some(i => i.nsfw));
+/** 共享里看哪种 NSFW：sfw 不看 / male 男性的 / female 女性的 / all 全都看 */
+const lobbyNsfwMode = () => { const o = getData().options; return ['sfw', 'male', 'female', 'all'].includes(o.lobbyNsfwMode) ? o.lobbyNsfwMode : (o.lobbyShowNsfw ? 'all' : 'sfw'); };`);
+patch(`data-tagpick="\${esc(t)}">\${esc(t)}</button>\`).join('')}</div></div>\`).join('');`,`data-tagpick="\${esc(t)}">\${esc(tagLabel(t))}</button>\`).join('')}</div></div>\`).join('');`);
+patch(`                if (!tags.some(t => ORIENT.includes(t))) { box.querySelector('[data-tagerr]').textContent = '先选一个性向：男性向、女性向或全性向'; return; }
+`,``);
+patch(`        if (!tags.some(t => ORIENT.includes(t))) { say('先在标签里选一个性向：男性向、女性向或全性向。'); return; }`,`        if (nsfw && !tags.some(t => NSFW_WHO.includes(t))) { say('含 NSFW 的话，在标签里选一下 NSFW 图里是男性还是女性（都有就两个都选）。'); return; }`);
+patch(`            if (nsfw) d.options.lobbyShowNsfw = true;`,`            if (nsfw && lobbyNsfwMode() === 'sfw') { d.options.lobbyShowNsfw = true; d.options.lobbyNsfwMode = 'all'; }`);
+patch(`    const items = lb.items.filter(p => (p.mine || (!p.tags.some(t => blocked.has(t)) && !blk.users.includes(p.nickname) && !blk.posts.includes(p.id))) && (!lb.tag2 || p.tags.includes(lb.tag2)));`,`    const nm = lobbyNsfwMode();
+    // 只看男性 / 女性的 NSFW：带 NSFW 的分享只留对得上的；没有 NSFW 的照常显示
+    const whoOk = p => p.mine || nm === 'all' || nm === 'sfw' || !postHasNsfw(p) || postWho(p).has(nm);
+    const items = lb.items.filter(p => (p.mine || (!p.tags.some(t => blocked.has(t)) && !blk.users.includes(p.nickname) && !blk.posts.includes(p.id))) && (!lb.tag2 || p.tags.includes(lb.tag2)) && whoOk(p));`);
+patch(`      \${[...ORIENT, ...AUD].map(t => \`<button class="pc-pill \${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}">\${t}</button>\`).join('')}
+      <button class="pc-pill nsfw \${d.options.lobbyShowNsfw ? 'on' : 'dashed'}" data-act="nsfwtoggle" title="只管共享里别人的图，你自己的例图一直显示">NSFW \${d.options.lobbyShowNsfw ? '开' : '关'}</button>
+    </div>`,`      <span class="pc-dim small" style="align-self:center">NSFW</span>\${[['sfw', '不看'], ['male', '男性的'], ['female', '女性的'], ['all', '全都看']].map(([k, t]) => \`<button class="pc-pill \${k !== 'sfw' ? 'nsfw' : ''} \${nm === k ? 'on' : 'dashed'}" data-act="lobbynsfw" data-v="\${k}" title="只管共享里别人的图，你自己的例图一直显示">\${t}</button>\`).join('')}
+    </div>
+    <div class="pc-chips">\${AUD.map(t => \`<button class="pc-pill \${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}">\${t}</button>\`).join('')}</div>`);
+patch(`            case 'nsfwtoggle':`,`            case 'lobbynsfw': d.options.lobbyNsfwMode = el.dataset.v; d.options.lobbyShowNsfw = el.dataset.v !== 'sfw'; commit(); loadLobby(); break;
+            case 'nsfwtoggle':`);
+// 0.8.36：共享改成裸体分类、第一次进来先问、R18G 可屏蔽、封面剧透、名字可不填、画风只留经典的
+patch(`    ['NSFW 图里是谁·有 NSFW 才选，都有就两个都选', ['男性NSFW', '女性NSFW'], false],`,`    ['裸体·有才选，都有就两个都选', ['男性裸体', '女性裸体'], false],
+    ['重口·猎奇血腥才选', ['R18G'], false],`);
+patch(`    ['画风·拿不准就不选', ['厚涂', '半厚涂', '平涂', '赛璐璐', '水彩', '写实', '2.5D', '古风', '日系', '韩系', '欧美', '像素', 'Q版', '线稿', '暗黑', '清新', '柔和', '华丽'], false],`,`    ['画风', ['厚涂', '半厚涂', '平涂', '赛璐璐', '水彩', '写实', 'Q版'], false],`);
+patch(`const ORIENT = [...NSFW_WHO, '男性向', '女性向', '全性向'];
+const tagLabel = t => ({ '男性NSFW': '男性', '女性NSFW': '女性' })[t] || t;`,`const ORIENT = [...NSFW_WHO, 'R18G', '剧透'];
+const tagLabel = t => t;`);
+patch(`    if (t.has('男性NSFW')) who.add('male');
+    if (t.has('女性NSFW')) who.add('female');
+    if (!who.size) {
+        if (t.has('女性向') || t.has('BL')) who.add('male');
+        if (t.has('男性向') || t.has('GL')) who.add('female');
+        if (t.has('全性向') || t.has('BG') || t.has('GB')) { who.add('male'); who.add('female'); }
+    }
+    return who;`,`    if (t.has('男性裸体')) who.add('male');
+    if (t.has('女性裸体')) who.add('female');
+    return who;`);
+patch(`/** 共享里看哪种 NSFW：sfw 不看 / male 男性的 / female 女性的 / all 全都看 */`,`/** 共享里看哪种：sfw 不看裸体 / male 只有男性裸体 / female 只有女性裸体 / all 全都有 */`);
+patch(`    const whoOk = p => p.mine || nm === 'all' || nm === 'sfw' || !postHasNsfw(p) || postWho(p).has(nm);`,`    // 只有男性裸体 / 只有女性裸体：带裸体的分享只留只有这一种的；没有裸体的照常显示。R18G 没打开就不显示
+    const whoOk = p => p.mine || ((nm === 'all' || nm === 'sfw' || !postHasNsfw(p) || (postWho(p).has(nm) && postWho(p).size === 1)) && (d.options.lobbyR18g || !(p.tags || []).includes('R18G')));`);
+patch(`      <span class="pc-dim small" style="align-self:center">NSFW</span>\${[['sfw', '不看'], ['male', '男性的'], ['female', '女性的'], ['all', '全都看']].map(`,`      \${[['sfw', '不看裸体'], ['male', '只有男性裸体'], ['female', '只有女性裸体'], ['all', '全都有']].map(`);
+patch(`    <div class="pc-chips">\${AUD.map(t => \`<button class="pc-pill \${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}">\${t}</button>\`).join('')}</div>`,`    <div class="pc-chips">\${AUD.map(t => \`<button class="pc-pill \${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}">\${t}</button>\`).join('')}<button class="pc-pill \${d.options.lobbyR18g ? 'nsfw on' : 'blocked'}" data-act="lobbyr18g" title="猎奇、血腥">\${d.options.lobbyR18g ? 'R18G 显示' : '⊘ R18G 已屏蔽'}</button></div>`);
+patch(`            case 'lobbynsfw':`,`            case 'lobbyr18g': d.options.lobbyR18g = !d.options.lobbyR18g; commit(); render(); break;
+            case 'lobbynsfw':`);
+patch(`    if (ui.view === 'lobby' && !ui.lobby.items.length) loadLobby();`,`    if (ui.view === 'lobby' && !getData().options.lobbyAsked) askLobbyPrefs();
+    if (ui.view === 'lobby' && !ui.lobby.items.length) loadLobby();`);
+patch(`async function loadLobby({ more = false } = {}) {`,`/** 第一次进共享：问一下想看什么、能不能接受 R18G */
+function askLobbyPrefs() {
+    const d = getData();
+    if (d.options.lobbyAsked || DOC.querySelector('[data-lobbyask]')) return;
+    const box = modal(\`<div data-lobbyask><h3 class="pc-h3">先选一下想看什么</h3>
+      <div class="pc-dim small">共享里是大家上传的例图，有的带裸体。只管别人的图，以后在共享页上面随时能改。</div>
+      <div class="pc-chips wrap pc-mt-s" data-la-mode>\${[['sfw', '不看裸体'], ['male', '只有男性裸体'], ['female', '只有女性裸体'], ['all', '全都有']].map(([k, t], i) => \`<button type="button" class="pc-pill \${i === 0 ? 'on' : 'dashed'}" data-v="\${k}">\${t}</button>\`).join('')}</div>
+      <label class="pc-switch pc-mt-s"><input type="checkbox" data-la-g><span></span>能接受 R18G<small>猎奇、血腥这类。不勾就屏蔽，带 R18G 标签的都不显示</small></label>
+      <div class="pc-actions"><button class="pc-btn dark" type="button" data-la-ok>好了</button></div></div>\`);
+    let mode = 'sfw';
+    box.addEventListener('click', ev => {
+        const b = ev.target.closest('[data-la-mode] [data-v]');
+        if (b) { mode = b.dataset.v; box.querySelectorAll('[data-la-mode] [data-v]').forEach(x => { x.classList.toggle('on', x === b); x.classList.toggle('dashed', x !== b); }); return; }
+        if (ev.target.closest('[data-la-ok]')) {
+            const o = getData().options;
+            Object.assign(o, { lobbyAsked: true, lobbyNsfwMode: mode, lobbyShowNsfw: mode !== 'sfw', lobbyR18g: !!box.querySelector('[data-la-g]').checked });
+            commit(); box.closeModal(); loadLobby();
+        }
+    });
+}
+async function loadLobby({ more = false } = {}) {`);
+patch(`        if (nsfw && !tags.some(t => NSFW_WHO.includes(t))) { say('含 NSFW 的话，在标签里选一下 NSFW 图里是男性还是女性（都有就两个都选）。'); return; }`,`        if (nsfw && !tags.some(t => NSFW_WHO.includes(t))) { say('含 NSFW 的话，在标签里选一下是男性裸体还是女性裸体（都有就两个都选）。'); return; }
+        if (form.elements.namedItem('spoiler')?.checked) tags.push('剧透');`);
+patch(`      <label class="pc-switch"><input type="checkbox" name="nsfw"><span></span>含 NSFW 内容</label>`,`      <label class="pc-switch"><input type="checkbox" name="nsfw"><span></span>含 NSFW 内容</label>
+      <label class="pc-switch"><input type="checkbox" name="spoiler"><span></span>封面剧透<small>封面先糊住，别人点一下才看得到</small></label>`);
+patch(`<input class="pc-input" name="title" maxlength="200" required placeholder="给这串起个名字" value="\${esc(pre.title || '')}">`,`<input class="pc-input" name="title" maxlength="200" placeholder="不填就用前两位画师的名字" value="\${esc(pre.title || '')}">`);
+patch(`        const name = value('title'), nickname = value('signature'), artistString = artistOnly(value('artistString')), negative = value('negative');
+        const { members } = M.parseArtistString(artistString);
+        if (!name || !nickname) { say('请填写名称和署名。'); return; }`,`        const nickname = value('signature'), artistString = artistOnly(value('artistString')), negative = value('negative');
+        const { members } = M.parseArtistString(artistString);
+        const name = value('title') || members.slice(0, 2).map(m => m.tag.replace(/^artist:/, '')).join(' + ') || '';
+        if (!nickname) { say('请填写署名。'); return; }`);
+patch(`      <div class="pc-ticket-img">\${img ? \`<img src="\${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">\` : '<span>无图</span>'}</div>
+      <span class="pc-kind">\${KIND_NAME[p.kind] || p.kind}</span>`,`      <div class="pc-ticket-img \${lobbySpoiled(p) ? 'pc-spoiler' : ''}">\${img ? \`<img src="\${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">\` : '<span>无图</span>'}\${lobbySpoiled(p) ? \`<button class="pc-spoil-btn" data-act="lobbyreveal" data-id="\${p.id}">剧透 · 点一下看</button>\` : ''}</div>
+      <span class="pc-kind">\${KIND_NAME[p.kind] || p.kind}</span>`);
+patch(`      <div class="pc-lobby-img" \${img ? \`data-act="viewimg" data-src="\${esc(L.lobbyImgUrl(img.url))}"\` : ''}>\${img ? \`<img src="\${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">\` : '<span>无图</span>'}`,`      <div class="pc-lobby-img \${lobbySpoiled(p) ? 'pc-spoiler' : ''}" \${img && !lobbySpoiled(p) ? \`data-act="viewimg" data-src="\${esc(L.lobbyImgUrl(img.url))}"\` : ''}>\${img ? \`<img src="\${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">\` : '<span>无图</span>'}\${lobbySpoiled(p) ? \`<button class="pc-spoil-btn" data-act="lobbyreveal" data-id="\${p.id}">剧透 · 点一下看</button>\` : ''}`);
+patch(`function lobbyGridCard(p) {`,`const lobbyRevealed = new Set();
+const lobbySpoiled = p => !p.mine && (p.tags || []).includes('剧透') && !lobbyRevealed.has(p.id);
+function lobbyGridCard(p) {`);
+patch(`            case 'lobbyr18g':`,`            case 'lobbyreveal': lobbyRevealed.add(el.dataset.id); render(); break;
+            case 'lobbyr18g':`);
+patch(`.pc-outmake2{display:flex;gap:8px;align-items:center;margin-top:8px}`,`.pc-outmake2{display:flex;gap:8px;align-items:center;margin-top:8px}`);
+// 0.8.36：随机画师串一次抽好多串去批量测；共享剧透封面的样式
+patch(`">我分享的</button>
+    </div>
+    <div class="pc-chips">
+      \${[['sfw', '不看裸体']`,`">我分享的</button>
+    </div>
+    <div class="pc-chips wrap">
+      \${[['sfw', '不看裸体']`);
+patch(`                if (ui.view === 'lobby') loadLobby();`,`                if (ui.view === 'lobby') { loadLobby(); if (!getData().options.lobbyAsked) askLobbyPrefs(); }`);
+patch(`    <div class="pc-row-between pc-mt-s"><h2 class="pc-h2" style="margin:0">共享</h2>`,`    <style>.pc-spoiler{position:relative;overflow:hidden}.pc-spoiler img{filter:blur(22px) saturate(.6);transform:scale(1.15)}.pc-spoil-btn{position:absolute;inset:auto 50% 50% auto;transform:translate(50%,50%);padding:8px 14px;border-radius:99px;border:1.5px dashed rgba(255,255,255,.8);background:rgba(0,0,0,.45);color:#fff;font:inherit;font-size:13px;white-space:nowrap;cursor:pointer}</style>
+    <div class="pc-row-between pc-mt-s"><h2 class="pc-h2" style="margin:0">共享</h2>`);
+patch(`      <label class="pc-switch"><input type="checkbox" data-mk-w \${st.weighted ? 'checked' : ''}><span></span>随机权重<small>每位画师随机给 0.8～1.3 的权重</small></label>\` : ''}`,`      <label class="pc-switch"><input type="checkbox" data-mk-w \${st.weighted ? 'checked' : ''}><span></span>随机权重<small>每位画师随机给 0.8～1.3 的权重</small></label>
+      <div class="pc-row-between pc-mt-s"><span class="pc-dim small">一次抽好多串去测</span><div class="pc-chips" style="margin:0" data-mk-many>\${[5, 10, 20, 30].map(n => \`<button class="pc-pill \${(st.many || 10) === n ? 'on' : 'dashed'} tiny" type="button" data-many="\${n}">\${n} 串</button>\`).join('')}</div></div>
+      <button class="pc-btn wide pc-mt-s" type="button" data-mk="batch">抽 <b data-mk-manyn>\${st.many || 10}</b> 串，放进批量生成例图去测</button>\` : ''}`);
+patch(`        const nb = ev.target.closest('[data-n]');`,`        const mb = ev.target.closest('[data-many]');
+        if (mb) { st.many = Number(mb.dataset.many); box.querySelectorAll('[data-mk-many] [data-many]').forEach(b => { b.classList.toggle('on', b === mb); b.classList.toggle('dashed', b !== mb); }); box.querySelector('[data-mk-manyn]').textContent = st.many; return; }
+        if (ev.target.closest('[data-mk="batch"]')) {
+            const dd = getData(), n = st.many || 10, seen = new Set(), lines = [];
+            for (let i = 0; i < n * 4 && lines.length < n; i++) { const t = randomString(dd, st.n, st.weighted); const k = t.split(', ').sort().join('|'); if (t && !seen.has(k)) { seen.add(k); lines.push(t); } }
+            if (!lines.length) { toastr.warning('没有能抽的单个画师，换个标签试试', '随机画师串'); return; }
+            // 每串前面一行中文名字：批量那边会认成画师组的名字
+            ui.batch.text = lines.map((t, i) => \`随机 \${i + 1}\\n\${t}\`).join('\\n\\n');
+            ui.batch.showSetup = true; ui.view = 'batch';
+            box.closeModal(); render(); root.querySelector('.pc-body')?.scrollTo(0, 0);
+            toastr.info(\`抽了 \${lines.length} 串，选好提示词再点开始生成\`, '随机画师串', { timeOut: 3000 });
+            return;
+        }
+        const nb = ev.target.closest('[data-n]');`);
+// 0.8.36：共享 BL/BG 这些也能长按屏蔽；上传时名字能抽、说明有模板
+patch(`\${AUD.map(t => \`<button class="pc-pill \${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}">\${t}</button>\`).join('')}`,`\${AUD.map(t => \`<button class="pc-pill \${blocked.has(t) ? 'blocked' : lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}" data-lp="ltag">\${blocked.has(t) ? '⊘ ' : ''}\${t}</button>\`).join('')}`);
+patch(`            case 'lobbyaud': ui.lobby.tag = ui.lobby.tag === el.dataset.tag ? '' : el.dataset.tag; loadLobby(); break;`,`            case 'lobbyaud': { const t = el.dataset.tag; if ((d.blockedTags || []).includes(t)) { toggleBlockTag(t); break; } ui.lobby.tag = ui.lobby.tag === t ? '' : t; loadLobby(); break; }`);
+patch(`    if (!was && ui.lobby.tag2 === tag) ui.lobby.tag2 = '';`,`    if (!was && ui.lobby.tag2 === tag) ui.lobby.tag2 = '';
+    if (!was && ui.lobby.tag === tag) { ui.lobby.tag = ''; loadLobby(); }`);
+patch(`    <div class="pc-tip">点标签 = 只看这类　长按 = 屏蔽，带这个标签的都不显示</div>\` : ''}`,`\` : ''}
+    <div class="pc-tip">点标签 = 只看这类　长按 = 屏蔽，带这个标签的都不显示（BL、BG 这些也一样）</div>`);
+patch(`<input class="pc-input" name="title" maxlength="200" placeholder="不填就用前两位画师的名字" value="\${esc(pre.title || '')}"></label>`,`<input class="pc-input" name="title" maxlength="200" placeholder="不填就用前两位画师的名字" value="\${esc(pre.title || '')}"></label>
+      <div class="pc-chips wrap" style="margin-top:-4px"><button class="pc-pill dashed tiny" type="button" data-share-roll="name">🎲 抽一个名字</button></div>`);
+patch(`      <label class="pc-field"><span>说明（可选）</span><textarea class="pc-textarea" name="note" maxlength="5000" placeholder="适合的画面、使用建议或来源"></textarea></label>`,`      <label class="pc-field"><span>说明（可选）</span><textarea class="pc-textarea" name="note" maxlength="5000" placeholder="适合的画面、使用建议或来源"></textarea></label>
+      <div class="pc-chips wrap" style="margin-top:-4px"><button class="pc-pill dashed tiny" type="button" data-share-tpl="short">套简单模板</button><button class="pc-pill dashed tiny" type="button" data-share-tpl="long">套详细模板</button><button class="pc-pill dashed tiny" type="button" data-share-roll="note">🎲 抽一句介绍</button></div>`);
+patch(`    const metaBox = box.querySelector('[data-share-meta]');`,`    const metaBox = box.querySelector('[data-share-meta]');
+    // 名字、说明不知道怎么写：抽一个 / 套模板
+    const pickOne = a => a[Math.floor(Math.random() * a.length)];
+    const NAME_A = ['雾色', '糖霜', '午夜', '晴空', '海盐', '琉璃', '锈红', '薄荷', '月光', '烟火', '旧胶片', '冰镇', '玫瑰', '黑白', '蜜桃', '雨后', '星屑', '纸灯', '铅笔', '霓虹', '盛夏', '初雪', '奶油', '墨色', '深海', '黄昏', '晨光', '樱粉', '琥珀', '银灰'];
+    const NAME_B = ['少年', '剪影', '厚涂', '墨线', '柔光', '色块', '笔触', '滤镜', '漫画', '手账', '插画', '速写', '水彩', '光影', '梦境', '气泡', '画报', '日记', '童话', '海报'];
+    const NOTE_A = ['颜色干净', '光影很足', '线条利落', '质感细腻', '氛围感强', '色调温柔', '对比强烈', '笔触明显', '画面通透', '人物很精致'];
+    const NOTE_B = ['适合日常立绘', '男孩子画出来很帅', '女孩子很可爱', '适合做头像', '画场景也不错', '适合正文插图', '出图很稳', '配暗色背景好看', '半身和特写最出彩', '加 NSFW 也好看'];
+    const TPL = {
+        short: '画风：\\n适合画：\\n',
+        long: '画风：（比如 厚涂、柔和光影、高对比）\\n适合画：（男性 / 女性 / 场景 / 头像 / 全身）\\n推荐搭配：（固定提示词、尺寸、CFG、采样）\\n注意：（容易出的问题，比如手、脸崩）\\n',
+    };
+    box.addEventListener('click', ev => {
+        const roll = ev.target.closest('[data-share-roll]')?.dataset.shareRoll;
+        const tpl = ev.target.closest('[data-share-tpl]')?.dataset.shareTpl;
+        if (roll === 'name') { form.elements.namedItem('title').value = pickOne(NAME_A) + pickOne(NAME_B); return; }
+        if (roll === 'note') { const n = form.elements.namedItem('note'); n.value = (n.value.trim() ? n.value.replace(/\\s*$/, '\\n') : '') + \`\${pickOne(NOTE_A)}，\${pickOne(NOTE_B)}。\`; return; }
+        if (tpl) { const n = form.elements.namedItem('note'); if (!n.value.includes(TPL[tpl].split('：')[0] + '：')) n.value = (n.value.trim() ? n.value.replace(/\\s*$/, '\\n') : '') + TPL[tpl]; n.focus(); return; }
+    });`);
+// 0.8.36：OpenAI 兼容生图通道；漫画正文没有分镜时自动改编
+patch(`\${sw('comicOn', '漫画模式', '认出回复里的 &lt;image&gt;@page…&lt;/image&gt;（漫画台预设）自动画；「画成漫画」不开也能用')}`,`\${sw('comicOn', '漫画模式', '打开后角色的回复会画成漫画：AI 自己写分镜；用了漫画台预设、回复里已经有 &lt;image&gt;@page 分镜的就直接画。楼层里的「画成漫画」不开也能用')}`);
+patch(`        const blocks = comicBlocks(srcOf(msg));
+        if (!blocks.length) return;
+        render(id);`,`        const blocks = comicBlocks(srcOf(msg));
+        if (!blocks.length) {
+            // 正文没有分镜：自动让 AI 改编（只管最新一楼，每楼只试一次，免得翻旧聊天时一楼楼改）
+            const k = \`\${id}:\${msg.send_date || ''}:\${msg.swipe_id ?? 0}\`;
+            if (!manual && id === (getContext().chat?.length || 0) - 1 && !autoAdapted.has(k) && String(msg.mes || '').trim().length > 40) {
+                autoAdapted.add(k);
+                try { await adapt(id); } catch (e) { console.warn('[智库] 漫画自动改编', e); }
+            }
+            return;
+        }
+        render(id);`);
+patch(`    async function process(id, { manual = false } = {}) {`,`    const autoAdapted = new Set();
+    async function process(id, { manual = false } = {}) {`);
+patch(`              \${sw('comicAuto', '回复写完自动出图', '关掉的话，在楼层里点「生成这一页」再画', true)}`,`              \${sw('comicAuto', '回复写完自动画成漫画', 'AI 自己把回复改编成分镜再画（每楼多一次 AI 调用，只画最新一楼）；关掉的话，在楼层里点「画成漫画」再画', true)}`);
+patch(`function isReady() {
+    const s = settings();
+    if (s.naiMode === 'tavern') return true;`,`function isReady() {
+    const s = settings();
+    if (s.naiMode === 'tavern') return true;
+    if (s.naiMode === 'gpt') return !!String(s.gptUrl || '').trim();`);
+patch(`    if (opts.backend === 'comfy') return comfyGenerate(opts, s);
+    if (!opts.comic && s.naiMode === 'site' && String(s.naiSiteSimple) === 'true') {`,`    if (opts.backend === 'comfy') return comfyGenerate(opts, s);
+    if (s.naiMode === 'gpt') return gptGenerate(opts, s);
+    if (!opts.comic && s.naiMode === 'site' && String(s.naiSiteSimple) === 'true') {`);
+patch(`async function comfyGenerate(opts, s) {`,`/** ── OpenAI 兼容生图（/images/generations、/images/edits）：没有 NovelAI 的人也能出图 ── */
+const GPT_DROP = /^(?:masterpiece|best quality|very aesthetic|aesthetic|absurdres|incredibly absurdres|highres|high resolution|ultra-detailed|amazing quality|great quality|good quality|normal quality|newest|very awa|official art|no text|lowres|screentone|halftone|year \\d{4}|rating:\\s*\\w+|location|-?\\d+(?:\\.\\d+)?)$/i;
+function gptClean(text) {
+    const t = String(text || '').replace(/-?\\d+(?:\\.\\d+)?::([\\s\\S]*?)::/g, '$1').replace(/[{}\\[\\]]/g, '').replace(/\\|/g, ',');
+    return t.split(/\\s*,\\s*/).map(x => x.trim()).filter(x => x && !/^artist:/i.test(x) && !GPT_DROP.test(x)).join(', ');
+}
+const gptBase = s => String(s.gptUrl || '').trim().replace(/\\/+$/, '').replace(/\\/images\\/(?:generations|edits)$/, '');
+function gptSize(s, w, h) {
+    const v = String(s.gptSize || 'ratio').trim();
+    if (v === 'ratio') return w > h * 1.15 ? '1536x1024' : h > w * 1.15 ? '1024x1536' : '1024x1024';
+    return v || 'auto';
+}
+function b64ToBlob(b64, type = 'image/png') {
+    const bin = atob(String(b64).replace(/^data:[^,]+,/, '')), u = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    return new Blob([u], { type });
+}
+const b64Mime = b => /^\\/9j\\//.test(b) ? 'jpeg' : /^UklGR/.test(b) ? 'webp' : /^R0lGOD/.test(b) ? 'gif' : 'png';
+async function gptPrompt(opts, s) {
+    const where = c => { const x = Number(c.center?.x ?? 0.5); return x < 0.4 ? ' (on the left)' : x > 0.6 ? ' (on the right)' : ''; };
+    const cs = (opts.chars || []).filter(c => c.prompt);
+    const tags = [gptClean(opts.positive) && \`Scene: \${gptClean(opts.positive)}\`, ...cs.map((c, i) => \`Character \${i + 1}\${cs.length > 1 ? where(c) : ''}: \${gptClean(c.prompt)}\`)].filter(Boolean).join('\\n');
+    const style = String(s.gptStyle ?? 'anime illustration').trim();
+    let body = tags;
+    if (String(s.gptRewrite) === 'true' && typeof __mod_translate !== 'undefined') {
+        try {
+            const r = await __mod_translate.askLLM(\`You turn Danbooru-style tags (a scene line plus one line per character) into one clear English prompt for an image model. Keep every concrete detail: how many people, each person's looks, clothes, pose, expression, camera angle and framing, background, lighting, panel layout and any dialogue text in quotes. Keep each character's details attached to that character. Do not invent anything. Write plain prose, no lists, no tags. Output only the prompt.\`, tags, { fn: 'translate' });
+            const out = String(r || '').replace(/<think[\\s\\S]*?<\\/think>/gi, '').trim();
+            if (out) body = out;
+        } catch (e) { console.warn('[智库] 改写成英文描述失败，照标签发', e); }
+    }
+    return [style && \`\${style}.\`, opts.comic ? 'A manga page with several panels.' : '', body].filter(Boolean).join(' ');
+}
+async function gptGenerate(opts, s) {
+    const base = gptBase(s);
+    if (!base) throw new Error('还没填 OpenAI 兼容生图的地址，到智库「设置 → NovelAI」选「OpenAI 兼容」填');
+    const model = String(s.gptModel || '').trim() || 'gpt-image-1';
+    const w = Number(opts.width || s.novelai_width) || 832, h = Number(opts.height || s.novelai_height) || 1216;
+    const size = gptSize(s, w, h), prompt = await gptPrompt(opts, s);
+    const headers = String(s.gptKey || '').trim() ? { Authorization: \`Bearer \${String(s.gptKey).trim()}\` } : {};
+    const refs = String(s.gptRefs) === 'false' ? [] : [opts.i2i?.image, ...(opts.director || []).map(d => d.data)].filter(Boolean).slice(0, 4);
+    const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 180000);
+    let res;
+    try {
+        if (refs.length) {
+            const fd = new FormData();
+            fd.append('model', model); fd.append('prompt', prompt); fd.append('size', size); fd.append('n', '1');
+            refs.forEach((b, i) => fd.append(refs.length > 1 ? 'image[]' : 'image', b64ToBlob(b, \`image/\${b64Mime(b)}\`), \`ref\${i}.\${b64Mime(b) === 'jpeg' ? 'jpg' : b64Mime(b)}\`));
+            res = await fetch(\`\${base}/images/edits\`, { method: 'POST', headers, body: fd, signal: ctrl.signal });
+        } else {
+            res = await fetch(\`\${base}/images/generations\`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, size, n: 1, ...(/^dall-e/i.test(model) ? { response_format: 'b64_json' } : {}) }), signal: ctrl.signal });
+        }
+    } catch (e) {
+        throw new Error(e?.name === 'AbortError' ? '等了 3 分钟还没出图，站点可能太忙，等一下再试' : \`连不上生图站点：\${e?.message || e}（地址不对，或者站点不允许网页直接访问）\`);
+    } finally { clearTimeout(timer); }
+    const raw = await res.text();
+    let j = null; try { j = JSON.parse(raw); } catch {}
+    if (!res.ok) throw new Error(\`生图站点返回 \${res.status}：\${j?.error?.message || j?.message || raw.slice(0, 200)}\`);
+    const d0 = j?.data?.[0];
+    let image = '';
+    if (d0?.b64_json) image = \`data:image/\${b64Mime(d0.b64_json)};base64,\${d0.b64_json}\`;
+    else if (d0?.url) {
+        try { const b = await (await fetch(d0.url)).blob(); image = await new Promise((ok, no) => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.onerror = no; fr.readAsDataURL(b); }); }
+        catch { image = d0.url; }
+    }
+    if (!image) throw new Error('生图站点没有返回图片：' + raw.slice(0, 200));
+    const sent = { prompt, negative: '', size: \`\${size}（要的是 \${w}×\${h}）\`, chars: [], seed: 0, model: 'OpenAI 兼容 · ' + model, director: refs.length };
+    return { image, sent };
+}
+async function comfyGenerate(opts, s) {`);
+patch(`function vibeSupported() {
+    const s = settings();
+    return s.naiMode !== 'tavern' && `,`function vibeSupported() {
+    const s = settings();
+    return s.naiMode !== 'tavern' && s.naiMode !== 'gpt' && `);
+patch(`    const s = settings();
+    try {
+        if (s.naiMode === 'tavern') {`,`    const s = settings();
+    try {
+        if (s.naiMode === 'gpt') {
+            const base = gptBase(s);
+            if (!base) return { ok: false, text: '还没填地址' };
+            const r = await fetch(\`\${base}/models\`, { headers: String(s.gptKey || '').trim() ? { Authorization: \`Bearer \${String(s.gptKey).trim()}\` } : {} });
+            if (!r.ok) return { ok: false, text: \`站点返回 \${r.status}\` };
+            const ids = ((await r.json().catch(() => ({})))?.data || []).map(m => m.id).filter(Boolean);
+            const img = ids.filter(x => /image|dall|flux|sd|draw|midj|kolors|seedream|imagen/i.test(x));
+            return { ok: true, warn: !img.length, text: img.length ? \`连上了，能生图的模型：\${img.slice(0, 6).join('、')}\` : \`连上了（\${ids.length} 个模型），但没看出哪个能生图，自己填模型名\` };
+        }
+        if (s.naiMode === 'tavern') {`);
+patch(`        if (!opts.noVibe && opts.director === undefined) opts.director = await charRefs();`,`        if (N.settings().naiMode === 'gpt' && opts.backend !== 'comfy') opts.refs = null;
+        if (!opts.noVibe && opts.director === undefined) opts.director = await charRefs();`);
+patch(`      <div class="pc-seg three">\${modeBtn('key', '填我的 key')}\${modeBtn('tavern', '用酒馆里的')}\${modeBtn('site', '第三方站点')}</div>`,`      <div class="pc-seg four" style="grid-template-columns:repeat(2,minmax(0,1fr));border-radius:22px;margin-top:6px">\${modeBtn('key', '填我的 key')}\${modeBtn('tavern', '用酒馆里的')}\${modeBtn('site', '第三方站点')}\${modeBtn('gpt', 'OpenAI 兼容')}</div>
+      \${n.naiMode === 'gpt' ? \`
+      <div class="pc-hint">没有 NovelAI 也能出图：走 OpenAI 格式的生图接口（gpt-image、dall-e，或者中转 / 公益站给的生图模型）。生图页、聊天生图、漫画都会走这里。标签会去掉质量词、画师名和权重，分角色合成一段发；不支持氛围、局部重绘，角色参考图只当参考，脸锁不住。</div>
+      <label class="pc-field"><span>地址（要带 /v1 这类后缀）</span><input data-st="gptUrl" value="\${esc(n.gptUrl || '')}" placeholder="https://api.xxx.com/v1"></label>
+      <label class="pc-field"><span>Key</span><input data-st="gptKey" type="password" value="\${esc(n.gptKey || '')}" autocomplete="off"></label>
+      <label class="pc-field"><span>模型</span><input data-st="gptModel" value="\${esc(n.gptModel || '')}" placeholder="gpt-image-1"></label>
+      <label class="pc-field"><span>尺寸</span><select data-st="gptSize">\${[['ratio', '按现在的宽高比自动选（1024×1536 / 1536×1024 / 1024×1024）'], ['auto', '让模型自己定（auto）'], ['1024x1024', '1024×1024'], ['1024x1536', '1024×1536'], ['1536x1024', '1536×1024'], ['1024x1792', '1024×1792（dall-e-3）'], ['1792x1024', '1792×1024（dall-e-3）']].map(([v, t]) => \`<option value="\${v}" \${String(n.gptSize || 'ratio') === v ? 'selected' : ''}>\${t}</option>\`).join('')}</select></label>
+      <label class="pc-field"><span>画风开头（加在提示词最前面）</span><input data-st="gptStyle" value="\${esc(n.gptStyle ?? 'anime illustration')}" placeholder="anime illustration"></label>
+      <label class="pc-switch"><input type="checkbox" data-st-check="gptRewrite" \${String(n.gptRewrite) === 'true' ? 'checked' : ''}><span></span>先让 AI 把标签改写成一段英文描述<small>这类模型看整句英文比看标签准、纹理也少（每张图多一次 AI 调用，用「翻译和 AI」里的接口）</small></label>
+      <label class="pc-switch"><input type="checkbox" data-st-check="gptRefs" \${String(n.gptRefs) !== 'false' ? 'checked' : ''}><span></span>有角色参考图 / 垫图时一起发<small>走 /images/edits；站点不支持就关掉</small></label>\` : ''}`);
+// 0.8.36：漫画「自动写分镜」「自动出图」分成两个开关
+patch(`        if (stopped || (!manual && (!enabled() || opts().comicAuto === false))) return;
+        const msg = getContext().chat?.[id];
+        if (!msg || msg.is_user || msg.is_system) return;
+        const blocks = comicBlocks(srcOf(msg));`,`        if (stopped || (!manual && !enabled())) return;
+        const msg = getContext().chat?.[id];
+        if (!msg || msg.is_user || msg.is_system) return;
+        const blocks = comicBlocks(srcOf(msg));
+        // 有分镜了但关了自动出图：只显示「生成这一页」，等手动点
+        if (blocks.length && !manual && opts().comicAuto === false) { render(id); return; }`);
+patch(`            if (!manual && id === (getContext().chat?.length || 0) - 1 && !autoAdapted.has(k) && String(msg.mes || '').trim().length > 40) {`,`            if (!manual && opts().comicAutoAdapt !== false && id === (getContext().chat?.length || 0) - 1 && !autoAdapted.has(k) && String(msg.mes || '').trim().length > 40) {`);
+patch(`                try { await adapt(id); } catch (e) { console.warn('[智库] 漫画自动改编', e); }`,`                try { await adapt(id, { draw: opts().comicAuto !== false }); } catch (e) { console.warn('[智库] 漫画自动改编', e); }`);
+patch(`    async function adapt(id, { pages = 0, redo = false } = {}) {`,`    async function adapt(id, { pages = 0, redo = false, draw = true } = {}) {`);
+patch(`        } finally { if (adapting.get(id) === task) adapting.delete(id); render(id); }
+        await process(id, { manual: true });
+    }`,`        } finally { if (adapting.get(id) === task) adapting.delete(id); render(id); }
+        if (draw) await process(id, { manual: true });
+    }`);
+patch(`              \${sw('comicAuto', '回复写完自动画成漫画', 'AI 自己把回复改编成分镜再画（每楼多一次 AI 调用，只画最新一楼）；关掉的话，在楼层里点「画成漫画」再画', true)}`,`              \${sw('comicAutoAdapt', '回复写完自动写分镜', 'AI 自己把回复改编成分镜（每楼多一次 AI 调用，只管最新一楼、每楼只写一次）；关掉的话，在楼层里点「画成漫画」再写', true)}
+              \${sw('comicAuto', '分镜写好自动出图', '关掉的话，分镜写好先放着，在楼层里点「生成这一页」再画', true)}
+              <div class="pc-hint">写分镜用的 AI：\${esc(typeof __mod_translate !== 'undefined' ? __mod_translate.apiFor('comic').from || '' : '')}。要换接口、模型或者加要求，到智库「设置 → AI 预设 → 各个功能 → 漫画改编」。</div>`);
+// 0.8.36：漫画「自动出漫画」一个开关 +「分镜从哪来」（只用写好的 / 没写就让 AI 写）
+patch(`        if (stopped || (!manual && !enabled())) return;
+        const msg = getContext().chat?.[id];
+        if (!msg || msg.is_user || msg.is_system) return;
+        const blocks = comicBlocks(srcOf(msg));
+        // 有分镜了但关了自动出图：只显示「生成这一页」，等手动点
+        if (blocks.length && !manual && opts().comicAuto === false) { render(id); return; }`,`        if (stopped || (!manual && (!enabled() || opts().comicAuto === false))) return;
+        const msg = getContext().chat?.[id];
+        if (!msg || msg.is_user || msg.is_system) return;
+        const blocks = comicBlocks(srcOf(msg));`);
+patch(`            if (!manual && opts().comicAutoAdapt !== false && id ===`,`            if (!manual && opts().comicSrc !== 'extract' && id ===`);
+patch(`                try { await adapt(id, { draw: opts().comicAuto !== false }); } catch (e) { console.warn('[智库] 漫画自动改编', e); }`,`                try { await adapt(id); } catch (e) { console.warn('[智库] 漫画自动改编', e); }`);
+patch(`              \${sw('comicAutoAdapt', '回复写完自动写分镜', 'AI 自己把回复改编成分镜（每楼多一次 AI 调用，只管最新一楼、每楼只写一次）；关掉的话，在楼层里点「画成漫画」再写', true)}
+              \${sw('comicAuto', '分镜写好自动出图', '关掉的话，分镜写好先放着，在楼层里点「生成这一页」再画', true)}`,`              \${sw('comicAuto', '回复写完自动出漫画', '关掉的话，在楼层里点「画成漫画」「生成这一页」再画', true)}
+              <div class="pc-label">分镜从哪来</div>
+              \${seg('comicSrc', [['extract', '只用写好的'], ['ai', '没写就让 AI 写']], 'ai')}
+              <div class="pc-hint">\${opts().comicSrc === 'extract' ? '只画回复里已经写好的 &lt;image&gt;@page 分镜（漫画台预设会让正文模型写）；回复里没有分镜就不自动画，要画就在楼层里点「画成漫画」让 AI 写。' : '回复里有写好的分镜（漫画台预设）就照着画；没有就让 AI 把这一楼改编成分镜再画（每楼多一次 AI 调用，只管最新一楼、每楼只写一次）。'}</div>`);
+// 0.8.36：画面描述是空的就不画，免得画出和正文无关的图
+patch(`    if (parsed.unknown?.length) toastr.info(\`「\${parsed.unknown.join('、')}」没在角色页登记（或这次聊天没开），按图里写的标签画\`, '智库', { timeOut: 4000 });`,`    if (parsed.unknown?.length) toastr.info(\`「\${parsed.unknown.join('、')}」没在角色页登记（或这次聊天没开），按图里写的标签画\`, '智库', { timeOut: 4000 });
+    // 画面和角色动作全是空的：多半是写画面的 AI 回复空了，不画（不然会按画师串随便画一张，和正文无关）
+    if (!parsed.unknown?.length && !String(parsed.scene || '').replace(/\\b(?:nsfw|sfw)\\b|[,\\s]/gi, '') && !(parsed.picks || []).some(p => String(p.tags || '').trim())) throw new Error('这张图没有画面描述，没画：多半是写画面的 AI 回复空了（带思考的模型把长度用完了）。到智库「设置 → 翻译和 AI」把「回复长度上限」调大，或者换个不带思考的模型');`);
 s=applyImg2imgCompatibility(s);
 s=applyWardrobeCanonCompatibility(s);
 s=applyBatchScenesCompatibility(s);
 s=applyAiBudgetCompatibility(s);
+s=applyImageChannelCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;

@@ -495,12 +495,21 @@ function createComicController(deps) {
     }
 
     /** 这楼里还没出图的页，一页一页排队出 */
+    const autoAdapted = new Set();
     async function process(id, { manual = false } = {}) {
         if (stopped || (!manual && (!enabled() || opts().comicAuto === false))) return;
         const msg = getContext().chat?.[id];
         if (!msg || msg.is_user || msg.is_system) return;
         const blocks = comicBlocks(srcOf(msg));
-        if (!blocks.length) return;
+        if (!blocks.length) {
+            // 正文没有分镜：自动让 AI 改编（只管最新一楼，每楼只试一次，免得翻旧聊天时一楼楼改）
+            const k = `${chatKey(getContext())}:${id}:${msg.send_date || ''}:${msg.swipe_id ?? 0}`;
+            if (!manual && opts().comicSrc !== 'extract' && id === (getContext().chat?.length || 0) - 1 && !autoAdapted.has(k) && String(msg.mes || '').trim().length > 40) {
+                autoAdapted.add(k);
+                try { await adapt(id, { draw: false }); if (getContext().chat?.[id] === msg && comicBlocks(srcOf(msg)).length) await process(id); } catch (e) { console.warn('[智库] 漫画自动改编', e); }
+            }
+            return;
+        }
         render(id);
         const snap = pageSnapshot(id, blocks[0]);
         for (const b of blocks) {
@@ -743,8 +752,12 @@ function createComicController(deps) {
             root.innerHTML = `${box ? '<div class="pc-row-between"><h3 class="pc-h3" style="margin:0">漫画设置</h3><button class="pc-btn small" data-cx>好了</button></div>' : ''}
               ${tavern ? '<div class="pc-banwarn">⚠ 现在用的是酒馆里的 key：画不了漫画（分人物），到 NovelAI 设置里改成自己填 key 或第三方站点。</div>' : ''}
               <div class="pc-label">开关</div>
-              ${sw('comicOn', '漫画模式', '认出回复里的 &lt;image&gt;@page…&lt;/image&gt;（漫画台预设）自动画；「画成漫画」不开也能用')}
-              ${sw('comicAuto', '回复写完自动出图', '关掉的话，在楼层里点「生成这一页」再画', true)}
+              ${sw('comicOn', '漫画模式', '打开后角色的回复会画成漫画：AI 自己写分镜；用了漫画台预设、回复里已经有 &lt;image&gt;@page 分镜的就直接画。楼层里的「画成漫画」不开也能用')}
+              ${sw('comicAuto', '回复写完自动出漫画', '关掉的话，在楼层里点「画成漫画」「生成这一页」再画', true)}
+              <div class="pc-label">分镜从哪来</div>
+              ${seg('comicSrc', [['extract', '只用写好的'], ['ai', '没写就让 AI 写']], 'ai')}
+              <div class="pc-hint">${opts().comicSrc === 'extract' ? '只画回复里已经写好的 &lt;image&gt;@page 分镜（漫画台预设会让正文模型写）；回复里没有分镜就不自动画，要画就在楼层里点「画成漫画」让 AI 写。' : '回复里有写好的分镜（漫画台预设）就照着画；没有就让 AI 把这一楼改编成分镜再画（每楼多一次 AI 调用，只管最新一楼、每楼只写一次）。'}</div>
+              <div class="pc-hint">写分镜用的 AI：${esc(typeof __mod_translate !== 'undefined' ? __mod_translate.apiFor('comic').from || '' : '')}。要换接口、模型或者加要求，到智库「设置 → AI 预设 → 各个功能 → 漫画改编」。</div>
               <div class="pc-label">画风</div>
               <select class="pc-input" data-cstyle><option value="">跟正文画师串一样${d.active ? `（现在是「${esc(M.ticketName(d, d.active))}」）` : '（还没选）'}</option>
                 ${groups.map(g => `<option value="group:${esc(g.id)}" ${o.comicStyle === 'group:' + g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>
@@ -787,7 +800,7 @@ function createComicController(deps) {
     }
 
     // ── 把一楼画成漫画：AI 读正文写分镜，存进这楼，再一页页出图 ──
-    async function adapt(id, { pages = 0, redo = false } = {}) {
+    async function adapt(id, { pages = 0, redo = false, draw = true } = {}) {
         const snap = pageSnapshot(id);
         if (!snap) return;
         const { c, msg, source } = snap;
@@ -824,7 +837,7 @@ function createComicController(deps) {
             (deps.notifyError || notify)('第 ' + id + ' 楼没画成漫画：' + why);
             return;
         } finally { if (adapting.get(id) === task) adapting.delete(id); render(id); }
-        await process(id, { manual: true });
+        if (draw) await process(id, { manual: true });
     }
     let capsHidden = false; // 这次打开酒馆里先不看对白
     async function setFold(id, on) {
@@ -2535,6 +2548,7 @@ const save = () => saveSettingsDebounced();
 function isReady() {
     const s = settings();
     if (s.naiMode === 'tavern') return true;
+    if (s.naiMode === 'gpt') return !!String(s.gptUrl || '').trim();
     if (s.naiMode === 'site') return !!s.naiSite.trim();
     return !!s.naiKey.trim();
 }
@@ -2904,6 +2918,84 @@ function fillWorkflow(api, v, builtin) {
     }
     return JSON.stringify(wf);
 }
+/** ── OpenAI 兼容生图（/images/generations、/images/edits）：没有 NovelAI 的人也能出图 ── */
+const GPT_DROP = /^(?:masterpiece|best quality|very aesthetic|aesthetic|absurdres|incredibly absurdres|highres|high resolution|ultra-detailed|amazing quality|great quality|good quality|normal quality|newest|very awa|official art|no text|lowres|screentone|halftone|year \d{4}|rating:\s*\w+|location|-?\d+(?:\.\d+)?)$/i;
+function gptClean(text) {
+    const t = String(text || '').replace(/-?\d+(?:\.\d+)?::([\s\S]*?)::/g, '$1').replace(/[{}\[\]]/g, '').replace(/\|/g, ',');
+    return t.split(/\s*,\s*/).map(x => x.trim()).filter(x => x && !/^artist:/i.test(x) && !GPT_DROP.test(x)).join(', ');
+}
+const gptBase = s => String(s.gptUrl || '').trim().replace(/\/+$/, '').replace(/\/images\/(?:generations|edits)$/, '');
+function gptSize(s, w, h) {
+    const v = String(s.gptSize || 'ratio').trim();
+    if (v === 'ratio') return w > h * 1.15 ? '1536x1024' : h > w * 1.15 ? '1024x1536' : '1024x1024';
+    return v || 'auto';
+}
+function b64ToBlob(b64, type = 'image/png') {
+    const bin = atob(String(b64).replace(/^data:[^,]+,/, '')), u = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    return new Blob([u], { type });
+}
+const b64Mime = b => /^\/9j\//.test(b) ? 'jpeg' : /^UklGR/.test(b) ? 'webp' : /^R0lGOD/.test(b) ? 'gif' : 'png';
+async function gptPrompt(opts, s) {
+    const where = c => { const x = Number(c.center?.x ?? 0.5); return x < 0.4 ? ' (on the left)' : x > 0.6 ? ' (on the right)' : ''; };
+    const cs = (opts.chars || []).filter(c => c.prompt);
+    const tags = [gptClean(opts.positive) && `Scene: ${gptClean(opts.positive)}`, ...cs.map((c, i) => `Character ${i + 1}${cs.length > 1 ? where(c) : ''}: ${gptClean(c.prompt)}`)].filter(Boolean).join('\n');
+    const style = String(s.gptStyle ?? 'anime illustration').trim();
+    let body = tags;
+    if (String(s.gptRewrite) === 'true' && typeof __mod_translate !== 'undefined') {
+        try {
+            const r = await __mod_translate.askLLM(`You turn Danbooru-style tags (a scene line plus one line per character) into one clear English prompt for an image model. Keep every concrete detail: how many people, each person's looks, clothes, pose, expression, camera angle and framing, background, lighting, panel layout and any dialogue text in quotes. Keep each character's details attached to that character. Do not invent anything. Write plain prose, no lists, no tags. Output only the prompt.`, tags, { fn: 'tr' });
+            const out = String(r || '').replace(/<think[\s\S]*?<\/think>/gi, '').trim();
+            if (out) body = out;
+        } catch (e) { console.warn('[智库] 改写成英文描述失败，照标签发', e); }
+    }
+    return [style && `${style}.`, opts.comic ? 'A manga page with several panels.' : '', body].filter(Boolean).join(' ');
+}
+let gptStopped = false;
+const gptControllers = new Set();
+function stopGpt() { gptStopped = true; for (const c of gptControllers) c.abort(); }
+async function gptGenerate(opts, s) {
+    if (gptStopped) throw new Error('生图已停止');
+    const base = gptBase(s);
+    if (!base) throw new Error('还没填 OpenAI 兼容生图的地址，到智库「设置 → NovelAI」选「OpenAI 兼容」填');
+    const model = String(s.gptModel || '').trim() || 'gpt-image-1';
+    const w = Number(opts.width || s.novelai_width) || 832, h = Number(opts.height || s.novelai_height) || 1216;
+    const size = gptSize(s, w, h), prompt = await gptPrompt(opts, s);
+    if (gptStopped) throw new Error('生图已停止');
+    const headers = String(s.gptKey || '').trim() ? { Authorization: `Bearer ${String(s.gptKey).trim()}` } : {};
+    const refs = String(s.gptRefs) === 'false' ? [] : [opts.i2i?.image, ...(opts.director || []).map(d => d.data)].filter(Boolean).slice(0, 4);
+    const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 180000);
+    gptControllers.add(ctrl);
+    let res;
+    try {
+        if (refs.length) {
+            const fd = new FormData();
+            fd.append('model', model); fd.append('prompt', prompt); fd.append('size', size); fd.append('n', '1');
+            refs.forEach((b, i) => fd.append(refs.length > 1 ? 'image[]' : 'image', b64ToBlob(b, `image/${b64Mime(b)}`), `ref${i}.${b64Mime(b) === 'jpeg' ? 'jpg' : b64Mime(b)}`));
+            res = await fetch(`${base}/images/edits`, { method: 'POST', headers, body: fd, signal: ctrl.signal });
+        } else {
+            res = await fetch(`${base}/images/generations`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, size, n: 1, ...(/^dall-e/i.test(model) ? { response_format: 'b64_json' } : {}) }), signal: ctrl.signal });
+        }
+    const raw = await res.text();
+    let j = null; try { j = JSON.parse(raw); } catch {}
+    if (!res.ok) throw new Error(`生图站点返回 ${res.status}：${j?.error?.message || j?.message || raw.slice(0, 200)}`);
+    const d0 = j?.data?.[0];
+    let image = '';
+    if (d0?.b64_json) image = `data:image/${b64Mime(d0.b64_json)};base64,${d0.b64_json}`;
+    else if (d0?.url) {
+        try { const b = await (await fetch(d0.url, { signal: ctrl.signal })).blob(); image = await new Promise((ok, no) => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.onerror = no; fr.readAsDataURL(b); }); }
+        catch { image = d0.url; }
+    }
+    if (ctrl.signal.aborted || gptStopped) throw Object.assign(new Error('生图已停止或超时'), { name: 'AbortError' });
+    if (!image) throw new Error('生图站点没有返回图片：' + raw.slice(0, 200));
+    const sent = { prompt, negative: '', size: `${size}（要的是 ${w}×${h}）`, chars: [], seed: 0, model: 'OpenAI 兼容 · ' + model, director: refs.length };
+    return { image, sent };
+    } catch (e) {
+        if (gptStopped) throw new Error('生图已停止');
+        if (ctrl.signal.aborted) throw new Error('等了 3 分钟还没出图，站点可能太忙，等一下再试');
+        throw e;
+    } finally { clearTimeout(timer); gptControllers.delete(ctrl); }
+}
 async function comfyGenerate(opts, s) {
     const url = comfyUrl(s);
     if (!url) throw new Error('还没填 ComfyUI 地址，到智库「Comfy」页填');
@@ -2948,6 +3040,7 @@ async function generateRequest(opts) {
         if (opts.i2i?.image) throw new Error('ComfyUI 通道暂不支持这里的垫图，请使用 NovelAI 通道');
         return comfyGenerate(opts, s);
     }
+    if (s.naiMode === 'gpt') return gptGenerate(opts, s);
     if (!opts.comic && s.naiMode === 'site' && String(s.naiSiteSimple) === 'true') {
         const cs = opts.chars || [];
         opts = {
@@ -3082,6 +3175,15 @@ async function unzipFirstImage(u8) {
 async function testConnection() {
     const s = settings();
     try {
+        if (s.naiMode === 'gpt') {
+            const base = gptBase(s);
+            if (!base) return { ok: false, text: '还没填地址' };
+            const r = await fetch(`${base}/models`, { headers: String(s.gptKey || '').trim() ? { Authorization: `Bearer ${String(s.gptKey).trim()}` } : {} });
+            if (!r.ok) return { ok: false, text: `站点返回 ${r.status}` };
+            const ids = ((await r.json().catch(() => ({})))?.data || []).map(m => m.id).filter(Boolean);
+            const img = ids.filter(x => /image|dall|flux|sd|draw|midj|kolors|seedream|imagen/i.test(x));
+            return { ok: true, warn: !img.length, text: img.length ? `连上了，能生图的模型：${img.slice(0, 6).join('、')}` : `连上了（${ids.length} 个模型），但没看出哪个能生图，自己填模型名` };
+        }
         if (s.naiMode === 'tavern') {
             const r = await http('/api/novelai/status', { method: 'POST', headers: getRequestHeaders(), body: '{}' });
             if (!r.ok) return { ok: false, text: '酒馆里没填 NovelAI key，或者 key 不对（酒馆的「API 连接」→ NovelAI）' };
@@ -3142,7 +3244,7 @@ function encKey(model = settings().novelaimode) {
 }
 function vibeSupported() {
     const s = settings();
-    return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3' && !String(s.novelaimode).includes('diffusion-5');
+    return s.naiMode !== 'tavern' && s.naiMode !== 'gpt' && s.novelaimode !== 'nai-diffusion-3' && !String(s.novelaimode).includes('diffusion-5');
 }
 
 /** 把一张图编码成当前模型能用的氛围（NovelAI 会扣一点点数）。imageB64 不带 data: 前缀 */
@@ -3194,7 +3296,7 @@ function parseVibeFile(json) {
 
 function charRefSupported() {
     const s = settings();
-    return s.naiMode !== 'tavern' && s.novelaimode.includes('4-5') && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');
+    return s.naiMode === 'gpt' ? String(s.gptRefs) !== 'false' : s.naiMode !== 'tavern' && s.novelaimode.includes('4-5') && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');
 }
 
 // ───────────── 局部重绘 ─────────────
@@ -3209,6 +3311,7 @@ function inpaintModel(model = settings().novelaimode) {
 function inpaint(opts){return __naiGate.run(()=>inpaintRequest(opts)).catch(e=>{throw netError(e);});}
 async function inpaintRequest({ image, mask, prompt, negative, width, height, strength = 0.7 }) {
     const s = settings();
+    if (s.naiMode === 'gpt') throw new Error('OpenAI 兼容通道暂不支持局部重绘');
     if (s.naiMode === 'tavern') throw new Error('「用酒馆里的 key」不能局部重绘，到设置里改成「填我的 key」');
     const key = authKey();
     const model = inpaintModel();
@@ -3236,7 +3339,7 @@ async function inpaintRequest({ image, mask, prompt, negative, width, height, st
     return imageFromResponse(buf);
 }
 
-return { comfyReady, chatBackend, comfyAutoConfig, comfyConnect, comfyUseWorkflow, naiToSd, uiToApi, fillWorkflow, COMFY_Q, COMFY_UC, stopQueue:()=>__naiGate.stop(), MODELS, SAMPLERS, SCHEDULES, settings, save, isReady, ucpValue, buildParameters, generate, unzipFirstImage, testConnection, importFromZhihuiji, encKey, vibeSupported, encodeVibe, parseVibeFile, charRefSupported, inpaintModel, inpaint };
+return { comfyReady, chatBackend, comfyAutoConfig, comfyConnect, comfyUseWorkflow, naiToSd, uiToApi, fillWorkflow, COMFY_Q, COMFY_UC, stopQueue:()=>{__naiGate.stop();stopGpt();}, MODELS, SAMPLERS, SCHEDULES, settings, save, isReady, ucpValue, buildParameters, generate, unzipFirstImage, testConnection, importFromZhihuiji, encKey, vibeSupported, encodeVibe, parseVibeFile, charRefSupported, inpaintModel, inpaint };
 })();
 
 // ───── engine.js ─────
@@ -3359,6 +3462,7 @@ async function run(opts) {
     else if (!N.isReady()) throw new Error('还没填 NovelAI key，到「设置」最上面填');
     runtime.busy++;
     try {
+        if (N.settings().naiMode === 'gpt' && opts.backend !== 'comfy') opts.refs = null;
         if (!opts.noVibe && opts.director === undefined) opts.director = await charRefs();
         if (!opts.noVibe && !opts.director && opts.refs === undefined) opts.refs = await vibeRefs();
         const r = await N.generate(opts);
@@ -3853,7 +3957,7 @@ async function readBody(res) {
     }
 }
 /** 带思考的模型会先把限长用在思考上：一开始就给够 8000（只是上限，用不到不花），不再空了重试——重试等于再思考一次，白费额度 */
-const LLM_MIN_TOKENS = 8000;
+const LLM_DEFAULT_TOKENS = 16000;
 // Only an explicit validation rejection can be safely retried with a smaller budget.
 function aiRequestError(message, status, detail) {
     return Object.assign(new Error(message), { status: Number(status), providerMessage: String(detail || message) });
@@ -3869,13 +3973,23 @@ function inputContextRejected(e) {
     return !e?.emptyLength && [400, 413, 422].includes(e?.status)
         && /context.{0,80}(?:length|window|limit)|(?:input|prompt|messages?).{0,80}(?:too long|too large|exceed)|(?:exceed|longer than).{0,80}context/i.test(String(e.providerMessage || e.message || ''));
 }
+/** 回复长度上限：设置里自己填了就用它，没填默认 16000（只是上限，用不到不花） */
+const userMaxTokens = () => { const n = Math.round(Number(getData().options.aiMaxTokens)); return n >= 256 ? Math.min(n, 200000) : 0; };
+const wantTokens = opts => userMaxTokens() || Math.max(LLM_DEFAULT_TOKENS, opts.maxTokens || 800);
+/** 模型不收这么大的长度（请求直接被拒，没花额度）：依次降到 8000、4000 再试；自己填了长度就不动 */
+async function withTokenFallback(once, opts) {
+    const want = wantTokens(opts), steps = userMaxTokens() ? [want] : [want, 8000, 4000].filter((n, i, a) => n <= want && a.indexOf(n) === i);
+    let last;
+    for (const n of steps) {
+        try { return await once({ ...opts, maxTokens: n }); }
+        catch (e) { last = e; if (!tokenBudgetRejected(e)) throw e; console.warn('[智库] 模型不收', n, '的长度，降一点再试'); }
+    }
+    throw Object.assign(new Error(String(last?.message || last) + '。到设置 → 翻译和 AI 把「回复长度上限」改小一点'), { diag: last?.diag });
+}
 async function askLLM(system, user, opts = {}) {
-    const want = Math.max(LLM_MIN_TOKENS, opts.maxTokens || 800);
-    try { return await askLLMOnce(system, user, { ...opts, maxTokens: want }); }
+    try { return await withTokenFallback(o => askLLMOnce(system, user, o), opts); }
     catch (e) {
-        // 接口明确拒绝输出长度时，按原来的长度重发一次
-        if (want > (opts.maxTokens || 800) && tokenBudgetRejected(e)) return askLLMOnce(system, user, opts);
-        if (e.emptyLength) throw Object.assign(new Error(`AI 回复是空的（${e.diag || '没有更多信息'}）。带思考的模型会先把长度用在思考上：换不带思考的模型，或者在 AI 设置里把思考关掉`), { emptyLength: true, diag: e.diag });
+        if (e.emptyLength) throw Object.assign(new Error(`AI 回复是空的（${e.diag || '没有更多信息'}）。带思考的模型会先把长度用在思考上：到设置 → 翻译和 AI 把「回复长度上限」调大，或者换不带思考的模型`), { emptyLength: true, diag: e.diag });
         throw e;
     }
 }
@@ -4144,9 +4258,7 @@ ${PAIRS}
 /** 让 AI 看一张图（要能看图的模型）。imageDataUrl 是 data:image/... */
 /** 看图同理：一开始就给够长度 */
 async function askVision(system, text, imageDataUrl, opts = {}) {
-    const want = Math.max(LLM_MIN_TOKENS, opts.maxTokens || 800);
-    try { return await askVisionOnce(system, text, imageDataUrl, { ...opts, maxTokens: want }); }
-    catch (e) { if (want > (opts.maxTokens || 800) && tokenBudgetRejected(e)) return askVisionOnce(system, text, imageDataUrl, opts); throw e; }
+    return withTokenFallback(o => askVisionOnce(system, text, imageDataUrl, o), opts);
 }
 async function askVisionOnce(system, text, imageDataUrl, { maxTokens = 800, fn = '' } = {}) {
     const api = apiFor(fn);
@@ -4542,6 +4654,8 @@ function markerPrompt(prompt, { story } = {}) {
     const plan = readIllustrationPlan(prompt);
     const parsed = plan ? compileIllustrationPlan(plan, currentCast(), story === undefined ? undefined : imageStoryText(story)) : resolveImageCharacters(prompt, currentCast());
     if (parsed.unknown?.length) toastr.info(`「${parsed.unknown.join('、')}」没在角色页登记（或这次聊天没开），按图里写的标签画`, '智库', { timeOut: 4000 });
+    // 画面和角色动作全是空的：多半是写画面的 AI 回复空了，不画（不然会按画师串随便画一张，和正文无关）
+    if (!parsed.unknown?.length && !String(parsed.scene || '').replace(/\b(?:nsfw|sfw)\b|[,\s]/gi, '') && !(parsed.picks || []).some(p => String(p.tags || '').trim())) throw new Error('这张图没有画面描述，没画：多半是写画面的 AI 回复空了（带思考的模型把长度用完了）。到智库「设置 → 翻译和 AI」把「回复长度上限」调大，或者换个不带思考的模型');
     const rating = plan?.rating?.toLowerCase() || (hasNsfwRating(parsed.scene) ? 'nsfw' : undefined);
     const built = buildChatPrompt(parsed.scene, parsed.picks, { nsfw: rating === 'nsfw' });
     return { ...built, positive: applyIllustrationRating(built.positive, rating), cast: parsed.cast };
@@ -5328,6 +5442,7 @@ function openWindow(view) {
     root.classList.add('open');
     DOC.body.classList.add('pc-lock');
     render();
+    if (ui.view === 'lobby' && !getData().options.lobbyAsked) askLobbyPrefs();
     if (ui.view === 'lobby' && !ui.lobby.items.length) loadLobby();
 }
 function closeWindow() {
@@ -6218,7 +6333,9 @@ function openStringMaker({ text = '', random = false } = {}) {
     const box = modal(`<h3 class="pc-h3">${random ? '随机画师串' : '组成画师串'}</h3>
       ${random ? `<div class="pc-dim small">从${esc(from)}单个画师里随机抽${ui.search.trim() ? '（只抽搜索出来的）' : ''}，共 ${poolSize} 位，跳过拉黑的。换上面的标签就能换抽取范围。</div>
       <div class="pc-row-between pc-mt-s"><span class="pc-dim small">抽几位</span><div class="pc-chips" style="margin:0" data-mk-n>${[2, 3, 4, 5, 6].map(n => `<button class="pc-pill ${st.n === n ? 'on' : 'dashed'} tiny" type="button" data-n="${n}">${n}</button>`).join('')}</div></div>
-      <label class="pc-switch"><input type="checkbox" data-mk-w ${st.weighted ? 'checked' : ''}><span></span>随机权重<small>每位画师随机给 0.8～1.3 的权重</small></label>` : ''}
+      <label class="pc-switch"><input type="checkbox" data-mk-w ${st.weighted ? 'checked' : ''}><span></span>随机权重<small>每位画师随机给 0.8～1.3 的权重</small></label>
+      <div class="pc-row-between pc-mt-s"><span class="pc-dim small">一次抽好多串去测</span><div class="pc-chips" style="margin:0" data-mk-many>${[5, 10, 20, 30].map(n => `<button class="pc-pill ${(st.many || 10) === n ? 'on' : 'dashed'} tiny" type="button" data-many="${n}">${n} 串</button>`).join('')}</div></div>
+      <button class="pc-btn wide pc-mt-s" type="button" data-mk="batch">抽 <b data-mk-manyn>${st.many || 10}</b> 串，放进批量生成例图去测</button>` : ''}
       <label class="pc-label" for="pc-mk-text">画师串（可以直接改）</label>
       <textarea id="pc-mk-text" class="pc-textarea small mono" rows="3">${esc(text)}</textarea>
       <label class="pc-field pc-mt-s"><span>名字（不填就用前两位画师的名字）</span><input id="pc-mk-name" value=""></label>
@@ -6233,6 +6350,19 @@ function openStringMaker({ text = '', random = false } = {}) {
     const again = () => { ta.value = randomString(getData(), st.n, st.weighted); };
     box.addEventListener('change', ev => { if (ev.target.matches('[data-mk-w]')) { st.weighted = ev.target.checked; again(); } });
     box.addEventListener('click', async ev => {
+        const mb = ev.target.closest('[data-many]');
+        if (mb) { st.many = Number(mb.dataset.many); box.querySelectorAll('[data-mk-many] [data-many]').forEach(b => { b.classList.toggle('on', b === mb); b.classList.toggle('dashed', b !== mb); }); box.querySelector('[data-mk-manyn]').textContent = st.many; return; }
+        if (ev.target.closest('[data-mk="batch"]')) {
+            const dd = getData(), n = st.many || 10, seen = new Set(), lines = [];
+            for (let i = 0; i < n * 4 && lines.length < n; i++) { const t = randomString(dd, st.n, st.weighted); const k = t.split(', ').sort().join('|'); if (t && !seen.has(k)) { seen.add(k); lines.push(t); } }
+            if (!lines.length) { toastr.warning('没有能抽的单个画师，换个标签试试', '随机画师串'); return; }
+            // 每串前面一行中文名字：批量那边会认成画师组的名字
+            ui.batch.text = lines.map((t, i) => `随机 ${i + 1}\n${t}`).join('\n\n');
+            ui.batch.showSetup = true; ui.view = 'batch';
+            box.closeModal(); render(); root.querySelector('.pc-body')?.scrollTo(0, 0);
+            toastr.info(`抽了 ${lines.length} 串，选好提示词再点开始生成`, '随机画师串', { timeOut: 3000 });
+            return;
+        }
         const nb = ev.target.closest('[data-n]');
         if (nb) { st.n = Number(nb.dataset.n); box.querySelectorAll('[data-mk-n] [data-n]').forEach(b => { b.classList.toggle('on', b === nb); b.classList.toggle('dashed', b !== nb); }); again(); return; }
         const act = ev.target.closest('[data-mk]')?.dataset.mk;
@@ -7805,15 +7935,29 @@ async function queueVibeThumbs(groups) {
 const AUD = ['BL', 'BG', 'GB', 'GL'];
 /** 共享用的标签：只能从这里选 */
 const LOBBY_TAGS = [
-    ['性向', ['男性向', '女性向', '全性向'], true],
+    ['裸体·有才选，都有就两个都选', ['男性裸体', '女性裸体'], false],
+    ['重口·猎奇血腥才选', ['R18G'], false],
     ['题材', ['BL', 'BG', 'GB', 'GL'], false],
-    ['画风', ['厚涂', '半厚涂', '平涂', '赛璐璐', '水彩', '写实', '2.5D', '古风', '日系', '韩系', '欧美', '像素', 'Q版', '线稿', '暗黑', '清新', '柔和', '华丽'], false],
+    ['画风', ['厚涂', '半厚涂', '平涂', '赛璐璐', '水彩', '写实', 'Q版'], false],
 ];
-const ORIENT = LOBBY_TAGS[0][1];
+const NSFW_WHO = LOBBY_TAGS[0][1];
+/** 旧标签（性向）也照样隐藏，不在标签栏里出现 */
+const ORIENT = [...NSFW_WHO, 'R18G', '剧透'];
+const tagLabel = t => t;
+/** 这条分享的 NSFW 图里是谁：新标签直接看；旧的按性向、题材推 */
+function postWho(p) {
+    const t = new Set(p.tags || []), who = new Set();
+    if (t.has('男性裸体')) who.add('male');
+    if (t.has('女性裸体')) who.add('female');
+    return who;
+}
+const postHasNsfw = p => !!(p.nsfw || (p.images || []).some(i => i.nsfw));
+/** 共享里看哪种：sfw 不看裸体 / male 只有男性裸体 / female 只有女性裸体 / all 全都有 */
+const lobbyNsfwMode = () => { const o = getData().options; return ['sfw', 'male', 'female', 'all'].includes(o.lobbyNsfwMode) ? o.lobbyNsfwMode : (o.lobbyShowNsfw ? 'all' : 'sfw'); };
 const LOBBY_TAG_SET = new Set(LOBBY_TAGS.flatMap(g => g[1]));
 function lobbyTagPicker(sel = []) {
     const on = new Set(sel);
-    return LOBBY_TAGS.map(([title, list, single]) => `<div class="pc-field"><span>${title}${single ? '（必选一个）' : '（可多选）'}</span><div class="pc-chips wrap" data-tagset="${title}" ${single ? 'data-single' : ''}>${list.map(t => `<button type="button" class="pc-pill ${on.has(t) ? 'on' : 'dashed'}" data-tagpick="${esc(t)}">${esc(t)}</button>`).join('')}</div></div>`).join('');
+    return LOBBY_TAGS.map(([title, list, single]) => `<div class="pc-field"><span>${title}${single ? '（必选一个）' : '（可多选）'}</span><div class="pc-chips wrap" data-tagset="${title}" ${single ? 'data-single' : ''}>${list.map(t => `<button type="button" class="pc-pill ${on.has(t) ? 'on' : 'dashed'}" data-tagpick="${esc(t)}">${esc(tagLabel(t))}</button>`).join('')}</div></div>`).join('');
 }
 function wireTagPicker(root) {
     root.addEventListener('click', ev => {
@@ -7837,7 +7981,6 @@ function chooseLobbyTags(sel = []) {
             if (x === 'no') { box.closeModal(); resolve(null); }
             if (x === 'ok') {
                 const tags = pickedTags(box);
-                if (!tags.some(t => ORIENT.includes(t))) { box.querySelector('[data-tagerr]').textContent = '先选一个性向：男性向、女性向或全性向'; return; }
                 box.closeModal(); resolve(tags);
             }
         });
@@ -7866,10 +8009,15 @@ function viewLobby(d) {
     const blocked = new Set(d.blockedTags || []);
     const view = d.options.lobbyView || 'grid';
     const blk = lobbyBlock();
-    const items = lb.items.filter(p => (p.mine || (!p.tags.some(t => blocked.has(t)) && !blk.users.includes(p.nickname) && !blk.posts.includes(p.id))) && (!lb.tag2 || p.tags.includes(lb.tag2)));
+    const nm = lobbyNsfwMode();
+    // 只看男性 / 女性的 NSFW：带 NSFW 的分享只留对得上的；没有 NSFW 的照常显示
+    // 只有男性裸体 / 只有女性裸体：带裸体的分享只留只有这一种的；没有裸体的照常显示。R18G 没打开就不显示
+    const whoOk = p => p.mine || ((nm === 'all' || !postHasNsfw(p) || (postWho(p).has(nm) && postWho(p).size === 1)) && (d.options.lobbyR18g || !(p.tags || []).includes('R18G')));
+    const items = lb.items.filter(p => (p.mine || (!p.tags.some(t => blocked.has(t)) && !blk.users.includes(p.nickname) && !blk.posts.includes(p.id))) && (!lb.tag2 || p.tags.includes(lb.tag2)) && whoOk(p));
     const tags = lb.tags.map(t => t.tag).filter(t => t !== 'NSFW' && !AUD.includes(t) && !ORIENT.includes(t));
     for (const t of blocked) if (!tags.includes(t)) tags.push(t);
     return `
+    <style>.pc-spoiler{position:relative;overflow:hidden}.pc-spoiler img{filter:blur(22px) saturate(.6);transform:scale(1.15)}.pc-spoil-btn{position:absolute;inset:auto 50% 50% auto;transform:translate(50%,50%);padding:8px 14px;border-radius:99px;border:1.5px dashed rgba(255,255,255,.8);background:rgba(0,0,0,.45);color:#fff;font:inherit;font-size:13px;white-space:nowrap;cursor:pointer}</style>
     <div class="pc-row-between pc-mt-s"><h2 class="pc-h2" style="margin:0">共享</h2><button class="pc-btn dark" data-act="lobbyupload" aria-label="上传画师串">＋ 上传</button></div>
     <div class="pc-toprow">
       <label class="pc-search"><span class="pc-sr">搜索共享</span>${ICON.search}<input data-bind="lobby.q" data-enter="lobbysearch" value="${esc(lb.q)}" placeholder="搜画师名、标签"></label>
@@ -7879,12 +8027,13 @@ function viewLobby(d) {
       ${[['', '全部'], ['group', '画师组'], ['artist', '单个画师'], ['character', '角色'], ['outfit', '服装']].map(([k, t]) => `<button class="pc-pill ${!lb.mine && lb.kind === k ? 'on' : 'dashed'}" data-act="lobbykind" data-kind="${k}">${t}</button>`).join('')}
       <button class="pc-pill ${lb.mine ? 'on' : 'dashed'}" data-act="lobbymine">我分享的</button>
     </div>
-    <div class="pc-chips">
-      ${[...ORIENT, ...AUD].map(t => `<button class="pc-pill ${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="${t}">${t}</button>`).join('')}
-      <button class="pc-pill nsfw ${d.options.lobbyShowNsfw ? 'on' : 'dashed'}" data-act="nsfwtoggle" title="只管共享里别人的图，你自己的例图一直显示">NSFW ${d.options.lobbyShowNsfw ? '开' : '关'}</button>
+    <div class="pc-chips wrap">
+      ${[['sfw', '不看裸体'], ['male', '只有男性裸体'], ['female', '只有女性裸体'], ['all', '全都有']].map(([k, t]) => `<button class="pc-pill ${k !== 'sfw' ? 'nsfw' : ''} ${nm === k ? 'on' : 'dashed'}" data-act="lobbynsfw" data-v="${k}" title="只管共享里别人的图，你自己的例图一直显示">${t}</button>`).join('')}
     </div>
+    <div class="pc-chips">${AUD.map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="${t}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${t}</button>`).join('')}<button class="pc-pill ${d.options.lobbyR18g ? 'nsfw on' : 'blocked'}" data-act="lobbyr18g" title="猎奇、血腥">${d.options.lobbyR18g ? 'R18G 显示' : '⊘ R18G 已屏蔽'}</button></div>
     ${tags.length ? `<div class="pc-chips">${tags.slice(0, 24).map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag2 === t ? 'on' : 'dashed'}" data-act="lobbytag2" data-tag="${esc(t)}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${esc(t)}</button>`).join('')}</div>
-    <div class="pc-tip">点标签 = 只看这类　长按 = 屏蔽，带这个标签的都不显示</div>` : ''}
+` : ''}
+    <div class="pc-tip">点标签 = 只看这类　长按 = 屏蔽，带这个标签的都不显示（BL、BG 这些也一样）</div>
     <div class="pc-sort"><button class="${lb.sort === 'new' ? 'on' : ''}" data-act="lobbysort" data-sort="new">最新</button><button class="${lb.sort === 'hot' ? 'on' : ''}" data-act="lobbysort" data-sort="hot">最多人保存</button><button data-act="lobbyrefresh">刷新</button></div>
     ${lb.error ? `<div class="pc-card pc-pad pc-mt">连不上共享服务器：${esc(lb.error)}</div>` : ''}
     ${lb.loading && !lb.items.length ? '<div class="pc-tip pc-mt">加载中…</div>' : ''}
@@ -7894,11 +8043,13 @@ function viewLobby(d) {
     <div style="height:24px"></div>`;
 }
 
+const lobbyRevealed = new Set();
+const lobbySpoiled = p => !p.mine && (p.tags || []).includes('剧透') && !lobbyRevealed.has(p.id);
 function lobbyGridCard(p) {
     const img = p.images[0];
     const banned = p.content?.artistString && M.bannedIn(getData(), p.content.artistString).length;
     return `<article class="pc-ticket ${p.copied ? 'saved' : ''} ${banned ? 'banned' : ''}" data-act="lobbyopen" data-id="${p.id}">${banned ? '<span class="pc-banbadge">含黑名单画师</span>' : ''}
-      <div class="pc-ticket-img">${img ? `<img src="${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">` : '<span>无图</span>'}</div>
+      <div class="pc-ticket-img ${lobbySpoiled(p) ? 'pc-spoiler' : ''}">${img ? `<img src="${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">` : '<span>无图</span>'}${lobbySpoiled(p) ? `<button class="pc-spoil-btn" data-act="lobbyreveal" data-id="${p.id}">剧透 · 点一下看</button>` : ''}</div>
       <span class="pc-kind">${KIND_NAME[p.kind] || p.kind}</span>
       <button class="pc-use ${p.copied ? 'on dark' : ''}" data-act="lobbycopy" data-id="${p.id}" aria-label="保存">${p.copied ? SYM.check : SYM.down}</button>
       <div class="pc-ticket-text"><b>${esc(p.name)}</b><div class="pc-row-between pc-meta"><span>${esc(p.nickname)}</span><span>♡ ${p.likes} · ${p.copies} 存</span></div></div>
@@ -7938,6 +8089,7 @@ function toggleBlockTag(tag) {
     const was = d.blockedTags.includes(tag);
     d.blockedTags = was ? d.blockedTags.filter(t => t !== tag) : [...d.blockedTags, tag];
     if (!was && ui.lobby.tag2 === tag) ui.lobby.tag2 = '';
+    if (!was && ui.lobby.tag === tag) { ui.lobby.tag = ''; loadLobby(); }
     commit();
     toastr.info(was ? `不再屏蔽「${tag}」` : `已屏蔽「${tag}」，带这个标签的都不显示`, '共享', { timeOut: 2000 });
 }
@@ -7945,7 +8097,7 @@ function toggleBlockTag(tag) {
 function lobbyCard(p) {
     const img = p.images[0];
     return `<article class="pc-lobby-card">
-      <div class="pc-lobby-img" ${img ? `data-act="viewimg" data-src="${esc(L.lobbyImgUrl(img.url))}"` : ''}>${img ? `<img src="${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">` : '<span>无图</span>'}${p.images.length > 1 ? `<em>+${p.images.length - 1}</em>` : ''}</div>
+      <div class="pc-lobby-img ${lobbySpoiled(p) ? 'pc-spoiler' : ''}" ${img && !lobbySpoiled(p) ? `data-act="viewimg" data-src="${esc(L.lobbyImgUrl(img.url))}"` : ''}>${img ? `<img src="${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">` : '<span>无图</span>'}${lobbySpoiled(p) ? `<button class="pc-spoil-btn" data-act="lobbyreveal" data-id="${p.id}">剧透 · 点一下看</button>` : ''}${p.images.length > 1 ? `<em>+${p.images.length - 1}</em>` : ''}</div>
       <div class="pc-lobby-text">
         <div class="pc-row-between"><span class="pc-label">${esc(p.nickname)} · ${KIND_NAME[p.kind] || p.kind}</span>
           ${p.mine ? `<button class="pc-icon-btn small" data-act="lobbydel" data-id="${p.id}" aria-label="删除我分享的">×</button>` : `<button class="pc-icon-btn small" data-act="lobbyreport" data-id="${p.id}" aria-label="举报">${ICON.flag}</button>`}</div>
@@ -7961,6 +8113,26 @@ function lobbyCard(p) {
     </article>`;
 }
 
+/** 第一次进共享：问一下想看什么、能不能接受 R18G */
+function askLobbyPrefs() {
+    const d = getData();
+    if (d.options.lobbyAsked || DOC.querySelector('[data-lobbyask]')) return;
+    const box = modal(`<div data-lobbyask><h3 class="pc-h3">先选一下想看什么</h3>
+      <div class="pc-dim small">共享里是大家上传的例图，有的带裸体。只管别人的图，以后在共享页上面随时能改。</div>
+      <div class="pc-chips wrap pc-mt-s" data-la-mode>${[['sfw', '不看裸体'], ['male', '只有男性裸体'], ['female', '只有女性裸体'], ['all', '全都有']].map(([k, t], i) => `<button type="button" class="pc-pill ${i === 0 ? 'on' : 'dashed'}" data-v="${k}">${t}</button>`).join('')}</div>
+      <label class="pc-switch pc-mt-s"><input type="checkbox" data-la-g><span></span>能接受 R18G<small>猎奇、血腥这类。不勾就屏蔽，带 R18G 标签的都不显示</small></label>
+      <div class="pc-actions"><button class="pc-btn dark" type="button" data-la-ok>好了</button></div></div>`);
+    let mode = 'sfw';
+    box.addEventListener('click', ev => {
+        const b = ev.target.closest('[data-la-mode] [data-v]');
+        if (b) { mode = b.dataset.v; box.querySelectorAll('[data-la-mode] [data-v]').forEach(x => { x.classList.toggle('on', x === b); x.classList.toggle('dashed', x !== b); }); return; }
+        if (ev.target.closest('[data-la-ok]')) {
+            const o = getData().options;
+            Object.assign(o, { lobbyAsked: true, lobbyNsfwMode: mode, lobbyShowNsfw: mode !== 'sfw', lobbyR18g: !!box.querySelector('[data-la-g]').checked });
+            commit(); box.closeModal(); loadLobby();
+        }
+    });
+}
 async function loadLobby({ more = false } = {}) {
     const lb = ui.lobby;
     if (!L.serverBase()) return;
@@ -8012,7 +8184,16 @@ function viewSettings(d) {
     const modeBtn = (v, t) => `<button class="${n.naiMode === v ? 'on' : ''}" data-act="naimode" data-mode="${v}">${t}</button>`;
     const naiStatus = ui.naiTest ? `${ui.naiTest.warn ? '!' : ui.naiTest.ok ? '✓' : '✗'} ${esc(ui.naiTest.text)}` : N.isReady() ? '已填好' : '<span class="pc-warn-text">还没填 key</span>';
     const nai = setFold('nai', 'NovelAI', naiStatus, `
-      <div class="pc-seg three">${modeBtn('key', '填我的 key')}${modeBtn('tavern', '用酒馆里的')}${modeBtn('site', '第三方站点')}</div>
+      <div class="pc-seg four" style="grid-template-columns:repeat(2,minmax(0,1fr));border-radius:22px;margin-top:6px">${modeBtn('key', '填我的 key')}${modeBtn('tavern', '用酒馆里的')}${modeBtn('site', '第三方站点')}${modeBtn('gpt', 'OpenAI 兼容')}</div>
+      ${n.naiMode === 'gpt' ? `
+      <div class="pc-hint">没有 NovelAI 也能出图：走 OpenAI 格式的生图接口（gpt-image、dall-e，或者中转 / 公益站给的生图模型）。生图页、聊天生图、漫画都会走这里。标签会去掉质量词、画师名和权重，分角色合成一段发；不支持氛围、局部重绘，角色参考图只当参考，脸锁不住。</div>
+      <label class="pc-field"><span>地址（要带 /v1 这类后缀）</span><input data-st="gptUrl" value="${esc(n.gptUrl || '')}" placeholder="https://api.xxx.com/v1"></label>
+      <label class="pc-field"><span>Key</span><input data-st="gptKey" type="password" value="${esc(n.gptKey || '')}" autocomplete="off"></label>
+      <label class="pc-field"><span>模型</span><input data-st="gptModel" value="${esc(n.gptModel || '')}" placeholder="gpt-image-1"></label>
+      <label class="pc-field"><span>尺寸</span><select data-st="gptSize">${[['ratio', '按现在的宽高比自动选（1024×1536 / 1536×1024 / 1024×1024）'], ['auto', '让模型自己定（auto）'], ['1024x1024', '1024×1024'], ['1024x1536', '1024×1536'], ['1536x1024', '1536×1024'], ['1024x1792', '1024×1792（dall-e-3）'], ['1792x1024', '1792×1024（dall-e-3）']].map(([v, t]) => `<option value="${v}" ${String(n.gptSize || 'ratio') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      <label class="pc-field"><span>画风开头（加在提示词最前面）</span><input data-st="gptStyle" value="${esc(n.gptStyle ?? 'anime illustration')}" placeholder="anime illustration"></label>
+      <label class="pc-switch"><input type="checkbox" data-st-check="gptRewrite" ${String(n.gptRewrite) === 'true' ? 'checked' : ''}><span></span>先让 AI 把标签改写成一段英文描述<small>这类模型看整句英文比看标签准、纹理也少（每张图多一次 AI 调用，用「翻译和 AI」里的接口）</small></label>
+      <label class="pc-switch"><input type="checkbox" data-st-check="gptRefs" ${String(n.gptRefs) !== 'false' ? 'checked' : ''}><span></span>有角色参考图 / 垫图时一起发<small>走 /images/edits；站点不支持就关掉</small></label>` : ''}
       ${n.naiMode === 'key' ? `
       <label class="pc-field"><span>NovelAI key</span>
         <div class="pc-keyrow"><input data-st="naiKey" type="${ui.showKey ? 'text' : 'password'}" value="${esc(n.naiKey)}" placeholder="pst-…" autocomplete="off"><button class="pc-pill dashed" data-act="togglekey">${ui.showKey ? '藏起来' : '显示'}</button></div></label>
@@ -8032,6 +8213,8 @@ function viewSettings(d) {
     const ai0 = setFold('ai', '翻译和 AI', esc(T.currentApi().from) + (T.currentApi().model ? ' · ' + esc(T.currentApi().model) : ''), `
       <div class="pc-dim small">翻译、补全细节、读角色外貌、聊天生图都用这个。点一下就切换，可以存好几个。</div>
       ${apiChips()}
+      <label class="pc-field"><span>回复长度上限（token，所有 AI 功能共用）</span><input type="number" min="256" step="1000" inputmode="numeric" data-optstr="aiMaxTokens" value="${esc(String(d.options.aiMaxTokens || ''))}" placeholder="不填 = 16000"></label>
+      <div class="pc-hint">只是上限，用多少算多少，填大不会多花。带思考的模型（deepseek 思考、gemini 思考这类）思考也算在里面，回复空了、读卡读不全（人多时名字和外貌缺一截）就调大。模型不收这么大时会报错，再改小。</div>
       ${prof ? `
       <label class="pc-field"><span>名字</span><input data-api="name" value="${esc(prof.name)}"></label>
       <label class="pc-field"><span>API 地址（要带 /v1 这类后缀）</span><input data-api="url" value="${esc(prof.url)}" placeholder="https://api.xxx.com/v1"></label>
@@ -8192,7 +8375,7 @@ async function onClick(ev, outside = false) {
             case 'close': closeWindow(); break;
             case 'nav':
                 ui.view = el.dataset.view; render();
-                if (ui.view === 'lobby') loadLobby();
+                if (ui.view === 'lobby') { loadLobby(); if (!getData().options.lobbyAsked) askLobbyPrefs(); }
                 root.querySelector('.pc-body')?.scrollTo(0, 0);
                 break;
             case 'back': ui.view = ui.backTo || 'book'; render(); break;
@@ -8860,7 +9043,7 @@ async function onClick(ev, outside = false) {
             case 'lobbyblockuser': { const n = el.dataset.nick; if (!n) break; if (!(await confirmBox(`屏蔽「${n}」？他分享的都不再显示（只在你这里，对方不会知道）。`))) break; const b = lobbyBlock(); if (!b.users.includes(n)) b.users.push(n); commit(); toastr.info(`已屏蔽「${n}」`, '共享', { timeOut: 2500 }); break; }
             case 'unblockuser': { const b = lobbyBlock(); b.users = b.users.filter(x => x !== el.dataset.nick); commit(); break; }
             case 'unblockposts': { lobbyBlock().posts = []; commit(); break; }
-            case 'lobbyaud': ui.lobby.tag = ui.lobby.tag === el.dataset.tag ? '' : el.dataset.tag; loadLobby(); break;
+            case 'lobbyaud': { const t = el.dataset.tag; if ((d.blockedTags || []).includes(t)) { toggleBlockTag(t); break; } ui.lobby.tag = ui.lobby.tag === t ? '' : t; loadLobby(); break; }
             case 'lobbykind': ui.lobby.kind = el.dataset.kind; ui.lobby.mine = false; loadLobby(); break;
             case 'lobbytag2': { const t = el.dataset.tag; if ((d.blockedTags || []).includes(t)) { toggleBlockTag(t); break; } ui.lobby.tag2 = ui.lobby.tag2 === t ? '' : t; render(); break; }
             case 'lobbyview': d.options.lobbyView = el.dataset.v; commit(); break;
@@ -8870,6 +9053,9 @@ async function onClick(ev, outside = false) {
             case 'lobbyupload': openSharedUpload(); break;
             case 'lobbyrefresh': case 'lobbysearch': loadLobby(); break;
             case 'lobbymore': loadLobby({ more: true }); break;
+            case 'lobbyreveal': lobbyRevealed.add(el.dataset.id); render(); break;
+            case 'lobbyr18g': d.options.lobbyR18g = !d.options.lobbyR18g; commit(); render(); break;
+            case 'lobbynsfw': d.options.lobbyNsfwMode = el.dataset.v; d.options.lobbyShowNsfw = el.dataset.v !== 'sfw'; commit(); loadLobby(); break;
             case 'nsfwtoggle':
                 d.options.lobbyShowNsfw = !d.options.lobbyShowNsfw;
                 commit(); loadLobby();
@@ -9724,7 +9910,8 @@ function openSharedUpload(pre = {}) {
     const d = getData();
     const box = modal(`<form data-share-form>
       <h3 class="pc-h3">上传画师串</h3>
-      <label class="pc-field"><span>名称</span><input class="pc-input" name="title" maxlength="200" required placeholder="给这串起个名字" value="${esc(pre.title || '')}"></label>
+      <label class="pc-field"><span>名称</span><input class="pc-input" name="title" maxlength="200" placeholder="不填就用前两位画师的名字" value="${esc(pre.title || '')}"></label>
+      <div class="pc-chips wrap" style="margin-top:-4px"><button class="pc-pill dashed tiny" type="button" data-share-roll="name">🎲 抽一个名字</button></div>
       <label class="pc-field"><span>署名</span><input class="pc-input" name="signature" maxlength="24" required value="${esc(d.lobby.nickname || '')}" placeholder="显示在共享卡片上的名字"></label>
       <div class="pc-field"><span>例图（可选，最多 6 张）</span><label class="pc-pill dashed pc-share-pick">＋ 选图<input name="images" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden></label>
         <small class="pc-dim" style="display:block;margin-top:4px">选 NovelAI 原图，会自动读出正面和负面填到下面</small></div>
@@ -9735,7 +9922,9 @@ function openSharedUpload(pre = {}) {
       <label class="pc-field"><span>负面（可选）</span><textarea class="pc-textarea mono" name="negative" maxlength="20000" placeholder="lowres, bad anatomy …">${esc(pre.negative || '')}</textarea></label>
       ${lobbyTagPicker(pre.tags || [])}
       <label class="pc-field"><span>说明（可选）</span><textarea class="pc-textarea" name="note" maxlength="5000" placeholder="适合的画面、使用建议或来源"></textarea></label>
+      <div class="pc-chips wrap" style="margin-top:-4px"><button class="pc-pill dashed tiny" type="button" data-share-tpl="short">套简单模板</button><button class="pc-pill dashed tiny" type="button" data-share-tpl="long">套详细模板</button><button class="pc-pill dashed tiny" type="button" data-share-roll="note">🎲 抽一句介绍</button></div>
       <label class="pc-switch"><input type="checkbox" name="nsfw"><span></span>含 NSFW 内容</label>
+      <label class="pc-switch"><input type="checkbox" name="spoiler"><span></span>封面剧透<small>封面先糊住，别人点一下才看得到</small></label>
       ${(() => { const o = dlOpts(); return `<label class="pc-switch"><input type="checkbox" name="mark" ${o.on ? 'checked' : ''} ${o.text ? '' : 'disabled'}><span></span>例图打上我的水印<small>${o.text ? '「' + esc(o.text) + '」，位置和大小在 设置 →「下载和水印」' : '先到 设置 →「下载和水印」填水印文字'}</small></label>`; })()}
       <p class="pc-dim small" data-share-status role="status" aria-live="polite"></p>
       <div class="pc-actions"><button class="pc-btn" type="button" data-share-cancel>取消</button><button class="pc-btn dark" type="submit">发布到共享</button></div>
@@ -9755,6 +9944,23 @@ function openSharedUpload(pre = {}) {
     let busy = false, previewVersion = 0;
     const say = message => { status.textContent = message; };
     const metaBox = box.querySelector('[data-share-meta]');
+    // 名字、说明不知道怎么写：抽一个 / 套模板
+    const pickOne = a => a[Math.floor(Math.random() * a.length)];
+    const NAME_A = ['雾色', '糖霜', '午夜', '晴空', '海盐', '琉璃', '锈红', '薄荷', '月光', '烟火', '旧胶片', '冰镇', '玫瑰', '黑白', '蜜桃', '雨后', '星屑', '纸灯', '铅笔', '霓虹', '盛夏', '初雪', '奶油', '墨色', '深海', '黄昏', '晨光', '樱粉', '琥珀', '银灰'];
+    const NAME_B = ['少年', '剪影', '厚涂', '墨线', '柔光', '色块', '笔触', '滤镜', '漫画', '手账', '插画', '速写', '水彩', '光影', '梦境', '气泡', '画报', '日记', '童话', '海报'];
+    const NOTE_A = ['颜色干净', '光影很足', '线条利落', '质感细腻', '氛围感强', '色调温柔', '对比强烈', '笔触明显', '画面通透', '人物很精致'];
+    const NOTE_B = ['适合日常立绘', '男孩子画出来很帅', '女孩子很可爱', '适合做头像', '画场景也不错', '适合正文插图', '出图很稳', '配暗色背景好看', '半身和特写最出彩', '加 NSFW 也好看'];
+    const TPL = {
+        short: '画风：\n适合画：\n',
+        long: '画风：（比如 厚涂、柔和光影、高对比）\n适合画：（男性 / 女性 / 场景 / 头像 / 全身）\n推荐搭配：（固定提示词、尺寸、CFG、采样）\n注意：（容易出的问题，比如手、脸崩）\n',
+    };
+    box.addEventListener('click', ev => {
+        const roll = ev.target.closest('[data-share-roll]')?.dataset.shareRoll;
+        const tpl = ev.target.closest('[data-share-tpl]')?.dataset.shareTpl;
+        if (roll === 'name') { form.elements.namedItem('title').value = pickOne(NAME_A) + pickOne(NAME_B); return; }
+        if (roll === 'note') { const n = form.elements.namedItem('note'); n.value = (n.value.trim() ? n.value.replace(/\s*$/, '\n') : '') + `${pickOne(NOTE_A)}，${pickOne(NOTE_B)}。`; return; }
+        if (tpl) { const n = form.elements.namedItem('note'); if (!n.value.includes(TPL[tpl].split('：')[0] + '：')) n.value = (n.value.trim() ? n.value.replace(/\s*$/, '\n') : '') + TPL[tpl]; n.focus(); return; }
+    });
     const fillFromImageMeta = async version => {
         let meta = null;
         for (const file of files.files) {
@@ -9810,9 +10016,10 @@ function openSharedUpload(pre = {}) {
         if (busy) return;
         if (preLoading && !files.files.length) { say('例图正在载入，请稍等再发布。'); return; }
         const value = name => form.elements.namedItem(name).value.trim();
-        const name = value('title'), nickname = value('signature'), artistString = artistOnly(value('artistString')), negative = value('negative');
+        const nickname = value('signature'), artistString = artistOnly(value('artistString')), negative = value('negative');
         const { members } = M.parseArtistString(artistString);
-        if (!name || !nickname) { say('请填写名称和署名。'); return; }
+        const name = value('title') || members.slice(0, 2).map(m => m.tag.replace(/^artist:/, '')).join(' + ') || '';
+        if (!nickname) { say('请填写署名。'); return; }
         if (!members.length) { say('请填写带 artist: 的画师串，例如 artist:aaa。'); return; }
         if (files.files.length > 6) { say('最多选择 6 张例图。'); return; }
         const selected = Array.from(files.files);
@@ -9820,7 +10027,8 @@ function openSharedUpload(pre = {}) {
         const nsfw = form.elements.namedItem('nsfw').checked;
         const mark = !!form.elements.namedItem('mark')?.checked;
         const tags = pickedTags(box).filter(t => LOBBY_TAG_SET.has(t));
-        if (!tags.some(t => ORIENT.includes(t))) { say('先在标签里选一个性向：男性向、女性向或全性向。'); return; }
+        if (nsfw && !tags.some(t => NSFW_WHO.includes(t))) { say('含 NSFW 的话，在标签里选一下是男性裸体还是女性裸体（都有就两个都选）。'); return; }
+        if (form.elements.namedItem('spoiler')?.checked) tags.push('剧透');
         const note = value('note');
         busy = true;
         Array.from(form.elements).forEach(el => { el.disabled = true; });
@@ -9837,7 +10045,7 @@ function openSharedUpload(pre = {}) {
             const post = { nickname, name, kind: members.length === 1 ? 'artist' : 'group', note, tags, nsfw, content: { artistString, members, ...(negative ? { negative } : {}) }, images };
             await L.createPost(post);
             d.lobby.nickname = nickname;
-            if (nsfw) d.options.lobbyShowNsfw = true;
+            if (nsfw && lobbyNsfwMode() === 'sfw') { d.options.lobbyShowNsfw = true; d.options.lobbyNsfwMode = 'all'; }
             commit();
             box.closeModal();
             Object.assign(ui.lobby, { mine: true, q: '', tag: '', tag2: '', kind: '', sort: 'new' });
