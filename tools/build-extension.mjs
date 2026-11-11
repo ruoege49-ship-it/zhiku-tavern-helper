@@ -3,6 +3,7 @@ import {applyImageChannelCompatibility} from './image-channel-compat.mjs';
 import {applyShareEditCompatibility} from './share-edit-compat.mjs';
 import {applySampleWeightCompatibility} from './sample-weight-compat.mjs';
 import {applyWardrobeDisplayCompatibility} from './wardrobe-display-compat.mjs';
+import {applyCharacterAlbumCompatibility} from './character-album-compat.mjs';
 import {applyBatchScenesCompatibility} from './batch-scenes-compat.mjs';
 import {applyWardrobeCanonCompatibility} from './wardrobe-canon-compat.mjs';
 import {applyImg2imgCompatibility} from './img2img-compat.mjs';
@@ -3938,6 +3939,7 @@ patch(`    if (el.dataset.outmodel !== undefined) {`,`    if (el.dataset.chartes
 s=applyShareEditCompatibility(s);
 s=applySampleWeightCompatibility(s);
 s=applyWardrobeDisplayCompatibility(s);
+s=applyCharacterAlbumCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;

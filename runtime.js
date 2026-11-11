@@ -4469,7 +4469,7 @@ const ctx = () => SillyTavern.getContext();
 
 function avatarUrl(c) {
     // 在智库里设过的头像（角色页生成的图）优先
-    if (c.photo && c.kind !== 'user') return String(c.photo).startsWith('data:') ? c.photo : '/' + String(c.photo).replace(/^\/+/, '');
+    if (c.photo) return String(c.photo).startsWith('data:') ? c.photo : '/' + String(c.photo).replace(/^\/+/, '');
     if (c.kind === 'user') return `/thumbnail?type=persona&file=${encodeURIComponent(c.avatar)}`;
     if (c.kind === 'free') return c.image || '';
     const file = c.kind === 'side' ? c.card : c.avatar;
@@ -6196,6 +6196,21 @@ function viewComfy(d) {
       <label class="pc-switch"><input type="checkbox" data-st-check="comfyChat" ${String(s.comfyChat) === 'true' ? 'checked' : ''}><span></span>聊天插图也用 ComfyUI<small>关着就还是 NovelAI。漫画一直用 NovelAI。NovelAI 的生图页和这页互不影响。</small></label>
     </section>`;
 }
+function studioSavedRef(d) {
+    const st = ui.studio, norm = v => M.tokenize(String(v || '')).map(t => t.text.toLowerCase() + '@' + t.weight).sort().join('|');
+    const ref = st.sourceRef;
+    return M.resolveTicket(d, ref) && norm(st.pos) === norm(M.ticketString(d, ref)) && norm(st.neg) === norm(M.ticketNeg(d, ref)) ? ref : null;
+}
+function studioActiveHint(d) {
+    const ref = studioSavedRef(d);
+    if (!ref) return ui.studio.pos.trim() ? '<span class="pc-dim small">有未保存的修改，保存后才能给正文用</span>' : '';
+    return M.sameRef(ref, d.active) ? '<span class="pc-dim small">正文也在用这串 ✓</span>' : '<button class="pc-pill dashed" data-act="studiouse">正文也用这串</button>';
+}
+function useStudioForChat() {
+    const d = getData(), ref = studioSavedRef(d);
+    if (!ref) { toastr.warning('先保存当前画师串，再给正文用', '智库'); return; }
+    E.setActive(ref); render();
+}
 function viewStudio(d) {
     const s = settingsST();
     loadStudio();
@@ -6221,7 +6236,7 @@ function viewStudio(d) {
       ${(() => { const bare = guessBareArtists(d, st.pos); return bare.length ? `<div class="pc-bare" style="margin-top:8px"><div class="pc-row-between"><span class="pc-dim small">没写 artist: 的画师名 · 点名字单个补</span><button class="pc-pill tiny on" data-act="addprefix">全部补上</button></div><div class="pc-chips wrap">${bare.map(n => `<button class="pc-pill dashed tiny" data-act="addprefix" data-name="${esc(n)}">${esc(n)}</button>`).join('')}</div></div>` : ''; })()}
       <div class="pc-actions wrap pc-mt-s">
         <button class="pc-pill" data-act="saveartist">保存画师串</button>
-        ${owner ? (M.sameRef(owner, d.active) ? '<span class="pc-dim small" style="align-self:center">正文也在用这串 ✓</span>' : `<button class="pc-pill dashed" data-act="use" data-type="${owner.type}" data-id="${esc(owner.id)}" title="正文现在用的是「${esc(d.active ? M.ticketName(d, d.active) : '没选')}」">正文也用这串</button>`) : (st.pos.trim() ? '<span class="pc-dim small" style="align-self:center">存了才能给正文用</span>' : '')}
+        <span data-studio-active style="align-self:center">${studioActiveHint(d)}</span>
         <button class="pc-pill dashed" data-act="clearstudio">清空当前串</button>
         ${st.clearUndo ? '<button class="pc-pill dashed" data-act="undoclearstudio">撤销清空</button>' : ''}
         ${owner?.type === 'group' ? `<button class="pc-pill dashed danger" data-act="delete" ${refAttr(owner)}>删除原串</button>` : ''}
@@ -7310,6 +7325,10 @@ function pairChips(list, where) {
     return list.map((t, i) => `<span class="pc-pair"><button data-act="editpair" data-where="${where}" data-i="${i}"><span class="mono">${esc(t.en)}</span>${t.zh ? `<em>${esc(t.zh)}</em>` : ''}</button><button class="pc-pair-x" data-act="delpair" data-where="${where}" data-i="${i}" aria-label="删掉">×</button></span>`).join('');
 }
 
+function charTestResult(c) {
+    const r = ui.charTestResult;
+    return r && r.key === c?.key && r.data === getData() && r.image === ui.charTestImg ? r : null;
+}
 function viewCharEdit(d) {
     const c = C.getChar(ui.charKey);
     if (!c) { ui.view = 'cast'; return viewCast(d); }
@@ -7317,7 +7336,7 @@ function viewCharEdit(d) {
     const family = card ? [C.getChar('char:' + card), ...C.sideKicks(card)].filter(Boolean) : [];
     const out = C.currentOutfit(c);
     const castRow = C.currentCast().find(x => x.key === c.key);
-    const busy = ui.charBusy;
+    const busy = ui.charBusy || (ui.charKeepBusy ? 'save' : '');
     return `
     <div class="pc-dhead"><button class="pc-round" data-act="nav" data-view="cast" aria-label="返回">‹</button>${av(c, 'pc-av big')}
       <div class="pc-grow"><h2 class="pc-dtitle">${esc(c.name)}</h2><div class="pc-tip" style="margin:0">${c.kind === 'user' ? '我的人设（user）' : c.kind === 'free' ? '存下的角色（没绑定角色卡）' : '角色卡（char）'}${c.kind === 'side' ? ' · 卡里的配角' : ''}</div></div></div>
@@ -7397,8 +7416,8 @@ function viewCharEdit(d) {
       <div class="pc-center pc-mt-s"><button class="pc-btn dark" data-act="chartest" ${busy ? 'disabled' : ''}>${busy === 'test' ? '<span class="pc-busy">生成中</span>' : `用${esc(c.name)}生成一张`}</button></div>
       ${(c.photos || []).length ? `<div class="pc-dim small pc-mt-s">${esc(c.name)}的相册 · 点图看大图</div><div class="pc-hscroll pc-mt-s">${c.photos.map((ph, i) => `<div style="position:relative;flex:none"><img src="${esc(imgUrl({ path: ph.path }))}" style="width:86px;height:116px;object-fit:cover;object-position:50% 10%;border-radius:12px;cursor:zoom-in" data-act="viewimg" data-src="${esc(imgUrl({ path: ph.path }))}" alt=""><div class="pc-chips" style="margin:4px 0 0;gap:4px"><button class="pc-pill tiny dashed" data-act="charphotoavatar" data-i="${i}">头像</button><button class="pc-pill tiny dashed" data-act="charphotodel" data-i="${i}">×</button></div>${ph.nsfw ? '<span style="position:absolute;top:5px;left:5px;padding:0 6px;border-radius:999px;background:rgba(168,74,62,.9);color:#fff;font-size:10px;line-height:16px">NSFW</span>' : ''}</div>`).join('')}</div>` : ''}
     </section>
-    ${ui.charTestImg ? `<section class="pc-card pc-mt pc-result"><img src="${esc(ui.charTestImg)}" alt="" data-act="viewimg" data-src="${esc(ui.charTestImg)}">
-      <div class="pc-actions wrap" style="padding:10px"><button class="pc-btn" data-act="charkeep" data-w="photo">存进相册</button><button class="pc-btn" data-act="charkeep" data-w="avatar">设为头像</button><button class="pc-btn" data-act="charkeep" data-w="ref">加进角色参考图</button></div></section>` : ''}
+    ${charTestResult(c) ? `<section class="pc-card pc-mt pc-result"><img src="${esc(ui.charTestImg)}" alt="" data-act="viewimg" data-src="${esc(ui.charTestImg)}">
+      <div class="pc-actions wrap" style="padding:10px"><button class="pc-btn" data-act="charkeep" data-w="photo" ${busy ? 'disabled' : ''}>存进相册</button><button class="pc-btn" data-act="charkeep" data-w="avatar" ${busy ? 'disabled' : ''}>设为头像</button><button class="pc-btn" data-act="charkeep" data-w="ref" ${busy ? 'disabled' : ''}>加进角色参考图</button></div></section>` : ''}
     <div class="pc-center pc-mt"><button class="pc-pill dashed" data-act="sharechar">分享这个角色</button></div>
     ${c.kind === 'side' || c.kind === 'free' ? `<div class="pc-center pc-mt"><button class="pc-pill dashed danger" data-act="delside">删除这个角色</button></div>` : ''}
     <div style="height:24px"></div>`;
@@ -7408,7 +7427,7 @@ async function charAction(act, el) {
     const c = C.getChar(ui.charKey);
     const d = getData();
     switch (act) {
-        case 'openchar': ui.charKey = el.dataset.key; ui.view = 'charedit'; ui.charTestImg = ''; ui.outTestImg = ''; render(); root.querySelector('.pc-body')?.scrollTo(0, 0); return true;
+        case 'openchar': ui.charTestRun = null; ui.charTestResult = null; if (ui.charBusy === 'test') ui.charBusy = ''; ui.charKey = el.dataset.key; ui.view = 'charedit'; ui.charTestImg = ''; ui.outTestImg = ''; render(); root.querySelector('.pc-body')?.scrollTo(0, 0); return true;
         case 'casttab': ui.castTab = el.dataset.tab; render(); return true;
         case 'castpreview': ui.castPreview = !ui.castPreview; render(); return true;
         case 'outdesign': openOutfitDesigner(); return true;
@@ -7772,40 +7791,60 @@ async function charAction(act, el) {
         }
         case 'chartestopt': ui[el.dataset.k === 'rating' ? 'charTestRating' : 'charTestShot'] = el.dataset.v; render(); return true;
         case 'charkeep': {
-            const img = ui.charTestImg; if (!img) return true;
+            const result = charTestResult(c), mode = el.dataset.w;
+            if (!result || ui.charKeepBusy || ui.charBusy || !['photo', 'avatar', 'ref'].includes(mode)) return true;
+            const registered = d.characters[c.key], groupId = c.charRef, group = d.charRefGroups?.[groupId];
+            const current = () => !stopped && getData() === d && d.characters[c.key] === registered && C.getChar(c.key) && ui.charKey === c.key && charTestResult(c) === result && (mode !== 'ref' || (c.charRef === groupId && d.charRefGroups?.[groupId] === group));
+            const job = {}; ui.charKeepBusy = job; render();
             try {
-                if (el.dataset.w === 'ref') {
-                    const du = await fitCharRef(img);
-                    const { path } = await uploadImage(du, `charref_${M.uid('')}`);
-                    const g = c.charRef && d.charRefGroups?.[c.charRef];
-                    if (g) g.refs.push({ id: M.uid('cr_'), path, type: 'character', strength: 0.6 });
-                    else { const id = M.uid('r_'); (d.charRefGroups ||= {})[id] = { id, name: c.name.slice(0, 20), refs: [{ id: M.uid('cr_'), path, type: 'character', strength: 0.6 }] }; c.charRef = id; }
-                    C.saveChar(c); commit(); toastr.success('加进角色参考图了', '角色');
+                const image = mode === 'ref' ? await fitCharRef(result.image) : result.image;
+                if (!current()) return true;
+                const { path } = await uploadImage(image, `${mode === 'ref' ? 'charref' : 'charphoto'}_${M.uid('')}`);
+                if (!current()) return true;
+                if (mode === 'ref') {
+                    const ref = { id: M.uid('cr_'), path, type: 'character', strength: 0.6 };
+                    if (group) (group.refs ||= []).push(ref);
+                    else { const id = M.uid('r_'); (d.charRefGroups ||= {})[id] = { id, name: c.name.slice(0, 20), refs: [ref] }; c.charRef = id; }
                 } else {
-                    const { path } = await uploadImage(img, `charphoto_${M.uid('')}`);
-                    (c.photos ||= []).unshift({ path, nsfw: !!ui.charTestNsfw, at: Date.now() });
-                    if (el.dataset.w === 'avatar') c.photo = path;
-                    C.saveChar(c); commit(); toastr.success(el.dataset.w === 'avatar' ? '设为头像了（也存进了相册）' : '存进相册了', '角色');
+                    (c.photos ||= []).unshift({ path, nsfw: result.nsfw, at: Date.now() });
+                    if (mode === 'avatar') c.photo = path;
                 }
-            } catch (e) { toastr.error(e.message, '保存失败'); }
-            render(); return true;
+                C.saveChar(c);
+                toastr.success(mode === 'ref' ? '加进角色参考图了' : mode === 'avatar' ? '设为头像了（也存进了相册）' : '存进相册了', '角色');
+            } catch (e) { if (current()) toastr.error(e.message, '保存失败'); }
+            finally { if (ui.charKeepBusy === job) ui.charKeepBusy = null; if (!stopped) render(); }
+            return true;
         }
-        case 'charphotoavatar': { const ph = c.photos?.[Number(el.dataset.i)]; if (ph) { c.photo = ph.path; C.saveChar(c); commit(); render(); toastr.success('设为头像了', '角色'); } return true; }
-        case 'charphotodel': { const i = Number(el.dataset.i), ph = c.photos?.[i]; if (!ph) return true; if (!(await confirmBox('从相册删掉这张？'))) return true; c.photos.splice(i, 1); if (c.photo === ph.path) delete c.photo; C.saveChar(c); commit(); render(); return true; }
+        case 'charphotoavatar': { const ph = c.photos?.[Number(el.dataset.i)]; if (ph) { c.photo = ph.path; C.saveChar(c); render(); toastr.success('设为头像了', '角色'); } return true; }
+        case 'charphotodel': {
+            const ph = c.photos?.[Number(el.dataset.i)]; if (!ph) return true;
+            if (!(await confirmBox('从相册删掉这张？'))) return true;
+            if (stopped || getData() !== d || d.characters[c.key] !== c) return true;
+            const i = c.photos.indexOf(ph); if (i < 0) return true;
+            c.photos.splice(i, 1); if (c.photo === ph.path) delete c.photo;
+            C.saveChar(c); render(); return true;
+        }
         case 'chartest': {
+            if (ui.charBusy || ui.charKeepBusy) return true;
             if (!N.isReady()) { toastr.warning('先到设置里填 NovelAI key', '角色'); return true; }
-            ui.charBusy = 'test'; render();
+            const run = {}, registered = d.characters[c.key], chat = C.chatId();
+            const current = () => !stopped && getData() === d && d.characters[c.key] === registered && C.getChar(c.key) && ui.charKey === c.key && C.chatId() === chat && ui.charTestRun === run;
+            ui.charTestRun = run; ui.charBusy = 'test'; render();
             try {
-                const nsfw = ui.charTestRating === 'nsfw', shot = ui.charTestShot || 'upper';
+                const nsfw = ui.charTestRating === 'nsfw', shot = ['portrait', 'upper', 'full'].includes(ui.charTestShot) ? ui.charTestShot : 'upper';
                 const SHOT = { portrait: 'portrait, upper body, close-up, looking at viewer', upper: 'upper body, looking at viewer', full: 'full body, looking at viewer' + (ui.charTestExtra ? '' : ', standing') };
                 // NSFW 默认加 adult：只画成年人
                 const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', nsfw ? 'nsfw, adult' : '', C.fixedTags(c, { nsfw }), 'solo', SHOT[shot], ui.charTestExtra || '', 'simple background');
                 const { positive, negative } = E.composeStudio({ pos, neg: [c.negative, nsfw ? 'child, loli, shota, young' : ''].filter(Boolean).join(', ') });
                 const W = { portrait: [1024, 1024], upper: [832, 1216], full: [768, 1344] }[shot];
-                ui.charTestImg = await E.generateFull({ positive, negative, width: W[0], height: W[1], director: c.charRef ? await E.charRefs([c.charRef]) : undefined });
-                ui.charTestNsfw = nsfw;
-            } catch (e) { toastr.error(e.message, '生成失败'); }
-            ui.charBusy = ''; render();
+                const director = c.charRef ? await E.charRefs([c.charRef]) : undefined;
+                if (!current()) return true;
+                const image = await E.generateFull({ positive, negative, width: W[0], height: W[1], director });
+                if (!current()) return true;
+                ui.charTestImg = image; ui.charTestNsfw = nsfw;
+                ui.charTestResult = { key: c.key, data: d, image, nsfw };
+            } catch (e) { if (current()) toastr.error(e.message, '生成失败'); }
+            finally { if (ui.charTestRun === run) { ui.charTestRun = null; ui.charBusy = ''; } if (!stopped) render(); }
             return true;
         }
     }
@@ -8673,6 +8712,7 @@ async function onClick(ev, outside = false) {
                 saveStudio(); render(); break;
             }
             case 'saveartist': await saveStudioTicket(); break;
+            case 'studiouse': useStudioForChat(); break;
             case 'unticket': E.setActive(null); break;
             case 'use': {
                 const r = refFrom(el);
@@ -9427,6 +9467,9 @@ function onInput(ev) {
     if (el.dataset?.i2i) { (ui.studio.i2i ||= {})[el.dataset.i2i] = Number(el.value); const o = root.querySelector(`[data-i2i-out="${el.dataset.i2i}"]`); if (o) o.textContent = Math.round(Number(el.value) * 100) + '%'; }
     if (el.dataset.bind) {
         setPath(ui, el.dataset.bind, el.value);
+        if (el.dataset.bind === 'studio.pos' || el.dataset.bind === 'studio.neg') {
+            const hint = root.querySelector('[data-studio-active]'); if (hint) hint.innerHTML = studioActiveHint(getData());
+        }
         if (el.dataset.bind === 'studio.sceneQ' || el.dataset.bind === 'combine.q') { clearTimeout(onInput.sq); onInput.sq = setTimeout(render, 250); }
         if (el.dataset.bind === 'studio.pos') { const w = root.querySelector('#pc-pos-ban'); if (w) w.innerHTML = banWarn(getData(), el.value) + lintHtml(el.value); }
         if (el.dataset.bind === 'batch.text') { const w = root.querySelector('#pc-batch-ban'); if (w) w.innerHTML = batchBanWarn(getData(), el.value); }
@@ -10407,7 +10450,7 @@ async function shareCharacterPost(kind, c, outfit) {
     const tags = await chooseLobbyTags();
     if (!tags) return;
     const images = [];
-    const pic = kind === 'outfit' ? outfit.image : ui.charTestImg || (c.kind === 'free' ? c.image : '') || C.avatarUrl(c);
+    const pic = kind === 'outfit' ? outfit.image : charTestResult(c)?.image || (c.kind === 'free' ? c.image : '') || C.avatarUrl(c);
     if (pic) { try { images.push({ data: await shrinkDataUrl(pic.startsWith('data:') ? pic : await urlToDataUrl(pic)), nsfw: false }); } catch { /* 没图也行 */ } }
     const payload = kind === 'character' ? C.characterPayload(c) : { outfit: { name: outfit.name, tags: outfit.tags }, owner: c.name };
     await L.createPost({
