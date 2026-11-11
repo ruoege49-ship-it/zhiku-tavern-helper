@@ -7916,9 +7916,10 @@ function viewLobby(d) {
     <div class="pc-chips wrap">
       ${[['sfw', '不看裸体'], ['male', '只有男性裸体'], ['female', '只有女性裸体'], ['all', '全都有']].map(([k, t]) => `<button class="pc-pill ${k !== 'sfw' ? 'nsfw' : ''} ${nm === k ? 'on' : 'dashed'}" data-act="lobbynsfw" data-v="${k}" title="只管共享里别人的图，你自己的例图一直显示">${t}</button>`).join('')}
     </div>
-    <div class="pc-chips">${AUD.map(t => `<button class="pc-pill ${lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="${t}">${t}</button>`).join('')}<button class="pc-pill ${d.options.lobbyR18g ? 'nsfw on' : 'blocked'}" data-act="lobbyr18g" title="猎奇、血腥">${d.options.lobbyR18g ? 'R18G 显示' : '⊘ R18G 已屏蔽'}</button></div>
+    <div class="pc-chips">${AUD.map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="${t}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${t}</button>`).join('')}<button class="pc-pill ${d.options.lobbyR18g ? 'nsfw on' : 'blocked'}" data-act="lobbyr18g" title="猎奇、血腥">${d.options.lobbyR18g ? 'R18G 显示' : '⊘ R18G 已屏蔽'}</button></div>
     ${tags.length ? `<div class="pc-chips">${tags.slice(0, 24).map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag2 === t ? 'on' : 'dashed'}" data-act="lobbytag2" data-tag="${esc(t)}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${esc(t)}</button>`).join('')}</div>
-    <div class="pc-tip">点标签 = 只看这类　长按 = 屏蔽，带这个标签的都不显示</div>` : ''}
+` : ''}
+    <div class="pc-tip">点标签 = 只看这类　长按 = 屏蔽，带这个标签的都不显示（BL、BG 这些也一样）</div>
     <div class="pc-sort"><button class="${lb.sort === 'new' ? 'on' : ''}" data-act="lobbysort" data-sort="new">最新</button><button class="${lb.sort === 'hot' ? 'on' : ''}" data-act="lobbysort" data-sort="hot">最多人保存</button><button data-act="lobbyrefresh">刷新</button></div>
     ${lb.error ? `<div class="pc-card pc-pad pc-mt">连不上共享服务器：${esc(lb.error)}</div>` : ''}
     ${lb.loading && !lb.items.length ? '<div class="pc-tip pc-mt">加载中…</div>' : ''}
@@ -7974,6 +7975,7 @@ function toggleBlockTag(tag) {
     const was = d.blockedTags.includes(tag);
     d.blockedTags = was ? d.blockedTags.filter(t => t !== tag) : [...d.blockedTags, tag];
     if (!was && ui.lobby.tag2 === tag) ui.lobby.tag2 = '';
+    if (!was && ui.lobby.tag === tag) { ui.lobby.tag = ''; loadLobby(); }
     commit();
     toastr.info(was ? `不再屏蔽「${tag}」` : `已屏蔽「${tag}」，带这个标签的都不显示`, '共享', { timeOut: 2000 });
 }
@@ -8916,7 +8918,7 @@ async function onClick(ev, outside = false) {
             case 'lobbyblockuser': { const n = el.dataset.nick; if (!n) break; if (!(await confirmBox(`屏蔽「${n}」？他分享的都不再显示（只在你这里，对方不会知道）。`))) break; const b = lobbyBlock(); if (!b.users.includes(n)) b.users.push(n); commit(); toastr.info(`已屏蔽「${n}」`, '共享', { timeOut: 2500 }); break; }
             case 'unblockuser': { const b = lobbyBlock(); b.users = b.users.filter(x => x !== el.dataset.nick); commit(); break; }
             case 'unblockposts': { lobbyBlock().posts = []; commit(); break; }
-            case 'lobbyaud': ui.lobby.tag = ui.lobby.tag === el.dataset.tag ? '' : el.dataset.tag; loadLobby(); break;
+            case 'lobbyaud': { const t = el.dataset.tag; if ((d.blockedTags || []).includes(t)) { toggleBlockTag(t); break; } ui.lobby.tag = ui.lobby.tag === t ? '' : t; loadLobby(); break; }
             case 'lobbykind': ui.lobby.kind = el.dataset.kind; ui.lobby.mine = false; loadLobby(); break;
             case 'lobbytag2': { const t = el.dataset.tag; if ((d.blockedTags || []).includes(t)) { toggleBlockTag(t); break; } ui.lobby.tag2 = ui.lobby.tag2 === t ? '' : t; render(); break; }
             case 'lobbyview': d.options.lobbyView = el.dataset.v; commit(); break;
@@ -9784,6 +9786,7 @@ function openSharedUpload(pre = {}) {
     const box = modal(`<form data-share-form>
       <h3 class="pc-h3">上传画师串</h3>
       <label class="pc-field"><span>名称</span><input class="pc-input" name="title" maxlength="200" placeholder="不填就用前两位画师的名字" value="${esc(pre.title || '')}"></label>
+      <div class="pc-chips wrap" style="margin-top:-4px"><button class="pc-pill dashed tiny" type="button" data-share-roll="name">🎲 抽一个名字</button></div>
       <label class="pc-field"><span>署名</span><input class="pc-input" name="signature" maxlength="24" required value="${esc(d.lobby.nickname || '')}" placeholder="显示在共享卡片上的名字"></label>
       <div class="pc-field"><span>例图（可选，最多 6 张）</span><label class="pc-pill dashed pc-share-pick">＋ 选图<input name="images" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden></label>
         <small class="pc-dim" style="display:block;margin-top:4px">选 NovelAI 原图，会自动读出正面和负面填到下面</small></div>
@@ -9794,6 +9797,7 @@ function openSharedUpload(pre = {}) {
       <label class="pc-field"><span>负面（可选）</span><textarea class="pc-textarea mono" name="negative" maxlength="20000" placeholder="lowres, bad anatomy …">${esc(pre.negative || '')}</textarea></label>
       ${lobbyTagPicker(pre.tags || [])}
       <label class="pc-field"><span>说明（可选）</span><textarea class="pc-textarea" name="note" maxlength="5000" placeholder="适合的画面、使用建议或来源"></textarea></label>
+      <div class="pc-chips wrap" style="margin-top:-4px"><button class="pc-pill dashed tiny" type="button" data-share-tpl="short">套简单模板</button><button class="pc-pill dashed tiny" type="button" data-share-tpl="long">套详细模板</button><button class="pc-pill dashed tiny" type="button" data-share-roll="note">🎲 抽一句介绍</button></div>
       <label class="pc-switch"><input type="checkbox" name="nsfw"><span></span>含 NSFW 内容</label>
       <label class="pc-switch"><input type="checkbox" name="spoiler"><span></span>封面剧透<small>封面先糊住，别人点一下才看得到</small></label>
       ${(() => { const o = dlOpts(); return `<label class="pc-switch"><input type="checkbox" name="mark" ${o.on ? 'checked' : ''} ${o.text ? '' : 'disabled'}><span></span>例图打上我的水印<small>${o.text ? '「' + esc(o.text) + '」，位置和大小在 设置 →「下载和水印」' : '先到 设置 →「下载和水印」填水印文字'}</small></label>`; })()}
@@ -9815,6 +9819,23 @@ function openSharedUpload(pre = {}) {
     let busy = false, previewVersion = 0;
     const say = message => { status.textContent = message; };
     const metaBox = box.querySelector('[data-share-meta]');
+    // 名字、说明不知道怎么写：抽一个 / 套模板
+    const pickOne = a => a[Math.floor(Math.random() * a.length)];
+    const NAME_A = ['雾色', '糖霜', '午夜', '晴空', '海盐', '琉璃', '锈红', '薄荷', '月光', '烟火', '旧胶片', '冰镇', '玫瑰', '黑白', '蜜桃', '雨后', '星屑', '纸灯', '铅笔', '霓虹', '盛夏', '初雪', '奶油', '墨色', '深海', '黄昏', '晨光', '樱粉', '琥珀', '银灰'];
+    const NAME_B = ['少年', '剪影', '厚涂', '墨线', '柔光', '色块', '笔触', '滤镜', '漫画', '手账', '插画', '速写', '水彩', '光影', '梦境', '气泡', '画报', '日记', '童话', '海报'];
+    const NOTE_A = ['颜色干净', '光影很足', '线条利落', '质感细腻', '氛围感强', '色调温柔', '对比强烈', '笔触明显', '画面通透', '人物很精致'];
+    const NOTE_B = ['适合日常立绘', '男孩子画出来很帅', '女孩子很可爱', '适合做头像', '画场景也不错', '适合正文插图', '出图很稳', '配暗色背景好看', '半身和特写最出彩', '加 NSFW 也好看'];
+    const TPL = {
+        short: '画风：\n适合画：\n',
+        long: '画风：（比如 厚涂、柔和光影、高对比）\n适合画：（男性 / 女性 / 场景 / 头像 / 全身）\n推荐搭配：（固定提示词、尺寸、CFG、采样）\n注意：（容易出的问题，比如手、脸崩）\n',
+    };
+    box.addEventListener('click', ev => {
+        const roll = ev.target.closest('[data-share-roll]')?.dataset.shareRoll;
+        const tpl = ev.target.closest('[data-share-tpl]')?.dataset.shareTpl;
+        if (roll === 'name') { form.elements.namedItem('title').value = pickOne(NAME_A) + pickOne(NAME_B); return; }
+        if (roll === 'note') { const n = form.elements.namedItem('note'); n.value = (n.value.trim() ? n.value.replace(/\s*$/, '\n') : '') + `${pickOne(NOTE_A)}，${pickOne(NOTE_B)}。`; return; }
+        if (tpl) { const n = form.elements.namedItem('note'); if (!n.value.includes(TPL[tpl].split('：')[0] + '：')) n.value = (n.value.trim() ? n.value.replace(/\s*$/, '\n') : '') + TPL[tpl]; n.focus(); return; }
+    });
     const fillFromImageMeta = async version => {
         let meta = null;
         for (const file of files.files) {
