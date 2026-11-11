@@ -29,8 +29,13 @@ for (const rating of ['sfw', 'nsfw']) for (const [shot, size] of [['portrait', [
     assert.deepEqual([sent.width, sent.height], size); assert.match(sent.positive, /smiling/);
     assert.equal(sent.positive.includes('nsfw, adult'), rating === 'nsfw');
     assert.equal(sent.positive.includes('test body tag'), rating === 'nsfw');
-    assert.equal(sent.negative.includes('child, loli, shota, young'), rating === 'nsfw');
+    assert.equal(sent.negative, data.characters.a.negative);
     assert.equal(ui.charBusy, '');
+}
+// Both ratings pass the character's negative through unchanged, including an empty value.
+for (const negative of ['', 'custom negative, watermark']) for (const rating of ['sfw', 'nsfw']) {
+    data.characters.a.negative = negative; ui.charTestRating = rating;
+    await action('chartest', el({})); assert.equal(sent.negative, negative);
 }
 // All destinations persist through the model's real save/load path.
 await action('charkeep', el({ w: 'photo' }));

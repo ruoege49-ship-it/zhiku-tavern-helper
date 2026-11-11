@@ -1673,7 +1673,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.37（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.38（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1722,7 +1722,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.37';
+globalThis.__PC_VERSION = '0.8.38';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -7833,9 +7833,9 @@ async function charAction(act, el) {
             try {
                 const nsfw = ui.charTestRating === 'nsfw', shot = ['portrait', 'upper', 'full'].includes(ui.charTestShot) ? ui.charTestShot : 'upper';
                 const SHOT = { portrait: 'portrait, upper body, close-up, looking at viewer', upper: 'upper body, looking at viewer', full: 'full body, looking at viewer' + (ui.charTestExtra ? '' : ', standing') };
-                // NSFW 默认加 adult：只画成年人
+                // NSFW 正面加 adult；负面不动
                 const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', nsfw ? 'nsfw, adult' : '', C.fixedTags(c, { nsfw }), 'solo', SHOT[shot], ui.charTestExtra || '', 'simple background');
-                const { positive, negative } = E.composeStudio({ pos, neg: [c.negative, nsfw ? 'child, loli, shota, young' : ''].filter(Boolean).join(', ') });
+                const { positive, negative } = E.composeStudio({ pos, neg: c.negative });
                 const W = { portrait: [1024, 1024], upper: [832, 1216], full: [768, 1344] }[shot];
                 const director = c.charRef ? await E.charRefs([c.charRef]) : undefined;
                 if (!current()) return true;
