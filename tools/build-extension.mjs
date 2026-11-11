@@ -3358,13 +3358,14 @@ patch(`    const metaBox = box.querySelector('[data-share-meta]');`,`    const m
         if (tpl) { const n = form.elements.namedItem('note'); if (!n.value.includes(TPL[tpl].split('：')[0] + '：')) n.value = (n.value.trim() ? n.value.replace(/\\s*$/, '\\n') : '') + TPL[tpl]; n.focus(); return; }
     });`);
 // 0.8.36：OpenAI 兼容生图通道；漫画正文没有分镜时自动改编
+patch(`\${sw('comicOn', '漫画模式', '认出回复里的 &lt;image&gt;@page…&lt;/image&gt;（漫画台预设）自动画；「画成漫画」不开也能用')}`,`\${sw('comicOn', '漫画模式', '打开后角色的回复会画成漫画：AI 自己写分镜；用了漫画台预设、回复里已经有 &lt;image&gt;@page 分镜的就直接画。楼层里的「画成漫画」不开也能用')}`);
 patch(`        const blocks = comicBlocks(srcOf(msg));
         if (!blocks.length) return;
         render(id);`,`        const blocks = comicBlocks(srcOf(msg));
         if (!blocks.length) {
             // 正文没有分镜：自动让 AI 改编（只管最新一楼，每楼只试一次，免得翻旧聊天时一楼楼改）
             const k = \`\${id}:\${msg.send_date || ''}:\${msg.swipe_id ?? 0}\`;
-            if (!manual && opts().comicAutoAdapt !== false && id === (getContext().chat?.length || 0) - 1 && !autoAdapted.has(k) && String(msg.mes || '').trim().length > 40) {
+            if (!manual && id === (getContext().chat?.length || 0) - 1 && !autoAdapted.has(k) && String(msg.mes || '').trim().length > 40) {
                 autoAdapted.add(k);
                 try { await adapt(id); } catch (e) { console.warn('[智库] 漫画自动改编', e); }
             }
@@ -3373,8 +3374,7 @@ patch(`        const blocks = comicBlocks(srcOf(msg));
         render(id);`);
 patch(`    async function process(id, { manual = false } = {}) {`,`    const autoAdapted = new Set();
     async function process(id, { manual = false } = {}) {`);
-patch(`              \${sw('comicAuto', '回复写完自动出图', '关掉的话，在楼层里点「生成这一页」再画', true)}`,`              \${sw('comicAuto', '回复写完自动出图', '关掉的话，在楼层里点「生成这一页」再画', true)}
-              \${sw('comicAutoAdapt', '正文没有分镜时自动改编', '回复里没有 &lt;image&gt;@page 分镜块时，自动让 AI 把正文改成分镜再画（每楼多一次 AI 调用）；关掉就要在楼层里点「画成漫画」', true)}`);
+patch(`              \${sw('comicAuto', '回复写完自动出图', '关掉的话，在楼层里点「生成这一页」再画', true)}`,`              \${sw('comicAuto', '回复写完自动画成漫画', 'AI 自己把回复改编成分镜再画（每楼多一次 AI 调用，只画最新一楼）；关掉的话，在楼层里点「画成漫画」再画', true)}`);
 patch(`function isReady() {
     const s = settings();
     if (s.naiMode === 'tavern') return true;`,`function isReady() {
