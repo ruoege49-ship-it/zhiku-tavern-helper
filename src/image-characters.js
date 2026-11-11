@@ -119,30 +119,50 @@ export function cleanImageTags(value) {
         .replace(/ZKROLEPLACEHOLDER(\d+)END/g, (_, i) => tokens[Number(i)]);
 }
 
+// Offsets in the original text; nested HTML and unclosed Markdown fences stay intact.
+function imageProtectedRanges(text) {
+    const ranges=[];let fence=null;
+    for(const m of text.matchAll(/^ {0,3}(`{3,}|~{3,})([^\r\n]*)(?:\r?\n|$)/gm)) {
+        if(!fence) fence={at:m.index,char:m[1][0],length:m[1].length};
+        else if(m[1][0]===fence.char && m[1].length>=fence.length && !m[2].trim()) { ranges.push([fence.at,m.index+m[0].length]);fence=null; }
+    }
+    if(fence)ranges.push([fence.at,text.length+1]);
+    const stack=[];let start=0;
+    for(const m of text.matchAll(/<!--[\s\S]*?(?:-->|$)|<\/?(details|div|section|article|aside|header|footer|table|style|script|html|pre|iframe)\b[^>]*>/gi)) {
+        if(ranges.some(([a,b])=>m.index>=a&&m.index<b))continue;
+        if(m[0].startsWith('<!--')) {if(!stack.length)ranges.push([m.index,m.index+m[0].length]);continue;}
+        const tag=m[1].toLowerCase(),closing=m[0].startsWith('</');
+        if(['script','style'].includes(stack.at(-1)) && !(closing&&tag===stack.at(-1)))continue;
+        if(!closing) {if(/\/\s*>$/.test(m[0])){if(!stack.length)ranges.push([m.index,m.index+m[0].length]);continue;}if(!stack.length)start=m.index;stack.push(tag);}
+        else {const i=stack.lastIndexOf(tag);if(i<0)continue;stack.length=i;if(!stack.length)ranges.push([start,m.index+m[0].length]);}
+    }
+    if(stack.length)ranges.push([start,text.length+1]);
+    return ranges.sort((a,b)=>a[0]-b[0]);
+}
+export function safeImageInsertionPoint(text, at) {
+    const hit=imageProtectedRanges(text).find(([a,b])=>at>a&&at<b);
+    return hit?hit[0]:at;
+}
 export function imageInsertionPoint(text, sentence) {
-    const blocks = [...text.matchAll(/<content\b[^>]*>([\s\S]*?)<\/content\s*>/gi)];
-    const ranges = blocks.length ? blocks.map(m => ({ start: m.index + m[0].indexOf('>') + 1, text: m[1] })) : [{ start: 0, text }];
-    // 代码块（```html 状态栏这类）和 HTML 区块里不能插：插进去会把预设的美化拆坏
-    const fences = [];
-    for (const m of text.matchAll(/```[\s\S]*?(?:```|$)|<(details|div|section|table|style|script|html)\b[\s\S]*?<\/\1\s*>/gi)) fences.push([m.index, m.index + m[0].length]);
-    const inFence = at => fences.some(([a, b]) => at > a && at < b);
-    const s = String(sentence || '').trim();
-    const tries = [s, s.replace(/[。！？!?…，,、；;："“”「」『』\s]+$/g, ''), s.slice(-12), s.slice(0, 12)].filter(t => t.length >= 4);
-    for (const range of ranges) for (const term of tries) {
-        let from = 0;
-        while (true) {
-            const i = range.text.indexOf(term, from);
-            if (i < 0) break;
-            const newline = range.text.indexOf('\n', i + term.length);
-            const at = range.start + (newline < 0 ? range.text.length : newline);
-            if (!inFence(range.start + i) && !inFence(at)) return at;
-            from = i + term.length;
+    const fences=imageProtectedRanges(text),inFence=at=>fences.some(([a,b])=>at>=a&&at<b);
+    const blocks=[...text.matchAll(/<content\b[^>]*>([\s\S]*?)<\/content\s*>/gi)].filter(m=>!inFence(m.index));
+    const ranges=blocks.length?blocks.map(m=>({start:m.index+m[0].indexOf('>')+1,text:m[1]})):[{start:0,text}];
+    const s=String(sentence||'').trim();
+    const tries=[s,s.replace(/[。！？!?…，,、；;："“”「」『』\s]+$/g,''),s.slice(-12),s.slice(0,12)].filter(t=>t.length>=4);
+    for(const range of ranges)for(const term of tries){
+        let from=0;
+        while(true){
+            const i=range.text.indexOf(term,from);if(i<0)break;
+            const end=range.start+i+term.length,newline=range.text.indexOf('\n',i+term.length);
+            let at=range.start+(newline<0?range.text.length:newline);
+            const boundary=fences.find(([a])=>a>=end&&a<=at);
+            if(boundary)at=boundary[0];
+            if(!inFence(range.start+i)&&!fences.some(([a,b])=>at>a&&at<b))return at;
+            from=i+term.length;
         }
     }
-    // Even the fallback belongs inside the story, before a trailing status panel.
-    const last = ranges.at(-1);
-    let end = last.start + last.text.trimEnd().length;
-    const firstFenceAfterStory = fences.map(f => f[0]).filter(a => a >= last.start && a <= end).sort((a, b) => a - b)[0];
-    if (firstFenceAfterStory !== undefined && text.slice(last.start, firstFenceAfterStory).trim()) end = last.start + text.slice(last.start, firstFenceAfterStory).trimEnd().length;
-    return end;
+    const last=ranges.at(-1);let end=last.start+last.text.trimEnd().length;
+    const first=fences.find(([a])=>a>=last.start&&a<=end);
+    if(first)end=last.start+text.slice(last.start,first[0]).trimEnd().length;
+    return safeImageInsertionPoint(text,end);
 }

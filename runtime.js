@@ -1309,7 +1309,7 @@ function createIllustrationPlanner({ getContext, getData, settings, roster, askL
         if (!selected.length) { warn('没有可用的画面方案；请检查提示词输出格式或重新生成正文');forget();return; }
         // Locate against the original story once. Preserve order for images sharing an anchor.
         const insertions = new Map();
-        for(const shot of selected){const at=manual?selection.insertAt:imageInsertionPoint(source,shot.anchor);if(!Number.isInteger(at)||at<0||at>source.length)throw new Error('选段插入位置无效');insertions.set(at,[...(insertions.get(at)||[]),shot]);}
+        for(const shot of selected){const at=manual?safeImageInsertionPoint(source,selection.insertAt):imageInsertionPoint(source,shot.anchor);if(!Number.isInteger(at)||at<0||at>source.length)throw new Error('选段插入位置无效');insertions.set(at,[...(insertions.get(at)||[]),shot]);}
         let next='',cursor=0;const positions=new Set(),shifts=[];
         for(const [at,shots] of [...insertions].sort((a,b)=>a[0]-b[0])){next+=source.slice(cursor,at);const before=next.length;for(const shot of shots){next+='\n';positions.add(next.length);next+=shot.raw+'\n';}shifts.push({at,length:next.length-before});cursor=at;}
         next+=source.slice(cursor);
@@ -1324,7 +1324,11 @@ function createIllustrationPlanner({ getContext, getData, settings, roster, askL
         const now=getContext();
         if(stopped || chatKey(now)!==chatId || now.chat?.[id]!==msg || msg.swipe_id!==swipe)return;
         const tokenIndices=parseImageMarkers(next,cfg.start,cfg.end).map((t,i)=>positions.has(t.index)?i:-1).filter(i=>i>=0);
-        now.updateMessageBlock?.(id,msg);try{const ev=now.eventTypes||now.event_types;if(ev?.MESSAGE_UPDATED)await now.eventSource?.emit?.(ev.MESSAGE_UPDATED,id);}catch{}await afterSave(id,{manual,tokenIndices});
+        // SillyTavern 1.14.0 public/scripts/st-context.js exports eventTypes and eventSource.
+        now.updateMessageBlock?.(id,msg);try{const ev=now.eventTypes||now.event_types;if(ev?.MESSAGE_UPDATED)await now.eventSource?.emit?.(ev.MESSAGE_UPDATED,id);}catch{}
+        const latest=getContext();
+        if(stopped||chatKey(latest)!==chatId||latest.chat?.[id]!==msg||msg.swipe_id!==swipe||msg.mes!==next)return;
+        await afterSave(id,{manual,tokenIndices});
         return selected.length;
     }
     async function selected(selection) {
@@ -1621,32 +1625,52 @@ function cleanImageTags(value) {
         .replace(/ZKROLEPLACEHOLDER(\d+)END/g, (_, i) => tokens[Number(i)]);
 }
 
+// Offsets in the original text; nested HTML and unclosed Markdown fences stay intact.
+function imageProtectedRanges(text) {
+    const ranges=[];let fence=null;
+    for(const m of text.matchAll(/^ {0,3}(`{3,}|~{3,})([^\r\n]*)(?:\r?\n|$)/gm)) {
+        if(!fence) fence={at:m.index,char:m[1][0],length:m[1].length};
+        else if(m[1][0]===fence.char && m[1].length>=fence.length && !m[2].trim()) { ranges.push([fence.at,m.index+m[0].length]);fence=null; }
+    }
+    if(fence)ranges.push([fence.at,text.length+1]);
+    const stack=[];let start=0;
+    for(const m of text.matchAll(/<!--[\s\S]*?(?:-->|$)|<\/?(details|div|section|article|aside|header|footer|table|style|script|html|pre|iframe)\b[^>]*>/gi)) {
+        if(ranges.some(([a,b])=>m.index>=a&&m.index<b))continue;
+        if(m[0].startsWith('<!--')) {if(!stack.length)ranges.push([m.index,m.index+m[0].length]);continue;}
+        const tag=m[1].toLowerCase(),closing=m[0].startsWith('</');
+        if(['script','style'].includes(stack.at(-1)) && !(closing&&tag===stack.at(-1)))continue;
+        if(!closing) {if(/\/\s*>$/.test(m[0])){if(!stack.length)ranges.push([m.index,m.index+m[0].length]);continue;}if(!stack.length)start=m.index;stack.push(tag);}
+        else {const i=stack.lastIndexOf(tag);if(i<0)continue;stack.length=i;if(!stack.length)ranges.push([start,m.index+m[0].length]);}
+    }
+    if(stack.length)ranges.push([start,text.length+1]);
+    return ranges.sort((a,b)=>a[0]-b[0]);
+}
+function safeImageInsertionPoint(text, at) {
+    const hit=imageProtectedRanges(text).find(([a,b])=>at>a&&at<b);
+    return hit?hit[0]:at;
+}
 function imageInsertionPoint(text, sentence) {
-    const blocks = [...text.matchAll(/<content\b[^>]*>([\s\S]*?)<\/content\s*>/gi)];
-    const ranges = blocks.length ? blocks.map(m => ({ start: m.index + m[0].indexOf('>') + 1, text: m[1] })) : [{ start: 0, text }];
-    // 代码块（```html 状态栏这类）和 HTML 区块里不能插：插进去会把预设的美化拆坏
-    const fences = [];
-    for (const m of text.matchAll(/```[\s\S]*?(?:```|$)|<(details|div|section|table|style|script|html)\b[\s\S]*?<\/\1\s*>/gi)) fences.push([m.index, m.index + m[0].length]);
-    const inFence = at => fences.some(([a, b]) => at > a && at < b);
-    const s = String(sentence || '').trim();
-    const tries = [s, s.replace(/[。！？!?…，,、；;："“”「」『』\s]+$/g, ''), s.slice(-12), s.slice(0, 12)].filter(t => t.length >= 4);
-    for (const range of ranges) for (const term of tries) {
-        let from = 0;
-        while (true) {
-            const i = range.text.indexOf(term, from);
-            if (i < 0) break;
-            const newline = range.text.indexOf('\n', i + term.length);
-            const at = range.start + (newline < 0 ? range.text.length : newline);
-            if (!inFence(range.start + i) && !inFence(at)) return at;
-            from = i + term.length;
+    const fences=imageProtectedRanges(text),inFence=at=>fences.some(([a,b])=>at>=a&&at<b);
+    const blocks=[...text.matchAll(/<content\b[^>]*>([\s\S]*?)<\/content\s*>/gi)].filter(m=>!inFence(m.index));
+    const ranges=blocks.length?blocks.map(m=>({start:m.index+m[0].indexOf('>')+1,text:m[1]})):[{start:0,text}];
+    const s=String(sentence||'').trim();
+    const tries=[s,s.replace(/[。！？!?…，,、；;："“”「」『』\s]+$/g,''),s.slice(-12),s.slice(0,12)].filter(t=>t.length>=4);
+    for(const range of ranges)for(const term of tries){
+        let from=0;
+        while(true){
+            const i=range.text.indexOf(term,from);if(i<0)break;
+            const end=range.start+i+term.length,newline=range.text.indexOf('\n',i+term.length);
+            let at=range.start+(newline<0?range.text.length:newline);
+            const boundary=fences.find(([a])=>a>=end&&a<=at);
+            if(boundary)at=boundary[0];
+            if(!inFence(range.start+i)&&!fences.some(([a,b])=>at>a&&at<b))return at;
+            from=i+term.length;
         }
     }
-    // Even the fallback belongs inside the story, before a trailing status panel.
-    const last = ranges.at(-1);
-    let end = last.start + last.text.trimEnd().length;
-    const firstFenceAfterStory = fences.map(f => f[0]).filter(a => a >= last.start && a <= end).sort((a, b) => a - b)[0];
-    if (firstFenceAfterStory !== undefined && text.slice(last.start, firstFenceAfterStory).trim()) end = last.start + text.slice(last.start, firstFenceAfterStory).trimEnd().length;
-    return end;
+    const last=ranges.at(-1);let end=last.start+last.text.trimEnd().length;
+    const first=fences.find(([a])=>a>=last.start&&a<=end);
+    if(first)end=last.start+text.slice(last.start,first[0]).trimEnd().length;
+    return safeImageInsertionPoint(text,end);
 }
 
 // 智库 · 原生扩展版 v0.8.37（二改自从前佬的智绘姬）
@@ -5025,7 +5049,7 @@ function shiftImageRecords(records, tokens, swipe, shifts) {
     return next;
 }
 function createMarkerController({context,getData,generate,upload,notify,document:doc=globalThis.document,resolveUrl=u=>u}) {
-    const zkMsgUpdated=id=>{try{const c=context(),ev=c.eventTypes||c.event_types;if(ev?.MESSAGE_UPDATED)c.eventSource?.emit?.(ev.MESSAGE_UPDATED,id);}catch{}};
+    const zkMsgUpdated=id=>{try{const c=context(),ev=c.eventTypes||c.event_types;if(ev?.MESSAGE_UPDATED)Promise.resolve(c.eventSource?.emit?.(ev.MESSAGE_UPDATED,id)).catch(()=>{});}catch{}};
     // 图存在本地浏览器时地址是 idb:xxx，要先换成能显示的地址；换不出来（存在别的设备上）就是空的
     function showUrl(url,apply,missing){Promise.resolve(resolveUrl(url)).then(u=>{if(u)apply(u);else missing?.();},()=>missing?.());}
     let queue=Promise.resolve(), stopped=false;
@@ -7445,22 +7469,29 @@ async function charAction(act, el) {
         }
         case 'wardthumb': d.options.wardThumb = el.dataset.v; commit({ silent: true }); render(); return true;
         case 'outimggen': {
+            if (ui.outfit?.busy) return true;
             if (!N.isReady()) { toastr.warning('先到设置里填 NovelAI key', '衣柜'); return true; }
             const o = curOutfit();
             const owner0 = ui.outfit.draft ? C.getChar(ui.outfit.dest) : C.findOutfit(ui.outfit.owner, ui.outfit.id)?.owner;
             // 模特：跟穿的人 / 男模特 / 女模特 / 指定角色
-            const mk = d.options.outfitModel || 'owner';
+            const mk = d.options.outfitModel || 'owner', panel = ui.outfit;
+            if (!o) return true;
+            const signature = JSON.stringify(o.tags);
+            const current = () => !stopped && getData() === d && ui.outfit === panel && curOutfit() === o && (d.options.outfitModel || 'owner') === mk && JSON.stringify(o.tags) === signature;
             const owner = mk === 'owner' ? owner0 : (mk === 'boy' || mk === 'girl') ? null : (C.getChar(mk) || owner0);
             const modelTags = mk === 'girl' ? '1girl, solo, adult' : '1boy, solo, male focus, adult';
             ui.outfit.busy = 'gen'; render();
             try {
                 const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', owner ? C.lookTags(owner) : modelTags, C.tagText(o.tags), 'solo, full body, standing, looking at viewer, simple background, white background');
                 const { positive, negative } = E.composeStudio({ pos, neg: owner?.negative || '' });
-                const img = await E.generateFull({ positive, negative, width: 768, height: 1344, director: owner?.charRef ? await E.charRefs([owner.charRef]) : undefined });
-                if (ui.outfit.draft) o.image = img;
-                else { o.image = (await uploadImage(img, `outfit_${M.uid('')}`)).path; saveOutfit(); }
-            } catch (e) { toastr.error(e.message, '生成失败'); }
-            ui.outfit.busy = ''; render();
+                const director = owner?.charRef ? await E.charRefs([owner.charRef]) : undefined;
+                if (!current()) return true;
+                const img = await E.generateFull({ positive, negative, width: 768, height: 1344, director });
+                if (!current()) return true;
+                if (panel.draft) o.image = img;
+                else { const result = await uploadImage(img, `outfit_${M.uid('')}`); if (current()) { o.image = result.path; saveOutfit(); } }
+            } catch (e) { if (current()) toastr.error(e.message, '生成失败'); }
+            finally { panel.busy = ''; if (!stopped) render(); }
             return true;
         }
         case 'outshare': { const h = C.findOutfit(ui.outfit.owner, ui.outfit.id); if (h) await shareCharacterPost('outfit', h.owner || { name: '' }, h.o); return true; }
