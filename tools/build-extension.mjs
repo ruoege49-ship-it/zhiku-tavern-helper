@@ -3586,6 +3586,109 @@ function shareDetails({ name = '', note = '', nsfw = false } = {}) {
     });
 }
 async function shareToLobby(ref) {`);
+// 0.8.36：共享里自己分享的可以修改（服务器不支持就重新上传），带编辑记录
+patch(`const deletePost = id => call(\`/lobby/posts/\${id}\`, { method: 'DELETE' });
+
+return { serverBase, lobbyImgUrl, health, listPosts, listTags, createPost, likePost, copyPost, reportPost, deletePost };`,`const deletePost = id => call(\`/lobby/posts/\${id}\`, { method: 'DELETE' });
+/** 改自己分享的：服务器支持 PUT 就直接改；不支持的话由调用方重新上传 */
+const updatePost = (id, body) => call(\`/lobby/posts/\${id}\`, { method: 'PUT', body });
+
+return { serverBase, lobbyImgUrl, health, listPosts, listTags, createPost, likePost, copyPost, reportPost, deletePost, updatePost };`);
+patch(`        \${p.mine ? \`<button class="pc-btn danger" data-act="lobbydel" data-id="\${p.id}">删除</button>\` :`,`        \${p.mine ? \`<button class="pc-btn danger" data-act="lobbydel" data-id="\${p.id}">删除</button><button class="pc-btn" data-act="lobbyedit" data-id="\${p.id}">修改</button>\` :`);
+patch(`      \${p.note ? \`<p class="pc-quote small">\${esc(p.note)}</p>\` : ''}
+      <div class="pc-chips wrap">\${p.tags.map(`,`      \${p.note ? \`<p class="pc-quote small">\${esc(p.note)}</p>\` : ''}
+      \${lobbyHistoryHtml(p)}
+      <div class="pc-chips wrap">\${p.tags.map(`);
+patch(`function openLobbySheet(p) {`,`/** 编辑记录：最新的在上面；只列这次改了的东西 */
+function lobbyHistoryHtml(p) {
+    const h = Array.isArray(p.content?.history) ? p.content.history : [];
+    if (!h.length) return '';
+    const fmt = t => { const d = new Date(Number(t) || 0); return isNaN(d) ? '' : \`\${d.getMonth() + 1}/\${d.getDate()} \${String(d.getHours()).padStart(2, '0')}:\${String(d.getMinutes()).padStart(2, '0')}\`; };
+    const rows = h.slice().reverse().map(e => {
+        const ch = (e.changed || []).join('、');
+        return \`<li><b>\${esc(fmt(e.at))}</b>\${ch ? \` · 改了\${esc(ch)}\` : ''}\${e.what ? \`<br>\${esc(e.what)}\` : ''}\${e.artistString && (e.changed || []).includes('画师串') ? \`<br><span class="mono">原来：\${esc(String(e.artistString).slice(0, 300))}</span>\` : ''}\${e.name && (e.changed || []).includes('名称') ? \`<br>原来叫「\${esc(e.name)}」\` : ''}</li>\`;
+    }).join('');
+    return \`<details class="pc-details pc-mt-s"><summary class="pc-dim small">改过 \${h.length} 次 · 编辑记录</summary><ol class="pc-dim small" style="padding-left:1.2em;margin:6px 0;line-height:1.6">\${rows}</ol></details>\`;
+}
+/** 修改自己分享的：名称、说明、画师串、负面、标签、封面剧透；记一条编辑记录 */
+function editLobbyPost(p) {
+    return new Promise(resolve => {
+        const tags0 = (p.tags || []).filter(t => t !== '剧透');
+        const box = modal(\`<h3 class="pc-h3">修改分享</h3>
+          <label class="pc-field"><span>名称</span><input class="pc-input" data-ed-name maxlength="200" value="\${esc(p.name || '')}"></label>
+          <label class="pc-field"><span>说明</span><textarea class="pc-textarea" data-ed-note maxlength="5000">\${esc(p.note || '')}</textarea></label>
+          <div class="pc-chips wrap" style="margin-top:-4px"><button class="pc-pill dashed tiny" type="button" data-ed-tpl="short">套简单模板</button><button class="pc-pill dashed tiny" type="button" data-ed-tpl="long">套详细模板</button><button class="pc-pill dashed tiny" type="button" data-ed-roll>🎲 抽一句介绍</button></div>
+          \${p.content?.artistString !== undefined ? \`<label class="pc-field"><span>画师串</span><textarea class="pc-textarea mono" data-ed-str maxlength="20000">\${esc(p.content.artistString || '')}</textarea></label>
+          <label class="pc-field"><span>负面（可选）</span><textarea class="pc-textarea mono" data-ed-neg maxlength="20000">\${esc(p.content.negative || '')}</textarea></label>\` : ''}
+          <label class="pc-switch"><input type="checkbox" data-ed-spoiler \${(p.tags || []).includes('剧透') ? 'checked' : ''}><span></span>封面剧透</label>
+          <div class="pc-label">标签</div>\${lobbyTagPicker(tags0)}
+          <label class="pc-field pc-mt-s"><span>这次改了什么（可选，会写进编辑记录）</span><input class="pc-input" data-ed-what maxlength="200" placeholder="比如：换了一位画师，权重调低"></label>
+          <p class="pc-dim small" data-tagerr></p>
+          <div class="pc-actions"><button class="pc-btn" type="button" data-x="no">取消</button><button class="pc-btn dark" type="button" data-x="ok">保存修改</button></div>\`);
+        wireTagPicker(box);
+        const q = sel => box.querySelector(sel), noteEl = q('[data-ed-note]');
+        const append = t => { noteEl.value = (noteEl.value.trim() ? noteEl.value.replace(/\\s*$/, '\\n') : '') + t; };
+        box.addEventListener('click', ev => {
+            const tpl = ev.target.closest('[data-ed-tpl]')?.dataset.edTpl;
+            if (tpl) { if (!noteEl.value.includes(SHARE_TPL[tpl].split('：')[0] + '：')) append(SHARE_TPL[tpl]); return; }
+            if (ev.target.closest('[data-ed-roll]')) { append(\`\${pickOneOf(SHARE_NOTE_A)}，\${pickOneOf(SHARE_NOTE_B)}。\`); return; }
+            const x = ev.target.closest('[data-x]')?.dataset.x;
+            if (x === 'no') { box.closeModal(); resolve(null); }
+            if (x === 'ok') {
+                const tags = pickedTags(box).filter(t => LOBBY_TAG_SET.has(t));
+                if (postHasNsfw(p) && !tags.some(t => NSFW_WHO.includes(t))) { q('[data-tagerr]').textContent = '例图里有 NSFW 的，选一下是男性裸体还是女性裸体（都有就两个都选）'; return; }
+                if (q('[data-ed-spoiler]').checked) tags.push('剧透');
+                const str = q('[data-ed-str]') ? artistOnly(q('[data-ed-str]').value.trim()) : undefined;
+                if (str !== undefined && !M.parseArtistString(str).members.length) { q('[data-tagerr]').textContent = '画师串里要有 artist: 开头的画师'; return; }
+                box.closeModal();
+                resolve({ name: q('[data-ed-name]').value.trim() || p.name, note: noteEl.value.trim(), tags, artistString: str, negative: q('[data-ed-neg]') ? q('[data-ed-neg]').value.trim() : undefined, what: q('[data-ed-what]').value.trim() });
+            }
+        });
+    });
+}
+async function saveLobbyEdit(p, f) {
+    const changed = [];
+    if (f.name !== p.name) changed.push('名称');
+    if (f.note !== (p.note || '')) changed.push('说明');
+    if (f.artistString !== undefined && f.artistString !== (p.content?.artistString || '')) changed.push('画师串');
+    if (f.negative !== undefined && f.negative !== (p.content?.negative || '')) changed.push('负面');
+    if ([...f.tags].sort().join() !== [...(p.tags || [])].sort().join()) changed.push('标签');
+    if (!changed.length && !f.what) { toastr.info('什么都没改', '共享'); return null; }
+    const entry = { at: Date.now(), changed, what: f.what || '', name: p.name, note: p.note || '', artistString: p.content?.artistString || '', negative: p.content?.negative || '', tags: p.tags || [] };
+    const content = { ...(p.content || {}), ...(f.artistString !== undefined ? { artistString: f.artistString } : {}), ...(f.negative !== undefined ? (f.negative ? { negative: f.negative } : { negative: undefined }) : {}), history: [...(Array.isArray(p.content?.history) ? p.content.history : []), entry].slice(-30), editedAt: entry.at };
+    if (content.negative === undefined) delete content.negative;
+    const body = { name: f.name, note: f.note, tags: f.tags, content };
+    try {
+        await L.updatePost(p.id, body);
+        return { ...p, ...body };
+    } catch (e) {
+        // 服务器还不支持直接改：重新上传一条，再删掉旧的（点赞和保存数会清零）
+        if (!/404|405|501|not found|method|cannot put/i.test(String(e?.message || e))) throw e;
+        if (!(await confirmBox('共享服务器还不支持直接修改，要重新上传一条再删掉旧的吗？编辑记录会带过去，点赞和保存数会清零。'))) return null;
+        const images = [];
+        for (const img of p.images || []) {
+            try { images.push({ data: await shrinkDataUrl(await urlToDataUrl(L.lobbyImgUrl(img.url))), nsfw: !!img.nsfw }); } catch { /* 读不到的图跳过 */ }
+        }
+        const r = await L.createPost({ kind: p.kind, ...body, nsfw: postHasNsfw(p), images });
+        await L.deletePost(p.id);
+        return { reupload: true, id: r?.id };
+    }
+}
+function openLobbySheet(p) {`);
+patch(`            case 'lobbydel': {`,`            case 'lobbyedit': {
+                const p = ui.lobby.items.find(x => x.id === el.dataset.id);
+                if (!p) break;
+                const f = await editLobbyPost(p);
+                if (!f) break;
+                try {
+                    const r = await saveLobbyEdit(p, f);
+                    if (!r) break;
+                    if (r.reupload) { toastr.success('已重新上传，旧的删掉了', '共享'); loadLobby(); }
+                    else { Object.assign(p, r); toastr.success('改好了，编辑记录加了一条', '共享'); render(); }
+                } catch (e) { toastr.error(e.message, '修改失败'); }
+                break;
+            }
+            case 'lobbydel': {`);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
