@@ -3534,6 +3534,58 @@ s=applyWardrobeCanonCompatibility(s);
 s=applyBatchScenesCompatibility(s);
 s=applyAiBudgetCompatibility(s);
 s=applyImageChannelCompatibility(s);
+// 0.8.36：画师组「分享」时能写名字、说明（存回备注）、勾封面剧透
+patch(`    const t = M.resolveTicket(d, ref);
+    const picked = await chooseLobbyTags();
+    if (!picked) return;
+    const images = [];`,`    const t = M.resolveTicket(d, ref);
+    const nsfwImgs = t.item.images.slice(0, 6).some(img => img.nsfw);
+    const form = await shareDetails({ name: M.ticketName(d, ref), note: t.item.note || '', nsfw: nsfwImgs });
+    if (!form) return;
+    const picked = form.tags;
+    // 写的说明也存回这串
+    if (form.note !== (t.item.note || '')) { t.item.note = form.note; commit(); }
+    const images = [];`);
+patch(`        kind: ref.type, name: M.ticketName(d, ref), note: t.item.note || '',
+        tags: picked,`,`        kind: ref.type, name: form.name || M.ticketName(d, ref), note: form.note,
+        tags: picked,`);
+patch(`async function shareToLobby(ref) {`,`/** 分享前写名字、说明、选标签（名字能抽、说明有模板） */
+const SHARE_NAME_A = ['雾色', '糖霜', '午夜', '晴空', '海盐', '琉璃', '锈红', '薄荷', '月光', '烟火', '旧胶片', '冰镇', '玫瑰', '黑白', '蜜桃', '雨后', '星屑', '纸灯', '铅笔', '霓虹', '盛夏', '初雪', '奶油', '墨色', '深海', '黄昏', '晨光', '樱粉', '琥珀', '银灰'];
+const SHARE_NAME_B = ['少年', '剪影', '厚涂', '墨线', '柔光', '色块', '笔触', '滤镜', '漫画', '手账', '插画', '速写', '水彩', '光影', '梦境', '气泡', '画报', '日记', '童话', '海报'];
+const SHARE_NOTE_A = ['颜色干净', '光影很足', '线条利落', '质感细腻', '氛围感强', '色调温柔', '对比强烈', '笔触明显', '画面通透', '人物很精致'];
+const SHARE_NOTE_B = ['适合日常立绘', '男孩子画出来很帅', '女孩子很可爱', '适合做头像', '画场景也不错', '适合正文插图', '出图很稳', '配暗色背景好看', '半身和特写最出彩', '加 NSFW 也好看'];
+const SHARE_TPL = { short: '画风：\\n适合画：\\n', long: '画风：（比如 厚涂、柔和光影、高对比）\\n适合画：（男性 / 女性 / 场景 / 头像 / 全身）\\n推荐搭配：（固定提示词、尺寸、CFG、采样）\\n注意：（容易出的问题，比如手、脸崩）\\n' };
+const pickOneOf = a => a[Math.floor(Math.random() * a.length)];
+function shareDetails({ name = '', note = '', nsfw = false } = {}) {
+    return new Promise(resolve => {
+        const box = modal(\`<h3 class="pc-h3">分享到共享</h3>
+          <label class="pc-field"><span>名称</span><input class="pc-input" data-sh-name maxlength="200" value="\${esc(name)}"></label>
+          <div class="pc-chips wrap" style="margin-top:-4px"><button class="pc-pill dashed tiny" type="button" data-sh-roll="name">🎲 抽一个名字</button></div>
+          <label class="pc-field"><span>说明（可选，也会存回这串的备注）</span><textarea class="pc-textarea" data-sh-note maxlength="5000" placeholder="适合的画面、使用建议或来源">\${esc(note)}</textarea></label>
+          <div class="pc-chips wrap" style="margin-top:-4px"><button class="pc-pill dashed tiny" type="button" data-sh-tpl="short">套简单模板</button><button class="pc-pill dashed tiny" type="button" data-sh-tpl="long">套详细模板</button><button class="pc-pill dashed tiny" type="button" data-sh-roll="note">🎲 抽一句介绍</button></div>
+          <label class="pc-switch"><input type="checkbox" data-sh-spoiler><span></span>封面剧透<small>封面先糊住，别人点一下才看得到</small></label>
+          <div class="pc-label">标签</div>\${lobbyTagPicker([])}<p class="pc-dim small" data-tagerr></p>
+          <div class="pc-actions"><button class="pc-btn" type="button" data-x="no">取消</button><button class="pc-btn dark" type="button" data-x="ok">分享</button></div>\`);
+        wireTagPicker(box);
+        const nameEl = box.querySelector('[data-sh-name]'), noteEl = box.querySelector('[data-sh-note]');
+        const append = t => { noteEl.value = (noteEl.value.trim() ? noteEl.value.replace(/\\s*$/, '\\n') : '') + t; };
+        box.addEventListener('click', ev => {
+            const roll = ev.target.closest('[data-sh-roll]')?.dataset.shRoll, tpl = ev.target.closest('[data-sh-tpl]')?.dataset.shTpl;
+            if (roll === 'name') { nameEl.value = pickOneOf(SHARE_NAME_A) + pickOneOf(SHARE_NAME_B); return; }
+            if (roll === 'note') { append(\`\${pickOneOf(SHARE_NOTE_A)}，\${pickOneOf(SHARE_NOTE_B)}。\`); return; }
+            if (tpl) { if (!noteEl.value.includes(SHARE_TPL[tpl].split('：')[0] + '：')) append(SHARE_TPL[tpl]); noteEl.focus(); return; }
+            const x = ev.target.closest('[data-x]')?.dataset.x;
+            if (x === 'no') { box.closeModal(); resolve(null); }
+            if (x === 'ok') {
+                const tags = pickedTags(box).filter(t => LOBBY_TAG_SET.has(t));
+                if (nsfw && !tags.some(t => NSFW_WHO.includes(t))) { box.querySelector('[data-tagerr]').textContent = '例图里有 NSFW 的，选一下是男性裸体还是女性裸体（都有就两个都选）'; return; }
+                if (box.querySelector('[data-sh-spoiler]').checked) tags.push('剧透');
+                box.closeModal(); resolve({ tags, name: nameEl.value.trim(), note: noteEl.value.trim() });
+            }
+        });
+    });
+}
+async function shareToLobby(ref) {`);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
