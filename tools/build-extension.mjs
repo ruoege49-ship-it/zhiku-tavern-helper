@@ -3829,6 +3829,31 @@ patch(`function onPointerDown(ev) {
     const dh = ev.target.closest?.('[data-aipdrag]');
     if (dh) { startAiDrag(ev, dh); return; }
     const t = ev.target.closest?.('[data-lp]');`);
+// 0.8.36：例图模板不再逼着上色（修黄疸）；单个画师例图可以加权重
+patch(`['all', '三种都要']].map(([k, t]) => \`<button class="pc-pill tiny \${o.shot === k ? 'on' : 'dashed'}" data-act="pickshot" data-scope="batch" data-v="\${k}">\${t}</button>\`).join('')}</div>\`;`,`['all', '三种都要']].map(([k, t]) => \`<button class="pc-pill tiny \${o.shot === k ? 'on' : 'dashed'}" data-act="pickshot" data-scope="batch" data-v="\${k}">\${t}</button>\`).join('')}</div>
+      <div class="pc-chips wrap"><span class="pc-dim small" style="align-self:center">单个画师的权重</span>\${[1, 1.2, 1.5, 2].map(w => \`<button class="pc-pill tiny \${(Number(getData().options.sampleSoloWeight) || 1) === w ? 'on' : 'dashed'}" data-act="soloweight" data-v="\${w}">×\${w}</button>\`).join('')}</div>\`;`);
+patch(`const NOT_FLAT = 'silhouette, monochrome, greyscale, mannequin, faceless, reference sheet, character sheet, turnaround, anatomy chart, flat color, solid color, blank eyes';
+const CLOTHED = 'detailed face, detailed eyes, casual clothes, shirt, pants, full color';`,`// 不再在负面里禁 monochrome / greyscale / flat color、正面里写 full color：限色、黑白、平涂的画师会被逼着上色，皮肤变成一片红、橙、黄（「黄疸」）
+const NOT_FLAT = 'silhouette, mannequin, faceless, reference sheet, character sheet, turnaround, anatomy chart, blank eyes';
+const CLOTHED = 'detailed face, detailed eyes, casual clothes, shirt, pants';
+const NOT_FLAT_V3 = 'silhouette, monochrome, greyscale, mannequin, faceless, reference sheet, character sheet, turnaround, anatomy chart, flat color, solid color, blank eyes';
+const CLOTHED_V3 = 'detailed face, detailed eyes, casual clothes, shirt, pants, full color';`);
+patch(`    for (const set of [OLD_TEMPLATE_TEXT, OLD_TEMPLATE_TEXT2]) for`,`    // 上一版（负面禁黑白、正面写 full color）没改过的，也换成新版
+    const OLD3 = Object.fromEntries(Object.entries(DEFAULT_TEMPLATES).map(([k, t]) => [k, { positive: t.positive.split(CLOTHED).join(CLOTHED_V3), negative: t.negative.split(NOT_FLAT).join(NOT_FLAT_V3) }]));
+    for (const set of [OLD_TEMPLATE_TEXT, OLD_TEMPLATE_TEXT2, OLD3]) for`);
+patch(`    const fixed = M.ticketString(d, ref);
+    const image = await generateSample({ fixed, template: tpl, neg: M.ticketNeg(d, ref) });`,`    let fixed = M.ticketString(d, ref);
+    // 只有一位画师：按设置加权重，画风更明显
+    const w = Number(d.options.sampleSoloWeight) || 1;
+    const tag = ref.type === 'artist' ? d.artists[ref.id]?.tag : '';
+    if (tag && w !== 1 && fixed.includes(tag) && !new RegExp(\`::\\\\s*\${tag.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&')}\\\\s*::\`).test(fixed)) fixed = fixed.replace(tag, \`\${w}::\${tag}::\`);
+    const image = await generateSample({ fixed, template: tpl, neg: M.ticketNeg(d, ref) });`);
+patch(`      <button class="pc-pill tiny dashed" data-act="edittpl" data-scope="\${scope}">改提示词</button></div>\`;
+}`,`      <button class="pc-pill tiny dashed" data-act="edittpl" data-scope="\${scope}">改提示词</button></div>
+      <div class="pc-chips wrap"><span class="pc-dim small" style="align-self:center">单个画师的权重</span>\${[1, 1.2, 1.5, 2].map(w => \`<button class="pc-pill tiny \${(Number(getData().options.sampleSoloWeight) || 1) === w ? 'on' : 'dashed'}" data-act="soloweight" data-v="\${w}">×\${w}</button>\`).join('')}</div>\`;
+}`);
+patch(`            case 'batchscene': ui.batch.sceneSig = el.dataset.v || ''; render(); break;`,`            case 'batchscene': ui.batch.sceneSig = el.dataset.v || ''; render(); break;
+            case 'soloweight': d.options.sampleSoloWeight = Number(el.dataset.v) || 1; commit({ silent: true }); render(); break;`);
 s=applyShareEditCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
