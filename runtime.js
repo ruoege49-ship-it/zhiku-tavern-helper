@@ -3601,14 +3601,16 @@ async function saveImageTo(ref, dataUrl, { nsfw = false, templateId = '' } = {})
     return id;
 }
 
-async function makeSampleFor(ref, templateId) {
+async function makeSampleFor(ref, templateId, { soloWeight = getData().options.sampleSoloWeight } = {}) {
     const d = getData();
     const tpl = d.templates[templateId] || d.templates.sfw_bust;
-    let fixed = M.ticketString(d, ref);
-    // 只有一位画师：按设置加权重，画风更明显
-    const w = Number(d.options.sampleSoloWeight) || 1;
-    const tag = ref.type === 'artist' ? d.artists[ref.id]?.tag : '';
-    if (tag && w !== 1 && fixed.includes(tag) && !new RegExp(`::\\s*${tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*::`).test(fixed)) fixed = fixed.replace(tag, `${w}::${tag}::`);
+    const original = M.ticketString(d, ref), w = Number(soloWeight);
+    const tokens = M.tokenize(original);
+    const eligible = [1.2, 1.5, 2].includes(w) && tokens.filter(t=>t.isArtist).length === 1;
+    const fixed = eligible ? tokens.map(t => {
+        if (t.isArtist) return M.fmtWeight(t.weight * w) + '::' + t.text + '::';
+        return t.raw || (Math.abs(t.weight - 1) < 0.001 ? t.text : M.fmtWeight(t.weight) + '::' + t.text + '::');
+    }).join(', ') : original;
     const image = await generateSample({ fixed, template: tpl, neg: M.ticketNeg(d, ref) });
     await saveImageTo(ref, image, { nsfw: tpl.nsfw, templateId: tpl.id });
     return image;
@@ -3616,7 +3618,7 @@ async function makeSampleFor(ref, templateId) {
 
 function createBatch(jobs, { onUpdate } = {}) {
     const state = {
-        jobs: jobs.map(j => ({ ...j, status: 'wait', error: '', image: '' })),
+        jobs: jobs.map(j => ({ soloWeight: getData().options.sampleSoloWeight, ...j, status: 'wait', error: '', image: '' })),
         paused: false, stopped: false, running: false,
     };
     const tick = () => onUpdate?.(state);
@@ -3630,7 +3632,7 @@ function createBatch(jobs, { onUpdate } = {}) {
             if (job.status === 'done' || job.status === 'skip') continue;
             job.status = 'run'; tick();
             try {
-                job.image = await makeSampleFor(job.ref, job.templateId);
+                job.image = await makeSampleFor(job.ref, job.templateId, { soloWeight: job.soloWeight ?? 1 });
                 job.status = 'done';
             } catch (e) {
                 job.status = 'error'; job.error = e.message || String(e);
@@ -6576,6 +6578,8 @@ function openSamplePicker(ref, redraw) {
           <div class="pc-seg">${[['sfw', 'SFW'], ['nsfw', 'NSFW']].map(([k, t]) => `<button class="${ui.sample.rating === k ? 'on' : ''}" data-sp="rating" data-v="${k}">${t}</button>`).join('')}</div>
           <div class="pc-label">构图（可以多选）</div>
           <div class="pc-sp-shots">${Object.entries(M.SHOTS).map(([k, v]) => `<button class="${ui.sample.shots.has(k) ? 'on' : ''}" data-sp="shot" data-v="${k}"><i style="width:${shapes[k][0]}px;height:${shapes[k][1]}px"></i>${v.name}<small>${v.ratio}</small></button>`).join('')}</div>
+          <div class="pc-label">单个画师的权重</div>
+          <div class="pc-chips wrap">${[1, 1.2, 1.5, 2].map(w => `<button class="pc-pill tiny ${(Number(getData().options.sampleSoloWeight) || 1) === w ? 'on' : 'dashed'}" data-sp="weight" data-v="${w}">×${w}</button>`).join('')}</div>
           <div class="pc-row-between pc-mt-s"><button class="pc-linkish" data-sp="tpl">改提示词</button><span class="pc-dim small">会生成 ${n} 张</span></div>
           <button class="pc-btn dark big pc-mt-s" data-sp="go" ${n ? '' : 'disabled'}>${seal()}${n ? '开始生成' : '先选一种构图'}</button>
         </section>`;
@@ -6587,14 +6591,15 @@ function openSamplePicker(ref, redraw) {
         const el = ev.target.closest('[data-sp]');
         if (!el) return;
         const k = el.dataset.sp;
+        if (k === 'weight') { getData().options.sampleSoloWeight = Number(el.dataset.v) || 1; commit({ silent: true }); draw(); }
         if (k === 'rating') { ui.sample.rating = el.dataset.v; draw(); }
         if (k === 'shot') { const v = el.dataset.v; if (ui.sample.shots.has(v)) ui.sample.shots.delete(v); else ui.sample.shots.add(v); draw(); }
         if (k === 'tpl') { back.remove(); await openTemplateEditor(chosenTemplates('sample')[0] || 'sfw_bust'); }
         if (k === 'go') {
-            const tpls = chosenTemplates('sample');
+            const tpls = chosenTemplates('sample'), soloWeight = Number(getData().options.sampleSoloWeight) || 1;
             back.remove();
             ui.busyRefs.add(ref.id); redraw();
-            try { for (const t of tpls) { await E.makeSampleFor(ref, t); redraw(); } toastr.success(`例图已保存（${tpls.length} 张）`, '智库', { timeOut: 1800 }); }
+            try { for (const t of tpls) { await E.makeSampleFor(ref, t, { soloWeight }); redraw(); } toastr.success(`例图已保存（${tpls.length} 张）`, '智库', { timeOut: 1800 }); }
             catch (e) { toastr.error(e.message, '生成例图失败'); }
             finally { ui.busyRefs.delete(ref.id); redraw(); }
         }
@@ -9759,7 +9764,7 @@ function startBatch() {
         const ref = findUnit(d, u) || (u.text ? M.createFromString(d, { name: u.name || '', text: u.text, forceGroup: !!u.name }) : { type: 'artist', id: M.ensureArtist(d, u.tag).id });
         if (!ref) continue;
         const item = M.resolveTicket(d, ref).item;
-        for (const t of tpls) jobs.push({ ref, templateId: t, skip: ui.batch.skipExisting && item.images.some(i => i.template === t) });
+        for (const t of tpls) jobs.push({ ref, templateId: t, soloWeight: Number(d.options.sampleSoloWeight) || 1, skip: ui.batch.skipExisting && item.images.some(i => i.template === t) });
     }
     commit();
     const old = ui.batch.state;

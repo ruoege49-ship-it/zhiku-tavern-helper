@@ -1,6 +1,7 @@
 import {applyAiBudgetCompatibility} from './ai-budget-compat.mjs';
 import {applyImageChannelCompatibility} from './image-channel-compat.mjs';
 import {applyShareEditCompatibility} from './share-edit-compat.mjs';
+import {applySampleWeightCompatibility} from './sample-weight-compat.mjs';
 import {applyBatchScenesCompatibility} from './batch-scenes-compat.mjs';
 import {applyWardrobeCanonCompatibility} from './wardrobe-canon-compat.mjs';
 import {applyImg2imgCompatibility} from './img2img-compat.mjs';
@@ -3855,6 +3856,7 @@ patch(`      <button class="pc-pill tiny dashed" data-act="edittpl" data-scope="
 patch(`            case 'batchscene': ui.batch.sceneSig = el.dataset.v || ''; render(); break;`,`            case 'batchscene': ui.batch.sceneSig = el.dataset.v || ''; render(); break;
             case 'soloweight': d.options.sampleSoloWeight = Number(el.dataset.v) || 1; commit({ silent: true }); render(); break;`);
 s=applyShareEditCompatibility(s);
+s=applySampleWeightCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
