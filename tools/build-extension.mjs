@@ -24,8 +24,8 @@ process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.37';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.37');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.38';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.38');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -3900,9 +3900,9 @@ patch(`                const pos = M.mergeTags(d.active ? M.ticketString(d, d.ac
                 const { positive, negative } = E.composeStudio({ pos, neg: c.negative });
                 ui.charTestImg = await E.generateFull({ positive, negative, director: c.charRef ? await E.charRefs([c.charRef]) : undefined });`,`                const nsfw = ui.charTestRating === 'nsfw', shot = ui.charTestShot || 'upper';
                 const SHOT = { portrait: 'portrait, upper body, close-up, looking at viewer', upper: 'upper body, looking at viewer', full: 'full body, looking at viewer' + (ui.charTestExtra ? '' : ', standing') };
-                // NSFW 默认加 adult：只画成年人
+                // NSFW 正面加 adult；负面不动
                 const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', nsfw ? 'nsfw, adult' : '', C.fixedTags(c, { nsfw }), 'solo', SHOT[shot], ui.charTestExtra || '', 'simple background');
-                const { positive, negative } = E.composeStudio({ pos, neg: [c.negative, nsfw ? 'child, loli, shota, young' : ''].filter(Boolean).join(', ') });
+                const { positive, negative } = E.composeStudio({ pos, neg: c.negative });
                 const W = { portrait: [1024, 1024], upper: [832, 1216], full: [768, 1344] }[shot];
                 ui.charTestImg = await E.generateFull({ positive, negative, width: W[0], height: W[1], director: c.charRef ? await E.charRefs([c.charRef]) : undefined });
                 ui.charTestNsfw = nsfw;`);
@@ -3953,9 +3953,9 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',(prefix+s+'\n}\n').replace(/\r\n/g, '\n'));
 fs.copyFileSync('src/index.js',dir+'/index.js');
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.37',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.37',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.38',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.38',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.8.37 built; storage keys and shared upload preserved.');
+console.log('Extension 0.8.38 built; storage keys and shared upload preserved.');
