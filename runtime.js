@@ -8423,6 +8423,8 @@ function buzz() { try { DOC.defaultView?.navigator?.vibrate?.(8); } catch { /* �
 // 长按
 const lp = { timer: 0, fired: 0, x: 0, y: 0 };
 function onPointerDown(ev) {
+    const dh = ev.target.closest?.('[data-aipdrag]');
+    if (dh) { startAiDrag(ev, dh); return; }
     const t = ev.target.closest?.('[data-lp]');
     if (!t || (ui.selecting && t.dataset.lp === 'ticket')) return;
     lp.x = ev.clientX; lp.y = ev.clientY;
@@ -8719,9 +8721,9 @@ async function onClick(ev, outside = false) {
             }
             case 'aipadd': {
                 const p = T.aiCfg().list[T.aiCfg().active]; if (!p) break;
-                const t = await promptText('这一条的内容（之后点左边可以切 system / user / assistant）', '', true);
-                if (t == null || !t.trim()) break;
-                p.ents.splice(p.ents.findIndex(e => e.ctx), 0, { id: M.uid('e'), n: '条目 ' + p.ents.length, r: 'system', on: true, t: t.trim() });
+                const r = await editAiEntry({ n: '条目 ' + p.ents.length, r: 'system', t: '' }, { isNew: true });
+                if (!r || !r.t.trim()) break;
+                p.ents.splice(Math.max(0, p.ents.findIndex(e => e.ctx)), 0, { id: M.uid('e'), n: r.n, r: r.r, on: true, t: r.t.trim() });
                 commit(); render(); break;
             }
             case 'aiprole': { const p = T.aiCfg().list[T.aiCfg().active]; const e = p?.ents[Number(el.dataset.i)]; if (!e || e.ctx) break; const R = ['system', 'user', 'assistant']; e.r = R[(R.indexOf(e.r) + 1) % 3]; commit(); render(); break; }
@@ -8743,12 +8745,10 @@ async function onClick(ev, outside = false) {
                 const e = own ? own.ents[i] : T.entriesFor(cfg.active, ui.stPresets)?.[i];
                 if (!e) break;
                 if (!own) { modal(`<h3 class="pc-h3">${esc(e.n)}</h3><div class="pc-dim small">${esc(e.r)} · 跟着酒馆的预设，这里只能看</div><textarea class="pc-textarea mono" readonly style="min-height:240px">${esc(e.t || '')}</textarea>`); break; }
-                const name = await promptText('名字', e.n);
-                if (name == null) break;
-                const t = await promptText(`「${name.trim() || e.n}」的内容（留空就删掉这一条）`, e.t || '', true);
-                if (t == null) break;
-                if (!t.trim() && await confirmBox('内容空了，删掉这一条？', { ok: '删除', cancel: '留着' })) own.ents.splice(i, 1);
-                else { e.n = name.trim() || e.n; e.t = t; }
+                const r = await editAiEntry(e);
+                if (!r) break;
+                if (r.del || (!r.t.trim() && await confirmBox('内容空了，删掉这一条？', { ok: '删除', cancel: '留着' }))) own.ents.splice(i, 1);
+                else Object.assign(e, { n: r.n || e.n, r: r.r, t: r.t });
                 commit(); render(); break;
             }
             case 'aipfn': ui.aipOpen = ui.aipOpen === el.dataset.k ? '' : el.dataset.k; render(); break;
@@ -9920,14 +9920,12 @@ function viewAiPreset(d) {
     const stName = act.slice(7) || curST;
     const chip = (v, t) => `<button class="pc-pill ${act === v || (v === 'tavern:' && kind === 'tavern') ? 'on' : 'dashed'}" data-act="aipuse" data-v="${esc(v)}">${t}</button>`;
     const entRow = (e, i) => {
-        const moveUp = !ro && i > 0, moveDown = !ro && i < ents.length - 1;
-        return `<div class="pc-aient ${e.ctx ? 'ctx' : ''} ${e.mark && !e.on ? 'skip' : ''} ${!e.on && !e.ctx && !e.mark ? 'off' : ''}">
+        return `<div class="pc-aient ${e.ctx ? 'ctx' : ''} ${e.mark && !e.on ? 'skip' : ''} ${!e.on && !e.ctx && !e.mark ? 'off' : ''}" data-ai-i="${i}">
+          ${ro ? '' : `<span class="pc-aidrag" data-aipdrag="${i}" aria-label="按住拖动排序" title="按住拖动排序">⋮⋮</span>`}
           <button class="pc-airole ${e.r}" data-act="aiprole" data-i="${i}" ${ro || e.ctx ? 'disabled' : ''}>${esc(e.r)}</button>
-          <div class="pc-grow"><b>${e.ctx ? '📌 ' : ''}${esc(e.n)}</b><small>${e.ctx ? '智库的指令 + 这次要处理的内容放在这里' : e.mark ? (e.on ? '酒馆自动填：' + esc(e.n) + (/worldInfo/.test(e.mark) ? '（世界书暂时带不了）' : '') : '角色卡、世界书这类，默认不发') : esc(String(e.t || '').slice(0, 80))}</small></div>
+          <div class="pc-grow" ${e.ctx || e.mark ? '' : `data-act="aipedit" data-i="${i}" style="cursor:pointer"`}><b>${e.ctx ? '📌 ' : ''}${esc(e.n)}</b><small>${e.ctx ? '智库的指令 + 这次要处理的内容放在这里' : e.mark ? (e.on ? '酒馆自动填：' + esc(e.n) + (/worldInfo/.test(e.mark) ? '（世界书暂时带不了）' : '') : '角色卡、世界书这类，默认不发') : esc(String(e.t || '').slice(0, 80))}</small></div>
           ${e.ctx ? '' : `<button class="pc-aisw ${e.on ? 'on' : ''}" data-act="aipsw" data-i="${i}" ${ro && !e.mark ? 'disabled' : ''} aria-label="开关"></button>`}
-          ${moveUp ? `<button class="pc-aiib" data-act="aipmove" data-i="${i}" data-d="-1" aria-label="上移">↑</button>` : ''}
-          ${moveDown ? `<button class="pc-aiib" data-act="aipmove" data-i="${i}" data-d="1" aria-label="下移">↓</button>` : ''}
-          ${e.ctx || e.mark ? '' : `<button class="pc-aiib" data-act="aipedit" data-i="${i}">${ro ? '看' : '✎'}</button>`}</div>`;
+          ${e.ctx || e.mark ? '' : `<button class="pc-aiib" data-act="aipedit" data-i="${i}" aria-label="${ro ? '看' : '编辑'}">${ro ? '看' : '✎'}</button>`}</div>`;
     };
     const fnRows = T.AI_FNS.map(([k, n, where]) => {
         const f = cfg.fn[k] || { extra: [] }, extra = f.extra || [], seen = T.aiSeen[k];
@@ -9963,6 +9961,12 @@ function viewAiPreset(d) {
 .pc-aisw::after{content:"";position:absolute;top:3px;left:3px;width:17px;height:17px;border-radius:50%;background:var(--pc-gold);transition:left .15s}
 .pc-aisw.on{background:var(--pc-ink)}.pc-aisw.on::after{left:20px}
 .pc-aisw[disabled]{cursor:default}
+.pc-aidrag{flex:0 0 auto;width:22px;margin-left:-6px;text-align:center;font-size:16px;letter-spacing:-3px;color:var(--pc-ink-soft);cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;padding:8px 0}
+.pc-aient.ctx .pc-aidrag{color:rgba(244,239,228,.7)}
+.pc-aient.dragging{position:relative;z-index:5;box-shadow:0 8px 22px rgba(0,0,0,.22);opacity:.96;transition:none}
+.pc-aient.shift-up{transform:translateY(calc(-100% - 8px));transition:transform .15s}
+.pc-aient.shift-down{transform:translateY(calc(100% + 8px));transition:transform .15s}
+.pc-aient{transition:transform .15s}
 .pc-aiib{flex:0 0 auto;width:28px;height:28px;border-radius:8px;border:1.5px dashed var(--pc-dash);background:transparent;color:inherit;cursor:pointer;font-size:12px}
 .pc-aient.ctx .pc-aiib{border-color:rgba(244,239,228,.55)}
 .pc-castadd{width:100%;margin:9px 0 6px;min-height:42px;border:1.5px dashed var(--pc-dash);border-radius:14px;background:transparent;font-family:var(--pc-font);font-size:14px;color:var(--pc-ink);cursor:pointer}
@@ -9989,7 +9993,7 @@ function viewAiPreset(d) {
         <div class="pc-hint">只对「翻译和 AI」里用「酒馆现在连接的 API」或「单独填」的聊天补全接口有效；酒馆连的是文本补全时，会把条目合成一段发。</div>
       </section>
       <section class="pc-card pc-pad pc-mt">
-        <h3 class="pc-h3" style="margin:0">条目</h3><div class="pc-dim small">从上往下按顺序发。</div>
+        <h3 class="pc-h3" style="margin:0">条目</h3><div class="pc-dim small">从上往下按顺序发。${ro ? '' : '按住左边 ⋮⋮ 拖动排序，点条目改名字和内容。'}</div>
         ${ents ? ents.map(entRow).join('') : '<div class="pc-dim small pc-mt-s">正在读这个预设…</div>'}
         ${kind === 'own' ? '<button class="pc-castadd" data-act="aipadd">＋ 加一条</button>' : ''}
       </section>
@@ -10507,6 +10511,57 @@ function renderStub() {
 
 // ═════════════════════ 弹窗小工具 ═════════════════════
 
+/** 预设条目：名字、角色、内容放在一个弹窗里改 */
+function editAiEntry(e, { isNew = false } = {}) {
+    return new Promise(resolve => {
+        let role = e.r || 'system';
+        const box = modal(`<h3 class="pc-h3">${isNew ? '加一条' : '改条目'}</h3>
+          <label class="pc-field"><span>名字</span><input class="pc-input" data-ae-n value="${esc(e.n || '')}"></label>
+          <div class="pc-label">谁说的</div><div class="pc-seg three" data-ae-r>${['system', 'user', 'assistant'].map(r => `<button type="button" class="${role === r ? 'on' : ''}" data-v="${r}">${r}</button>`).join('')}</div>
+          <label class="pc-field pc-mt-s"><span>内容</span><textarea class="pc-textarea mono" data-ae-t style="min-height:260px">${esc(e.t || '')}</textarea></label>
+          <div class="pc-actions">${isNew ? '' : '<button class="pc-linkdanger" type="button" data-x="del">删掉这一条</button>'}<button class="pc-btn" type="button" data-x="no">取消</button><button class="pc-btn dark" type="button" data-x="ok">${isNew ? '加上' : '保存'}</button></div>`);
+        box.addEventListener('click', async ev => {
+            const rb = ev.target.closest('[data-ae-r] [data-v]');
+            if (rb) { role = rb.dataset.v; box.querySelectorAll('[data-ae-r] [data-v]').forEach(b => b.classList.toggle('on', b === rb)); return; }
+            const x = ev.target.closest('[data-x]')?.dataset.x;
+            if (x === 'no') { box.closeModal(); resolve(null); }
+            if (x === 'del') { if (await confirmBox('删掉这一条？', { ok: '删除', cancel: '留着' })) { box.closeModal(); resolve({ del: true }); } }
+            if (x === 'ok') { const n = box.querySelector('[data-ae-n]').value.trim(), t = box.querySelector('[data-ae-t]').value; if (isNew && !t.trim()) { box.querySelector('[data-ae-t]').focus(); return; } box.closeModal(); resolve({ n, r: role, t }); }
+        });
+    });
+}
+/** 预设条目：按住 ⋮⋮ 拖动排序 */
+function startAiDrag(ev, handle) {
+    const row = handle.closest('.pc-aient'), list = [...row.parentElement.querySelectorAll('.pc-aient')];
+    const from = list.indexOf(row);
+    if (from < 0) return;
+    ev.preventDefault();
+    handle.setPointerCapture?.(ev.pointerId);
+    const y0 = ev.clientY, rects = list.map(r => r.getBoundingClientRect());
+    let to = from;
+    row.classList.add('dragging');
+    const move = e => {
+        const dy = e.clientY - y0;
+        row.style.transform = `translateY(${dy}px)`;
+        const mid = rects[from].top + rects[from].height / 2 + dy;
+        to = from;
+        for (let k = 0; k < rects.length; k++) {
+            if (k < from && mid < rects[k].top + rects[k].height / 2) { to = k; break; }
+        }
+        for (let k = rects.length - 1; k > from; k--) {
+            if (mid > rects[k].top + rects[k].height / 2) { to = k; break; }
+        }
+        list.forEach((r, k) => { if (r === row) return; r.classList.toggle('shift-down', k >= to && k < from); r.classList.toggle('shift-up', k <= to && k > from); });
+    };
+    const up = () => {
+        handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); handle.removeEventListener('pointercancel', up);
+        list.forEach(r => { r.classList.remove('shift-up', 'shift-down', 'dragging'); r.style.transform = ''; });
+        const p = T.aiCfg().list[T.aiCfg().active];
+        if (p && to !== from) { const [it] = p.ents.splice(from, 1); p.ents.splice(to, 0, it); commit(); }
+        render();
+    };
+    handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', up); handle.addEventListener('pointercancel', up);
+}
 function modal(inner) {
     const back = DOC.createElement('div');
     back.className = 'pc-modal-backdrop';

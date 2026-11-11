@@ -3726,6 +3726,108 @@ patch(`    <div class="pc-chips">
     </div>
     <style>.pc-lbf .pc-chips{gap:6px;margin:6px 0}.pc-lbf .pc-pill{font-size:13px;padding:4px 11px;min-height:0;line-height:1.5}.pc-lbf-k{align-self:center;font-size:15px;font-weight:600;margin-right:4px;white-space:nowrap}.pc-lbf .pc-tip{font-size:12px;margin:2px 0 6px}</style>
 `);
+// 0.8.36：AI 预设条目按住拖动排序；名字、角色、内容一个弹窗改
+patch(`    const entRow = (e, i) => {
+        const moveUp = !ro && i > 0, moveDown = !ro && i < ents.length - 1;
+        return \`<div class="pc-aient \${e.ctx ? 'ctx' : ''} \${e.mark && !e.on ? 'skip' : ''} \${!e.on && !e.ctx && !e.mark ? 'off' : ''}">
+          <button class="pc-airole \${e.r}" data-act="aiprole" data-i="\${i}" \${ro || e.ctx ? 'disabled' : ''}>\${esc(e.r)}</button>
+          <div class="pc-grow">`,`    const entRow = (e, i) => {
+        return \`<div class="pc-aient \${e.ctx ? 'ctx' : ''} \${e.mark && !e.on ? 'skip' : ''} \${!e.on && !e.ctx && !e.mark ? 'off' : ''}" data-ai-i="\${i}">
+          \${ro ? '' : \`<span class="pc-aidrag" data-aipdrag="\${i}" aria-label="按住拖动排序" title="按住拖动排序">⋮⋮</span>\`}
+          <button class="pc-airole \${e.r}" data-act="aiprole" data-i="\${i}" \${ro || e.ctx ? 'disabled' : ''}>\${esc(e.r)}</button>
+          <div class="pc-grow" \${e.ctx || e.mark ? '' : \`data-act="aipedit" data-i="\${i}" style="cursor:pointer"\`}>`);
+patch(`          \${moveUp ? \`<button class="pc-aiib" data-act="aipmove" data-i="\${i}" data-d="-1" aria-label="上移">↑</button>\` : ''}
+          \${moveDown ? \`<button class="pc-aiib" data-act="aipmove" data-i="\${i}" data-d="1" aria-label="下移">↓</button>\` : ''}
+          \${e.ctx || e.mark ? '' : \`<button class="pc-aiib" data-act="aipedit" data-i="\${i}">\${ro ? '看' : '✎'}</button>\`}</div>\`;`,`          \${e.ctx || e.mark ? '' : \`<button class="pc-aiib" data-act="aipedit" data-i="\${i}" aria-label="\${ro ? '看' : '编辑'}">\${ro ? '看' : '✎'}</button>\`}</div>\`;`);
+patch(`.pc-aisw[disabled]{cursor:default}`,`.pc-aisw[disabled]{cursor:default}
+.pc-aidrag{flex:0 0 auto;width:22px;margin-left:-6px;text-align:center;font-size:16px;letter-spacing:-3px;color:var(--pc-ink-soft);cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;padding:8px 0}
+.pc-aient.ctx .pc-aidrag{color:rgba(244,239,228,.7)}
+.pc-aient.dragging{position:relative;z-index:5;box-shadow:0 8px 22px rgba(0,0,0,.22);opacity:.96;transition:none}
+.pc-aient.shift-up{transform:translateY(calc(-100% - 8px));transition:transform .15s}
+.pc-aient.shift-down{transform:translateY(calc(100% + 8px));transition:transform .15s}
+.pc-aient{transition:transform .15s}`);
+patch(`        <h3 class="pc-h3" style="margin:0">条目</h3><div class="pc-dim small">从上往下按顺序发。</div>`,`        <h3 class="pc-h3" style="margin:0">条目</h3><div class="pc-dim small">从上往下按顺序发。\${ro ? '' : '按住左边 ⋮⋮ 拖动排序，点条目改名字和内容。'}</div>`);
+patch(`            case 'aipadd': {
+                const p = T.aiCfg().list[T.aiCfg().active]; if (!p) break;
+                const t = await promptText('这一条的内容（之后点左边可以切 system / user / assistant）', '', true);
+                if (t == null || !t.trim()) break;
+                p.ents.splice(p.ents.findIndex(e => e.ctx), 0, { id: M.uid('e'), n: '条目 ' + p.ents.length, r: 'system', on: true, t: t.trim() });
+                commit(); render(); break;
+            }`,`            case 'aipadd': {
+                const p = T.aiCfg().list[T.aiCfg().active]; if (!p) break;
+                const r = await editAiEntry({ n: '条目 ' + p.ents.length, r: 'system', t: '' }, { isNew: true });
+                if (!r || !r.t.trim()) break;
+                p.ents.splice(Math.max(0, p.ents.findIndex(e => e.ctx)), 0, { id: M.uid('e'), n: r.n, r: r.r, on: true, t: r.t.trim() });
+                commit(); render(); break;
+            }`);
+patch(`                const name = await promptText('名字', e.n);
+                if (name == null) break;
+                const t = await promptText(\`「\${name.trim() || e.n}」的内容（留空就删掉这一条）\`, e.t || '', true);
+                if (t == null) break;
+                if (!t.trim() && await confirmBox('内容空了，删掉这一条？', { ok: '删除', cancel: '留着' })) own.ents.splice(i, 1);
+                else { e.n = name.trim() || e.n; e.t = t; }
+                commit(); render(); break;`,`                const r = await editAiEntry(e);
+                if (!r) break;
+                if (r.del || (!r.t.trim() && await confirmBox('内容空了，删掉这一条？', { ok: '删除', cancel: '留着' }))) own.ents.splice(i, 1);
+                else Object.assign(e, { n: r.n || e.n, r: r.r, t: r.t });
+                commit(); render(); break;`);
+patch(`function modal(inner) {`,`/** 预设条目：名字、角色、内容放在一个弹窗里改 */
+function editAiEntry(e, { isNew = false } = {}) {
+    return new Promise(resolve => {
+        let role = e.r || 'system';
+        const box = modal(\`<h3 class="pc-h3">\${isNew ? '加一条' : '改条目'}</h3>
+          <label class="pc-field"><span>名字</span><input class="pc-input" data-ae-n value="\${esc(e.n || '')}"></label>
+          <div class="pc-label">谁说的</div><div class="pc-seg three" data-ae-r>\${['system', 'user', 'assistant'].map(r => \`<button type="button" class="\${role === r ? 'on' : ''}" data-v="\${r}">\${r}</button>\`).join('')}</div>
+          <label class="pc-field pc-mt-s"><span>内容</span><textarea class="pc-textarea mono" data-ae-t style="min-height:260px">\${esc(e.t || '')}</textarea></label>
+          <div class="pc-actions">\${isNew ? '' : '<button class="pc-linkdanger" type="button" data-x="del">删掉这一条</button>'}<button class="pc-btn" type="button" data-x="no">取消</button><button class="pc-btn dark" type="button" data-x="ok">\${isNew ? '加上' : '保存'}</button></div>\`);
+        box.addEventListener('click', async ev => {
+            const rb = ev.target.closest('[data-ae-r] [data-v]');
+            if (rb) { role = rb.dataset.v; box.querySelectorAll('[data-ae-r] [data-v]').forEach(b => b.classList.toggle('on', b === rb)); return; }
+            const x = ev.target.closest('[data-x]')?.dataset.x;
+            if (x === 'no') { box.closeModal(); resolve(null); }
+            if (x === 'del') { if (await confirmBox('删掉这一条？', { ok: '删除', cancel: '留着' })) { box.closeModal(); resolve({ del: true }); } }
+            if (x === 'ok') { const n = box.querySelector('[data-ae-n]').value.trim(), t = box.querySelector('[data-ae-t]').value; if (isNew && !t.trim()) { box.querySelector('[data-ae-t]').focus(); return; } box.closeModal(); resolve({ n, r: role, t }); }
+        });
+    });
+}
+/** 预设条目：按住 ⋮⋮ 拖动排序 */
+function startAiDrag(ev, handle) {
+    const row = handle.closest('.pc-aient'), list = [...row.parentElement.querySelectorAll('.pc-aient')];
+    const from = list.indexOf(row);
+    if (from < 0) return;
+    ev.preventDefault();
+    handle.setPointerCapture?.(ev.pointerId);
+    const y0 = ev.clientY, rects = list.map(r => r.getBoundingClientRect());
+    let to = from;
+    row.classList.add('dragging');
+    const move = e => {
+        const dy = e.clientY - y0;
+        row.style.transform = \`translateY(\${dy}px)\`;
+        const mid = rects[from].top + rects[from].height / 2 + dy;
+        to = from;
+        for (let k = 0; k < rects.length; k++) {
+            if (k < from && mid < rects[k].top + rects[k].height / 2) { to = k; break; }
+        }
+        for (let k = rects.length - 1; k > from; k--) {
+            if (mid > rects[k].top + rects[k].height / 2) { to = k; break; }
+        }
+        list.forEach((r, k) => { if (r === row) return; r.classList.toggle('shift-down', k >= to && k < from); r.classList.toggle('shift-up', k <= to && k > from); });
+    };
+    const up = () => {
+        handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); handle.removeEventListener('pointercancel', up);
+        list.forEach(r => { r.classList.remove('shift-up', 'shift-down', 'dragging'); r.style.transform = ''; });
+        const p = T.aiCfg().list[T.aiCfg().active];
+        if (p && to !== from) { const [it] = p.ents.splice(from, 1); p.ents.splice(to, 0, it); commit(); }
+        render();
+    };
+    handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', up); handle.addEventListener('pointercancel', up);
+}
+function modal(inner) {`);
+patch(`function onPointerDown(ev) {
+    const t = ev.target.closest?.('[data-lp]');`,`function onPointerDown(ev) {
+    const dh = ev.target.closest?.('[data-aipdrag]');
+    if (dh) { startAiDrag(ev, dh); return; }
+    const t = ev.target.closest?.('[data-lp]');`);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
