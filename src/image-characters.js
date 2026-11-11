@@ -122,15 +122,27 @@ export function cleanImageTags(value) {
 export function imageInsertionPoint(text, sentence) {
     const blocks = [...text.matchAll(/<content\b[^>]*>([\s\S]*?)<\/content\s*>/gi)];
     const ranges = blocks.length ? blocks.map(m => ({ start: m.index + m[0].indexOf('>') + 1, text: m[1] })) : [{ start: 0, text }];
+    // 代码块（```html 状态栏这类）和 HTML 区块里不能插：插进去会把预设的美化拆坏
+    const fences = [];
+    for (const m of text.matchAll(/```[\s\S]*?(?:```|$)|<(details|div|section|table|style|script|html)\b[\s\S]*?<\/\1\s*>/gi)) fences.push([m.index, m.index + m[0].length]);
+    const inFence = at => fences.some(([a, b]) => at > a && at < b);
     const s = String(sentence || '').trim();
     const tries = [s, s.replace(/[。！？!?…，,、；;："“”「」『』\s]+$/g, ''), s.slice(-12), s.slice(0, 12)].filter(t => t.length >= 4);
     for (const range of ranges) for (const term of tries) {
-        const i = range.text.indexOf(term);
-        if (i < 0) continue;
-        const newline = range.text.indexOf('\n', i + term.length);
-        return range.start + (newline < 0 ? range.text.length : newline);
+        let from = 0;
+        while (true) {
+            const i = range.text.indexOf(term, from);
+            if (i < 0) break;
+            const newline = range.text.indexOf('\n', i + term.length);
+            const at = range.start + (newline < 0 ? range.text.length : newline);
+            if (!inFence(range.start + i) && !inFence(at)) return at;
+            from = i + term.length;
+        }
     }
     // Even the fallback belongs inside the story, before a trailing status panel.
     const last = ranges.at(-1);
-    return last.start + last.text.trimEnd().length;
+    let end = last.start + last.text.trimEnd().length;
+    const firstFenceAfterStory = fences.map(f => f[0]).filter(a => a >= last.start && a <= end).sort((a, b) => a - b)[0];
+    if (firstFenceAfterStory !== undefined && text.slice(last.start, firstFenceAfterStory).trim()) end = last.start + text.slice(last.start, firstFenceAfterStory).trimEnd().length;
+    return end;
 }

@@ -83,7 +83,7 @@ export function createIllustrationPlanner({ getContext, getData, settings, roste
         const now=getContext();
         if(stopped || chatKey(now)!==chatId || now.chat?.[id]!==msg || msg.swipe_id!==swipe)return;
         const tokenIndices=parseImageMarkers(next,cfg.start,cfg.end).map((t,i)=>positions.has(t.index)?i:-1).filter(i=>i>=0);
-        now.updateMessageBlock?.(id,msg);await afterSave(id,{manual,tokenIndices});
+        now.updateMessageBlock?.(id,msg);try{const ev=now.eventTypes||now.event_types;if(ev?.MESSAGE_UPDATED)await now.eventSource?.emit?.(ev.MESSAGE_UPDATED,id);}catch{}await afterSave(id,{manual,tokenIndices});
         return selected.length;
     }
     async function selected(selection) {
