@@ -3486,6 +3486,27 @@ patch(`      <div class="pc-seg three">\${modeBtn('key', '填我的 key')}\${mod
       <label class="pc-field"><span>画风开头（加在提示词最前面）</span><input data-st="gptStyle" value="\${esc(n.gptStyle ?? 'anime illustration')}" placeholder="anime illustration"></label>
       <label class="pc-switch"><input type="checkbox" data-st-check="gptRewrite" \${String(n.gptRewrite) === 'true' ? 'checked' : ''}><span></span>先让 AI 把标签改写成一段英文描述<small>这类模型看整句英文比看标签准、纹理也少（每张图多一次 AI 调用，用「翻译和 AI」里的接口）</small></label>
       <label class="pc-switch"><input type="checkbox" data-st-check="gptRefs" \${String(n.gptRefs) !== 'false' ? 'checked' : ''}><span></span>有角色参考图 / 垫图时一起发<small>走 /images/edits；站点不支持就关掉</small></label>\` : ''}`);
+// 0.8.36：漫画「自动写分镜」「自动出图」分成两个开关
+patch(`        if (stopped || (!manual && (!enabled() || opts().comicAuto === false))) return;
+        const msg = getContext().chat?.[id];
+        if (!msg || msg.is_user || msg.is_system) return;
+        const blocks = comicBlocks(srcOf(msg));`,`        if (stopped || (!manual && !enabled())) return;
+        const msg = getContext().chat?.[id];
+        if (!msg || msg.is_user || msg.is_system) return;
+        const blocks = comicBlocks(srcOf(msg));
+        // 有分镜了但关了自动出图：只显示「生成这一页」，等手动点
+        if (blocks.length && !manual && opts().comicAuto === false) { render(id); return; }`);
+patch(`            if (!manual && id === (getContext().chat?.length || 0) - 1 && !autoAdapted.has(k) && String(msg.mes || '').trim().length > 40) {`,`            if (!manual && opts().comicAutoAdapt !== false && id === (getContext().chat?.length || 0) - 1 && !autoAdapted.has(k) && String(msg.mes || '').trim().length > 40) {`);
+patch(`                try { await adapt(id); } catch (e) { console.warn('[智库] 漫画自动改编', e); }`,`                try { await adapt(id, { draw: opts().comicAuto !== false }); } catch (e) { console.warn('[智库] 漫画自动改编', e); }`);
+patch(`    async function adapt(id, { pages = 0, redo = false } = {}) {`,`    async function adapt(id, { pages = 0, redo = false, draw = true } = {}) {`);
+patch(`        } finally { if (adapting.get(id) === task) adapting.delete(id); render(id); }
+        await process(id, { manual: true });
+    }`,`        } finally { if (adapting.get(id) === task) adapting.delete(id); render(id); }
+        if (draw) await process(id, { manual: true });
+    }`);
+patch(`              \${sw('comicAuto', '回复写完自动画成漫画', 'AI 自己把回复改编成分镜再画（每楼多一次 AI 调用，只画最新一楼）；关掉的话，在楼层里点「画成漫画」再画', true)}`,`              \${sw('comicAutoAdapt', '回复写完自动写分镜', 'AI 自己把回复改编成分镜（每楼多一次 AI 调用，只管最新一楼、每楼只写一次）；关掉的话，在楼层里点「画成漫画」再写', true)}
+              \${sw('comicAuto', '分镜写好自动出图', '关掉的话，分镜写好先放着，在楼层里点「生成这一页」再画', true)}
+              <div class="pc-hint">写分镜用的 AI：\${esc(typeof __mod_translate !== 'undefined' ? __mod_translate.apiFor('comic').from || '' : '')}。要换接口、模型或者加要求，到智库「设置 → AI 预设 → 各个功能 → 漫画改编」。</div>`);
 s=applyImg2imgCompatibility(s);
 s=applyWardrobeCanonCompatibility(s);
 s=applyBatchScenesCompatibility(s);
