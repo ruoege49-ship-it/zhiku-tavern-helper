@@ -1710,8 +1710,11 @@ const BG = 'simple background, white background';
 // 不再写 symmetrical / arms at sides / feet apart 这类「人体参考图」的词，也写明穿着和上色，免得画成剪影、人台
 const FRONT = 'front view, facing viewer, looking at viewer, centered';
 const NOT_FRONT = 'profile, from side, from above, from below, dutch angle, looking away, three-quarter view, extreme close-up, cropped head, head out of frame, multiple views';
-const NOT_FLAT = 'silhouette, monochrome, greyscale, mannequin, faceless, reference sheet, character sheet, turnaround, anatomy chart, flat color, solid color, blank eyes';
-const CLOTHED = 'detailed face, detailed eyes, casual clothes, shirt, pants, full color';
+// 不再在负面里禁 monochrome / greyscale / flat color、正面里写 full color：限色、黑白、平涂的画师会被逼着上色，皮肤变成一片红、橙、黄（「黄疸」）
+const NOT_FLAT = 'silhouette, mannequin, faceless, reference sheet, character sheet, turnaround, anatomy chart, blank eyes';
+const CLOTHED = 'detailed face, detailed eyes, casual clothes, shirt, pants';
+const NOT_FLAT_V3 = 'silhouette, monochrome, greyscale, mannequin, faceless, reference sheet, character sheet, turnaround, anatomy chart, flat color, solid color, blank eyes';
+const CLOTHED_V3 = 'detailed face, detailed eyes, casual clothes, shirt, pants, full color';
 const DEFAULT_TEMPLATES = {
     sfw_head: { id: 'sfw_head', name: 'SFW 头像', nsfw: false, shot: 'head', positive: `${BASE}, portrait, headshot, head and shoulders, ${FRONT}, detailed face, detailed eyes, shirt, light smile, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, ${NOT_FLAT}, hands` },
     sfw_bust: { id: 'sfw_bust', name: 'SFW 胸像', nsfw: false, shot: 'bust', positive: `${BASE}, upper body, ${FRONT}, ${CLOTHED}, ${BG}`, negative: `${NEG}, ${NOT_FRONT}, ${NOT_FLAT}` },
@@ -1812,7 +1815,9 @@ function normalizeData(raw) {
     const rawT = { ...(raw.templates || {}) };
     // 旧版的 SFW / NSFW 两个模板没改过就去掉（换成 头像/胸像/立绘），改过的留着
     for (const k of ['sfw', 'nsfw']) if (rawT[k] && OLD_DEFAULT_POS.includes(rawT[k].positive)) delete rawT[k];
-    for (const set of [OLD_TEMPLATE_TEXT, OLD_TEMPLATE_TEXT2]) for (const [k, old] of Object.entries(set)) if (rawT[k] && rawT[k].positive === old.positive && rawT[k].negative === old.negative) rawT[k] = { ...rawT[k], positive: DEFAULT_TEMPLATES[k].positive, negative: DEFAULT_TEMPLATES[k].negative };
+    // 上一版（负面禁黑白、正面写 full color）没改过的，也换成新版
+    const OLD3 = Object.fromEntries(Object.entries(DEFAULT_TEMPLATES).map(([k, t]) => [k, { positive: t.positive.split(CLOTHED).join(CLOTHED_V3), negative: t.negative.split(NOT_FLAT).join(NOT_FLAT_V3) }]));
+    for (const set of [OLD_TEMPLATE_TEXT, OLD_TEMPLATE_TEXT2, OLD3]) for (const [k, old] of Object.entries(set)) if (rawT[k] && rawT[k].positive === old.positive && rawT[k].negative === old.negative) rawT[k] = { ...rawT[k], positive: DEFAULT_TEMPLATES[k].positive, negative: DEFAULT_TEMPLATES[k].negative };
     for (const t of Object.values(rawT)) t.shot ||= 'bust';
     d.templates = { ...structuredClone(DEFAULT_TEMPLATES), ...rawT };
     for (const a of Object.values(d.artists)) { a.images ||= []; a.note ||= ''; a.collections ||= []; a.tag = normalizeArtistTag(a.tag); }
@@ -3596,10 +3601,16 @@ async function saveImageTo(ref, dataUrl, { nsfw = false, templateId = '' } = {})
     return id;
 }
 
-async function makeSampleFor(ref, templateId) {
+async function makeSampleFor(ref, templateId, { soloWeight = getData().options.sampleSoloWeight } = {}) {
     const d = getData();
     const tpl = d.templates[templateId] || d.templates.sfw_bust;
-    const fixed = M.ticketString(d, ref);
+    const original = M.ticketString(d, ref), w = Number(soloWeight);
+    const tokens = M.tokenize(original);
+    const eligible = [1.2, 1.5, 2].includes(w) && tokens.filter(t=>t.isArtist).length === 1;
+    const fixed = eligible ? tokens.map(t => {
+        if (t.isArtist) return M.fmtWeight(t.weight * w) + '::' + t.text + '::';
+        return t.raw || (Math.abs(t.weight - 1) < 0.001 ? t.text : M.fmtWeight(t.weight) + '::' + t.text + '::');
+    }).join(', ') : original;
     const image = await generateSample({ fixed, template: tpl, neg: M.ticketNeg(d, ref) });
     await saveImageTo(ref, image, { nsfw: tpl.nsfw, templateId: tpl.id });
     return image;
@@ -3607,7 +3618,7 @@ async function makeSampleFor(ref, templateId) {
 
 function createBatch(jobs, { onUpdate } = {}) {
     const state = {
-        jobs: jobs.map(j => ({ ...j, status: 'wait', error: '', image: '' })),
+        jobs: jobs.map(j => ({ soloWeight: getData().options.sampleSoloWeight, ...j, status: 'wait', error: '', image: '' })),
         paused: false, stopped: false, running: false,
     };
     const tick = () => onUpdate?.(state);
@@ -3621,7 +3632,7 @@ function createBatch(jobs, { onUpdate } = {}) {
             if (job.status === 'done' || job.status === 'skip') continue;
             job.status = 'run'; tick();
             try {
-                job.image = await makeSampleFor(job.ref, job.templateId);
+                job.image = await makeSampleFor(job.ref, job.templateId, { soloWeight: job.soloWeight ?? 1 });
                 job.status = 'done';
             } catch (e) {
                 job.status = 'error'; job.error = e.message || String(e);
@@ -6543,10 +6554,12 @@ function sampleChooser(scope) {
     const sceneRow = saved.length ? `<div class="pc-dim small" style="margin:4px 0 6px">提示词用：</div><div class="pc-chips wrap"><button class="pc-pill tiny ${!o.sceneSig ? 'on' : 'dashed'}" data-act="batchscene" data-v="">例图模板</button>${saved.map(p => `<button class="pc-pill tiny ${o.sceneSig === sceneSig(p) ? 'on' : 'dashed'}" data-act="batchscene" data-v="${esc(sceneSig(p))}">${esc(p.name || '没起名')}</button>`).join('')}</div>${o.sceneSig ? `<div class="pc-dim small" style="margin:6px 0">用生图页存下的这条固定提示词当例图提示词；下面选尺寸。</div>${batchScenePrompt(saved.find(p => sceneSig(p) === o.sceneSig)) ? '' : '<div class="pc-hint">这条提示词没有有效英文标签，请先到生图页转换并重新保存。</div>'}
       <label class="pc-field"><span>负面（自己写，所有画师共用）</span><textarea class="pc-textarea mono" rows="2" data-bsneg placeholder="${esc(BATCH_SCENE_NEG)}">${esc(batchSceneNeg())}</textarea></label>
       <div class="pc-chips wrap" style="margin-bottom:6px"><button class="pc-pill dashed tiny" data-act="bsneg" data-v="studio">用生图页的负面</button><button class="pc-pill dashed tiny" data-act="bsneg" data-v="base">恢复通用的</button></div>` : ''}` : '';
-    if (scope === 'batch' && o.sceneSig) return sceneRow + `<div class="pc-chips wrap">${[...Object.entries(M.SHOTS).map(([k, v]) => [k, `${v.name} ${v.ratio}`]), ['all', '三种都要']].map(([k, t]) => `<button class="pc-pill tiny ${o.shot === k ? 'on' : 'dashed'}" data-act="pickshot" data-scope="batch" data-v="${k}">${t}</button>`).join('')}</div>`;
+    if (scope === 'batch' && o.sceneSig) return sceneRow + `<div class="pc-chips wrap">${[...Object.entries(M.SHOTS).map(([k, v]) => [k, `${v.name} ${v.ratio}`]), ['all', '三种都要']].map(([k, t]) => `<button class="pc-pill tiny ${o.shot === k ? 'on' : 'dashed'}" data-act="pickshot" data-scope="batch" data-v="${k}">${t}</button>`).join('')}</div>
+      <div class="pc-chips wrap"><span class="pc-dim small" style="align-self:center">单个画师的权重</span>${[1, 1.2, 1.5, 2].map(w => `<button class="pc-pill tiny ${(Number(getData().options.sampleSoloWeight) || 1) === w ? 'on' : 'dashed'}" data-act="soloweight" data-v="${w}">×${w}</button>`).join('')}</div>`;
     return sceneRow + `<div class="pc-chips wrap">${ratings.map(([k, t]) => `<button class="pc-pill tiny ${o.rating === k ? 'on' : 'dashed'} ${k === 'nsfw' ? 'nsfw' : ''}" data-act="pickrating" data-scope="${scope}" data-v="${k}">${t}</button>`).join('')}</div>
       <div class="pc-chips wrap">${shots.map(([k, t]) => `<button class="pc-pill tiny ${o.shot === k ? 'on' : 'dashed'}" data-act="pickshot" data-scope="${scope}" data-v="${k}">${t}</button>`).join('')}
-      <button class="pc-pill tiny dashed" data-act="edittpl" data-scope="${scope}">改提示词</button></div>`;
+      <button class="pc-pill tiny dashed" data-act="edittpl" data-scope="${scope}">改提示词</button></div>
+      <div class="pc-chips wrap"><span class="pc-dim small" style="align-self:center">单个画师的权重</span>${[1, 1.2, 1.5, 2].map(w => `<button class="pc-pill tiny ${(Number(getData().options.sampleSoloWeight) || 1) === w ? 'on' : 'dashed'}" data-act="soloweight" data-v="${w}">×${w}</button>`).join('')}</div>`;
 }
 /** 生成例图：先弹小面板选 SFW/NSFW 和构图 */
 function openSamplePicker(ref, redraw) {
@@ -6565,6 +6578,8 @@ function openSamplePicker(ref, redraw) {
           <div class="pc-seg">${[['sfw', 'SFW'], ['nsfw', 'NSFW']].map(([k, t]) => `<button class="${ui.sample.rating === k ? 'on' : ''}" data-sp="rating" data-v="${k}">${t}</button>`).join('')}</div>
           <div class="pc-label">构图（可以多选）</div>
           <div class="pc-sp-shots">${Object.entries(M.SHOTS).map(([k, v]) => `<button class="${ui.sample.shots.has(k) ? 'on' : ''}" data-sp="shot" data-v="${k}"><i style="width:${shapes[k][0]}px;height:${shapes[k][1]}px"></i>${v.name}<small>${v.ratio}</small></button>`).join('')}</div>
+          <div class="pc-label">单个画师的权重</div>
+          <div class="pc-chips wrap">${[1, 1.2, 1.5, 2].map(w => `<button class="pc-pill tiny ${(Number(getData().options.sampleSoloWeight) || 1) === w ? 'on' : 'dashed'}" data-sp="weight" data-v="${w}">×${w}</button>`).join('')}</div>
           <div class="pc-row-between pc-mt-s"><button class="pc-linkish" data-sp="tpl">改提示词</button><span class="pc-dim small">会生成 ${n} 张</span></div>
           <button class="pc-btn dark big pc-mt-s" data-sp="go" ${n ? '' : 'disabled'}>${seal()}${n ? '开始生成' : '先选一种构图'}</button>
         </section>`;
@@ -6576,14 +6591,15 @@ function openSamplePicker(ref, redraw) {
         const el = ev.target.closest('[data-sp]');
         if (!el) return;
         const k = el.dataset.sp;
+        if (k === 'weight') { getData().options.sampleSoloWeight = Number(el.dataset.v) || 1; commit({ silent: true }); draw(); }
         if (k === 'rating') { ui.sample.rating = el.dataset.v; draw(); }
         if (k === 'shot') { const v = el.dataset.v; if (ui.sample.shots.has(v)) ui.sample.shots.delete(v); else ui.sample.shots.add(v); draw(); }
         if (k === 'tpl') { back.remove(); await openTemplateEditor(chosenTemplates('sample')[0] || 'sfw_bust'); }
         if (k === 'go') {
-            const tpls = chosenTemplates('sample');
+            const tpls = chosenTemplates('sample'), soloWeight = Number(getData().options.sampleSoloWeight) || 1;
             back.remove();
             ui.busyRefs.add(ref.id); redraw();
-            try { for (const t of tpls) { await E.makeSampleFor(ref, t); redraw(); } toastr.success(`例图已保存（${tpls.length} 张）`, '智库', { timeOut: 1800 }); }
+            try { for (const t of tpls) { await E.makeSampleFor(ref, t, { soloWeight }); redraw(); } toastr.success(`例图已保存（${tpls.length} 张）`, '智库', { timeOut: 1800 }); }
             catch (e) { toastr.error(e.message, '生成例图失败'); }
             finally { ui.busyRefs.delete(ref.id); redraw(); }
         }
@@ -8646,6 +8662,7 @@ async function onClick(ev, outside = false) {
             case 'pickrating': (el.dataset.scope === 'batch' ? ui.batch : ui.sample).rating = el.dataset.v; render(); break;
             case 'pickshot': (el.dataset.scope === 'batch' ? ui.batch : ui.sample).shot = el.dataset.v; render(); break;
             case 'batchscene': ui.batch.sceneSig = el.dataset.v || ''; render(); break;
+            case 'soloweight': d.options.sampleSoloWeight = Number(el.dataset.v) || 1; commit({ silent: true }); render(); break;
             case 'bsneg': d.options.batchSceneNeg = el.dataset.v === 'studio' ? String((ui.studio.loaded ? ui.studio.neg : d.studio?.neg) ?? '') : BATCH_SCENE_NEG; commit({ silent: true }); render(); break;
             case 'edittpl': await openTemplateEditor(chosenTemplates(el.dataset.scope || 'sample')[0] || 'sfw_bust'); break;
             case 'sample': { const r = refFrom(el); if (!ui.busyRefs.has(r.id)) openSamplePicker(r, render); break; }
@@ -9747,7 +9764,7 @@ function startBatch() {
         const ref = findUnit(d, u) || (u.text ? M.createFromString(d, { name: u.name || '', text: u.text, forceGroup: !!u.name }) : { type: 'artist', id: M.ensureArtist(d, u.tag).id });
         if (!ref) continue;
         const item = M.resolveTicket(d, ref).item;
-        for (const t of tpls) jobs.push({ ref, templateId: t, skip: ui.batch.skipExisting && item.images.some(i => i.template === t) });
+        for (const t of tpls) jobs.push({ ref, templateId: t, soloWeight: Number(d.options.sampleSoloWeight) || 1, skip: ui.batch.skipExisting && item.images.some(i => i.template === t) });
     }
     commit();
     const old = ui.batch.state;

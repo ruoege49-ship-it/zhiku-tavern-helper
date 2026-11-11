@@ -1,0 +1,62 @@
+{
+  "sfw_head": {
+    "id": "sfw_head",
+    "name": "SFW 头像",
+    "nsfw": false,
+    "shot": "head",
+    "positive": "1boy, solo, male focus, adult, portrait, headshot, head and shoulders, front view, facing viewer, looking at viewer, centered, detailed face, detailed eyes, shirt, light smile, simple background, white background",
+    "negative": "1girl, female, multiple boys, child, text, watermark, signature, profile, from side, from above, from below, dutch angle, looking away, three-quarter view, extreme close-up, cropped head, head out of frame, multiple views, silhouette, monochrome, greyscale, mannequin, faceless, reference sheet, character sheet, turnaround, anatomy chart, flat color, solid color, blank eyes, hands",
+    "width": 1024,
+    "height": 1024
+  },
+  "sfw_bust": {
+    "id": "sfw_bust",
+    "name": "SFW 胸像",
+    "nsfw": false,
+    "shot": "bust",
+    "positive": "1boy, solo, male focus, adult, upper body, front view, facing viewer, looking at viewer, centered, detailed face, detailed eyes, casual clothes, shirt, pants, full color, simple background, white background",
+    "negative": "1girl, female, multiple boys, child, text, watermark, signature, profile, from side, from above, from below, dutch angle, looking away, three-quarter view, extreme close-up, cropped head, head out of frame, multiple views, silhouette, monochrome, greyscale, mannequin, faceless, reference sheet, character sheet, turnaround, anatomy chart, flat color, solid color, blank eyes",
+    "width": 896,
+    "height": 1152
+  },
+  "sfw_full": {
+    "id": "sfw_full",
+    "name": "SFW 立绘",
+    "nsfw": false,
+    "shot": "full",
+    "positive": "1boy, solo, male focus, adult, full body, standing, front view, facing viewer, looking at viewer, centered, detailed face, detailed eyes, casual clothes, shirt, pants, full color, shoes, simple background, white background",
+    "negative": "1girl, female, multiple boys, child, text, watermark, signature, profile, from side, from above, from below, dutch angle, looking away, three-quarter view, extreme close-up, cropped head, head out of frame, multiple views, silhouette, monochrome, greyscale, mannequin, faceless, reference sheet, character sheet, turnaround, anatomy chart, flat color, solid color, blank eyes, cropped",
+    "width": 768,
+    "height": 1344
+  },
+  "nsfw_head": {
+    "id": "nsfw_head",
+    "name": "NSFW 头像",
+    "nsfw": true,
+    "shot": "head",
+    "positive": "nsfw, 1boy, solo, male focus, adult, portrait, headshot, head and shoulders, front view, facing viewer, looking at viewer, centered, detailed face, detailed eyes, blush, sweat, parted lips, half-closed eyes, simple background, white background",
+    "negative": "1girl, female, multiple boys, child, text, watermark, signature, profile, from side, from above, from below, dutch angle, looking away, three-quarter view, extreme close-up, cropped head, head out of frame, multiple views, silhouette, monochrome, greyscale, mannequin, faceless, reference sheet, character sheet, turnaround, anatomy chart, flat color, solid color, blank eyes, hands",
+    "width": 1024,
+    "height": 1024
+  },
+  "nsfw_bust": {
+    "id": "nsfw_bust",
+    "name": "NSFW 胸像",
+    "nsfw": true,
+    "shot": "bust",
+    "positive": "nsfw, 1boy, solo, male focus, adult, upper body, front view, facing viewer, looking at viewer, centered, detailed face, shirtless, pectorals, nipples, sweat, simple background, white background",
+    "negative": "1girl, female, multiple boys, child, text, watermark, signature, profile, from side, from above, from below, dutch angle, looking away, three-quarter view, extreme close-up, cropped head, head out of frame, multiple views, silhouette, monochrome, greyscale, mannequin, faceless, reference sheet, character sheet, turnaround, anatomy chart, flat color, solid color, blank eyes",
+    "width": 896,
+    "height": 1152
+  },
+  "nsfw_full": {
+    "id": "nsfw_full",
+    "name": "NSFW 立绘",
+    "nsfw": true,
+    "shot": "full",
+    "positive": "nsfw, 1boy, solo, male focus, adult, full body, standing, front view, facing viewer, looking at viewer, centered, detailed face, completely nude, penis, simple background, white background",
+    "negative": "1girl, female, multiple boys, child, text, watermark, signature, profile, from side, from above, from below, dutch angle, looking away, three-quarter view, extreme close-up, cropped head, head out of frame, multiple views, silhouette, monochrome, greyscale, mannequin, faceless, reference sheet, character sheet, turnaround, anatomy chart, flat color, solid color, blank eyes, cropped",
+    "width": 768,
+    "height": 1344
+  }
+}
