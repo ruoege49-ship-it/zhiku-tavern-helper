@@ -17,13 +17,11 @@ function inputContextRejected(e) {
     return !e?.emptyLength && [400, 413, 422].includes(e?.status)
         && /context.{0,80}(?:length|window|limit)|(?:input|prompt|messages?).{0,80}(?:too long|too large|exceed)|(?:exceed|longer than).{0,80}context/i.test(String(e.providerMessage || e.message || ''));
 }`);
-    patch("!e.emptyLength && TOO_BIG_TOKENS.test(String(e?.message))", 'tokenBudgetRejected(e)');
-    patch("TOO_BIG_TOKENS.test(String(e?.message))", 'tokenBudgetRejected(e)');
+    patch("e.emptyLength || !TOO_BIG_TOKENS.test(String(e?.message))", "!tokenBudgetRejected(e)");
     patch("if (!res.ok) throw new Error(`AI 请求失败（${res.status}）：${raw.slice(0, 160)}`);", "if (!res.ok) throw aiRequestError(`AI 请求失败（${res.status}）：${raw.slice(0, 160)}`, res.status, raw);");
     patch("if (!r.ok) throw new Error(`AI 请求失败（${r.status}）：${raw.slice(0, 160)}。如果这个模型不能看图，到设置 → 翻译和 AI 换一个`);", "if (!r.ok) throw aiRequestError(`AI 请求失败（${r.status}）：${raw.slice(0, 160)}。如果这个模型不能看图，到设置 → 翻译和 AI 换一个`, r.status, raw);");
     patch("    const TOO_LONG = /context|length|too long|too large|token|maximum|exceed|413|504|524|timeout|超出|过长|太长|上限/i;\n", '');
     patch("            if (!TOO_LONG.test(String(e?.message || e))) throw e;", "            if (!inputContextRejected(e)) throw e;");
     patch('/** 回复是空的就给大很多的长度再试一次（思考模型要先思考，2000 不够用） */\n', '');
-    patch("        // 模型不收这么大的长度（请求直接被拒，没花额度）：按原来的长度发", "        // 接口明确拒绝输出长度时，按原来的长度重发一次");
     return s;
 }

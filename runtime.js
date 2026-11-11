@@ -495,12 +495,21 @@ function createComicController(deps) {
     }
 
     /** 这楼里还没出图的页，一页一页排队出 */
+    const autoAdapted = new Set();
     async function process(id, { manual = false } = {}) {
         if (stopped || (!manual && (!enabled() || opts().comicAuto === false))) return;
         const msg = getContext().chat?.[id];
         if (!msg || msg.is_user || msg.is_system) return;
         const blocks = comicBlocks(srcOf(msg));
-        if (!blocks.length) return;
+        if (!blocks.length) {
+            // 正文没有分镜：自动让 AI 改编（只管最新一楼，每楼只试一次，免得翻旧聊天时一楼楼改）
+            const k = `${chatKey(getContext())}:${id}:${msg.send_date || ''}:${msg.swipe_id ?? 0}`;
+            if (!manual && opts().comicSrc !== 'extract' && id === (getContext().chat?.length || 0) - 1 && !autoAdapted.has(k) && String(msg.mes || '').trim().length > 40) {
+                autoAdapted.add(k);
+                try { await adapt(id, { draw: false }); if (getContext().chat?.[id] === msg && comicBlocks(srcOf(msg)).length) await process(id); } catch (e) { console.warn('[智库] 漫画自动改编', e); }
+            }
+            return;
+        }
         render(id);
         const snap = pageSnapshot(id, blocks[0]);
         for (const b of blocks) {
@@ -743,8 +752,12 @@ function createComicController(deps) {
             root.innerHTML = `${box ? '<div class="pc-row-between"><h3 class="pc-h3" style="margin:0">漫画设置</h3><button class="pc-btn small" data-cx>好了</button></div>' : ''}
               ${tavern ? '<div class="pc-banwarn">⚠ 现在用的是酒馆里的 key：画不了漫画（分人物），到 NovelAI 设置里改成自己填 key 或第三方站点。</div>' : ''}
               <div class="pc-label">开关</div>
-              ${sw('comicOn', '漫画模式', '认出回复里的 &lt;image&gt;@page…&lt;/image&gt;（漫画台预设）自动画；「画成漫画」不开也能用')}
-              ${sw('comicAuto', '回复写完自动出图', '关掉的话，在楼层里点「生成这一页」再画', true)}
+              ${sw('comicOn', '漫画模式', '打开后角色的回复会画成漫画：AI 自己写分镜；用了漫画台预设、回复里已经有 &lt;image&gt;@page 分镜的就直接画。楼层里的「画成漫画」不开也能用')}
+              ${sw('comicAuto', '回复写完自动出漫画', '关掉的话，在楼层里点「画成漫画」「生成这一页」再画', true)}
+              <div class="pc-label">分镜从哪来</div>
+              ${seg('comicSrc', [['extract', '只用写好的'], ['ai', '没写就让 AI 写']], 'ai')}
+              <div class="pc-hint">${opts().comicSrc === 'extract' ? '只画回复里已经写好的 &lt;image&gt;@page 分镜（漫画台预设会让正文模型写）；回复里没有分镜就不自动画，要画就在楼层里点「画成漫画」让 AI 写。' : '回复里有写好的分镜（漫画台预设）就照着画；没有就让 AI 把这一楼改编成分镜再画（每楼多一次 AI 调用，只管最新一楼、每楼只写一次）。'}</div>
+              <div class="pc-hint">写分镜用的 AI：${esc(typeof __mod_translate !== 'undefined' ? __mod_translate.apiFor('comic').from || '' : '')}。要换接口、模型或者加要求，到智库「设置 → AI 预设 → 各个功能 → 漫画改编」。</div>
               <div class="pc-label">画风</div>
               <select class="pc-input" data-cstyle><option value="">跟正文画师串一样${d.active ? `（现在是「${esc(M.ticketName(d, d.active))}」）` : '（还没选）'}</option>
                 ${groups.map(g => `<option value="group:${esc(g.id)}" ${o.comicStyle === 'group:' + g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>
@@ -787,7 +800,7 @@ function createComicController(deps) {
     }
 
     // ── 把一楼画成漫画：AI 读正文写分镜，存进这楼，再一页页出图 ──
-    async function adapt(id, { pages = 0, redo = false } = {}) {
+    async function adapt(id, { pages = 0, redo = false, draw = true } = {}) {
         const snap = pageSnapshot(id);
         if (!snap) return;
         const { c, msg, source } = snap;
@@ -824,7 +837,7 @@ function createComicController(deps) {
             (deps.notifyError || notify)('第 ' + id + ' 楼没画成漫画：' + why);
             return;
         } finally { if (adapting.get(id) === task) adapting.delete(id); render(id); }
-        await process(id, { manual: true });
+        if (draw) await process(id, { manual: true });
     }
     let capsHidden = false; // 这次打开酒馆里先不看对白
     async function setFold(id, on) {
@@ -2535,6 +2548,7 @@ const save = () => saveSettingsDebounced();
 function isReady() {
     const s = settings();
     if (s.naiMode === 'tavern') return true;
+    if (s.naiMode === 'gpt') return !!String(s.gptUrl || '').trim();
     if (s.naiMode === 'site') return !!s.naiSite.trim();
     return !!s.naiKey.trim();
 }
@@ -2904,6 +2918,84 @@ function fillWorkflow(api, v, builtin) {
     }
     return JSON.stringify(wf);
 }
+/** ── OpenAI 兼容生图（/images/generations、/images/edits）：没有 NovelAI 的人也能出图 ── */
+const GPT_DROP = /^(?:masterpiece|best quality|very aesthetic|aesthetic|absurdres|incredibly absurdres|highres|high resolution|ultra-detailed|amazing quality|great quality|good quality|normal quality|newest|very awa|official art|no text|lowres|screentone|halftone|year \d{4}|rating:\s*\w+|location|-?\d+(?:\.\d+)?)$/i;
+function gptClean(text) {
+    const t = String(text || '').replace(/-?\d+(?:\.\d+)?::([\s\S]*?)::/g, '$1').replace(/[{}\[\]]/g, '').replace(/\|/g, ',');
+    return t.split(/\s*,\s*/).map(x => x.trim()).filter(x => x && !/^artist:/i.test(x) && !GPT_DROP.test(x)).join(', ');
+}
+const gptBase = s => String(s.gptUrl || '').trim().replace(/\/+$/, '').replace(/\/images\/(?:generations|edits)$/, '');
+function gptSize(s, w, h) {
+    const v = String(s.gptSize || 'ratio').trim();
+    if (v === 'ratio') return w > h * 1.15 ? '1536x1024' : h > w * 1.15 ? '1024x1536' : '1024x1024';
+    return v || 'auto';
+}
+function b64ToBlob(b64, type = 'image/png') {
+    const bin = atob(String(b64).replace(/^data:[^,]+,/, '')), u = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    return new Blob([u], { type });
+}
+const b64Mime = b => /^\/9j\//.test(b) ? 'jpeg' : /^UklGR/.test(b) ? 'webp' : /^R0lGOD/.test(b) ? 'gif' : 'png';
+async function gptPrompt(opts, s) {
+    const where = c => { const x = Number(c.center?.x ?? 0.5); return x < 0.4 ? ' (on the left)' : x > 0.6 ? ' (on the right)' : ''; };
+    const cs = (opts.chars || []).filter(c => c.prompt);
+    const tags = [gptClean(opts.positive) && `Scene: ${gptClean(opts.positive)}`, ...cs.map((c, i) => `Character ${i + 1}${cs.length > 1 ? where(c) : ''}: ${gptClean(c.prompt)}`)].filter(Boolean).join('\n');
+    const style = String(s.gptStyle ?? 'anime illustration').trim();
+    let body = tags;
+    if (String(s.gptRewrite) === 'true' && typeof __mod_translate !== 'undefined') {
+        try {
+            const r = await __mod_translate.askLLM(`You turn Danbooru-style tags (a scene line plus one line per character) into one clear English prompt for an image model. Keep every concrete detail: how many people, each person's looks, clothes, pose, expression, camera angle and framing, background, lighting, panel layout and any dialogue text in quotes. Keep each character's details attached to that character. Do not invent anything. Write plain prose, no lists, no tags. Output only the prompt.`, tags, { fn: 'tr' });
+            const out = String(r || '').replace(/<think[\s\S]*?<\/think>/gi, '').trim();
+            if (out) body = out;
+        } catch (e) { console.warn('[智库] 改写成英文描述失败，照标签发', e); }
+    }
+    return [style && `${style}.`, opts.comic ? 'A manga page with several panels.' : '', body].filter(Boolean).join(' ');
+}
+let gptStopped = false;
+const gptControllers = new Set();
+function stopGpt() { gptStopped = true; for (const c of gptControllers) c.abort(); }
+async function gptGenerate(opts, s) {
+    if (gptStopped) throw new Error('生图已停止');
+    const base = gptBase(s);
+    if (!base) throw new Error('还没填 OpenAI 兼容生图的地址，到智库「设置 → NovelAI」选「OpenAI 兼容」填');
+    const model = String(s.gptModel || '').trim() || 'gpt-image-1';
+    const w = Number(opts.width || s.novelai_width) || 832, h = Number(opts.height || s.novelai_height) || 1216;
+    const size = gptSize(s, w, h), prompt = await gptPrompt(opts, s);
+    if (gptStopped) throw new Error('生图已停止');
+    const headers = String(s.gptKey || '').trim() ? { Authorization: `Bearer ${String(s.gptKey).trim()}` } : {};
+    const refs = String(s.gptRefs) === 'false' ? [] : [opts.i2i?.image, ...(opts.director || []).map(d => d.data)].filter(Boolean).slice(0, 4);
+    const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), 180000);
+    gptControllers.add(ctrl);
+    let res;
+    try {
+        if (refs.length) {
+            const fd = new FormData();
+            fd.append('model', model); fd.append('prompt', prompt); fd.append('size', size); fd.append('n', '1');
+            refs.forEach((b, i) => fd.append(refs.length > 1 ? 'image[]' : 'image', b64ToBlob(b, `image/${b64Mime(b)}`), `ref${i}.${b64Mime(b) === 'jpeg' ? 'jpg' : b64Mime(b)}`));
+            res = await fetch(`${base}/images/edits`, { method: 'POST', headers, body: fd, signal: ctrl.signal });
+        } else {
+            res = await fetch(`${base}/images/generations`, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, size, n: 1, ...(/^dall-e/i.test(model) ? { response_format: 'b64_json' } : {}) }), signal: ctrl.signal });
+        }
+    const raw = await res.text();
+    let j = null; try { j = JSON.parse(raw); } catch {}
+    if (!res.ok) throw new Error(`生图站点返回 ${res.status}：${j?.error?.message || j?.message || raw.slice(0, 200)}`);
+    const d0 = j?.data?.[0];
+    let image = '';
+    if (d0?.b64_json) image = `data:image/${b64Mime(d0.b64_json)};base64,${d0.b64_json}`;
+    else if (d0?.url) {
+        try { const b = await (await fetch(d0.url, { signal: ctrl.signal })).blob(); image = await new Promise((ok, no) => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.onerror = no; fr.readAsDataURL(b); }); }
+        catch { image = d0.url; }
+    }
+    if (ctrl.signal.aborted || gptStopped) throw Object.assign(new Error('生图已停止或超时'), { name: 'AbortError' });
+    if (!image) throw new Error('生图站点没有返回图片：' + raw.slice(0, 200));
+    const sent = { prompt, negative: '', size: `${size}（要的是 ${w}×${h}）`, chars: [], seed: 0, model: 'OpenAI 兼容 · ' + model, director: refs.length };
+    return { image, sent };
+    } catch (e) {
+        if (gptStopped) throw new Error('生图已停止');
+        if (ctrl.signal.aborted) throw new Error('等了 3 分钟还没出图，站点可能太忙，等一下再试');
+        throw e;
+    } finally { clearTimeout(timer); gptControllers.delete(ctrl); }
+}
 async function comfyGenerate(opts, s) {
     const url = comfyUrl(s);
     if (!url) throw new Error('还没填 ComfyUI 地址，到智库「Comfy」页填');
@@ -2948,6 +3040,7 @@ async function generateRequest(opts) {
         if (opts.i2i?.image) throw new Error('ComfyUI 通道暂不支持这里的垫图，请使用 NovelAI 通道');
         return comfyGenerate(opts, s);
     }
+    if (s.naiMode === 'gpt') return gptGenerate(opts, s);
     if (!opts.comic && s.naiMode === 'site' && String(s.naiSiteSimple) === 'true') {
         const cs = opts.chars || [];
         opts = {
@@ -3082,6 +3175,15 @@ async function unzipFirstImage(u8) {
 async function testConnection() {
     const s = settings();
     try {
+        if (s.naiMode === 'gpt') {
+            const base = gptBase(s);
+            if (!base) return { ok: false, text: '还没填地址' };
+            const r = await fetch(`${base}/models`, { headers: String(s.gptKey || '').trim() ? { Authorization: `Bearer ${String(s.gptKey).trim()}` } : {} });
+            if (!r.ok) return { ok: false, text: `站点返回 ${r.status}` };
+            const ids = ((await r.json().catch(() => ({})))?.data || []).map(m => m.id).filter(Boolean);
+            const img = ids.filter(x => /image|dall|flux|sd|draw|midj|kolors|seedream|imagen/i.test(x));
+            return { ok: true, warn: !img.length, text: img.length ? `连上了，能生图的模型：${img.slice(0, 6).join('、')}` : `连上了（${ids.length} 个模型），但没看出哪个能生图，自己填模型名` };
+        }
         if (s.naiMode === 'tavern') {
             const r = await http('/api/novelai/status', { method: 'POST', headers: getRequestHeaders(), body: '{}' });
             if (!r.ok) return { ok: false, text: '酒馆里没填 NovelAI key，或者 key 不对（酒馆的「API 连接」→ NovelAI）' };
@@ -3142,7 +3244,7 @@ function encKey(model = settings().novelaimode) {
 }
 function vibeSupported() {
     const s = settings();
-    return s.naiMode !== 'tavern' && s.novelaimode !== 'nai-diffusion-3' && !String(s.novelaimode).includes('diffusion-5');
+    return s.naiMode !== 'tavern' && s.naiMode !== 'gpt' && s.novelaimode !== 'nai-diffusion-3' && !String(s.novelaimode).includes('diffusion-5');
 }
 
 /** 把一张图编码成当前模型能用的氛围（NovelAI 会扣一点点数）。imageB64 不带 data: 前缀 */
@@ -3194,7 +3296,7 @@ function parseVibeFile(json) {
 
 function charRefSupported() {
     const s = settings();
-    return s.naiMode !== 'tavern' && s.novelaimode.includes('4-5') && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');
+    return s.naiMode === 'gpt' ? String(s.gptRefs) !== 'false' : s.naiMode !== 'tavern' && s.novelaimode.includes('4-5') && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');
 }
 
 // ───────────── 局部重绘 ─────────────
@@ -3209,6 +3311,7 @@ function inpaintModel(model = settings().novelaimode) {
 function inpaint(opts){return __naiGate.run(()=>inpaintRequest(opts)).catch(e=>{throw netError(e);});}
 async function inpaintRequest({ image, mask, prompt, negative, width, height, strength = 0.7 }) {
     const s = settings();
+    if (s.naiMode === 'gpt') throw new Error('OpenAI 兼容通道暂不支持局部重绘');
     if (s.naiMode === 'tavern') throw new Error('「用酒馆里的 key」不能局部重绘，到设置里改成「填我的 key」');
     const key = authKey();
     const model = inpaintModel();
@@ -3236,7 +3339,7 @@ async function inpaintRequest({ image, mask, prompt, negative, width, height, st
     return imageFromResponse(buf);
 }
 
-return { comfyReady, chatBackend, comfyAutoConfig, comfyConnect, comfyUseWorkflow, naiToSd, uiToApi, fillWorkflow, COMFY_Q, COMFY_UC, stopQueue:()=>__naiGate.stop(), MODELS, SAMPLERS, SCHEDULES, settings, save, isReady, ucpValue, buildParameters, generate, unzipFirstImage, testConnection, importFromZhihuiji, encKey, vibeSupported, encodeVibe, parseVibeFile, charRefSupported, inpaintModel, inpaint };
+return { comfyReady, chatBackend, comfyAutoConfig, comfyConnect, comfyUseWorkflow, naiToSd, uiToApi, fillWorkflow, COMFY_Q, COMFY_UC, stopQueue:()=>{__naiGate.stop();stopGpt();}, MODELS, SAMPLERS, SCHEDULES, settings, save, isReady, ucpValue, buildParameters, generate, unzipFirstImage, testConnection, importFromZhihuiji, encKey, vibeSupported, encodeVibe, parseVibeFile, charRefSupported, inpaintModel, inpaint };
 })();
 
 // ───── engine.js ─────
@@ -3359,6 +3462,7 @@ async function run(opts) {
     else if (!N.isReady()) throw new Error('还没填 NovelAI key，到「设置」最上面填');
     runtime.busy++;
     try {
+        if (N.settings().naiMode === 'gpt' && opts.backend !== 'comfy') opts.refs = null;
         if (!opts.noVibe && opts.director === undefined) opts.director = await charRefs();
         if (!opts.noVibe && !opts.director && opts.refs === undefined) opts.refs = await vibeRefs();
         const r = await N.generate(opts);
@@ -3853,7 +3957,7 @@ async function readBody(res) {
     }
 }
 /** 带思考的模型会先把限长用在思考上：一开始就给够 8000（只是上限，用不到不花），不再空了重试——重试等于再思考一次，白费额度 */
-const LLM_MIN_TOKENS = 8000;
+const LLM_DEFAULT_TOKENS = 16000;
 // Only an explicit validation rejection can be safely retried with a smaller budget.
 function aiRequestError(message, status, detail) {
     return Object.assign(new Error(message), { status: Number(status), providerMessage: String(detail || message) });
@@ -3869,13 +3973,23 @@ function inputContextRejected(e) {
     return !e?.emptyLength && [400, 413, 422].includes(e?.status)
         && /context.{0,80}(?:length|window|limit)|(?:input|prompt|messages?).{0,80}(?:too long|too large|exceed)|(?:exceed|longer than).{0,80}context/i.test(String(e.providerMessage || e.message || ''));
 }
+/** 回复长度上限：设置里自己填了就用它，没填默认 16000（只是上限，用不到不花） */
+const userMaxTokens = () => { const n = Math.round(Number(getData().options.aiMaxTokens)); return n >= 256 ? Math.min(n, 200000) : 0; };
+const wantTokens = opts => userMaxTokens() || Math.max(LLM_DEFAULT_TOKENS, opts.maxTokens || 800);
+/** 模型不收这么大的长度（请求直接被拒，没花额度）：依次降到 8000、4000 再试；自己填了长度就不动 */
+async function withTokenFallback(once, opts) {
+    const want = wantTokens(opts), steps = userMaxTokens() ? [want] : [want, 8000, 4000].filter((n, i, a) => n <= want && a.indexOf(n) === i);
+    let last;
+    for (const n of steps) {
+        try { return await once({ ...opts, maxTokens: n }); }
+        catch (e) { last = e; if (!tokenBudgetRejected(e)) throw e; console.warn('[智库] 模型不收', n, '的长度，降一点再试'); }
+    }
+    throw Object.assign(new Error(String(last?.message || last) + '。到设置 → 翻译和 AI 把「回复长度上限」改小一点'), { diag: last?.diag });
+}
 async function askLLM(system, user, opts = {}) {
-    const want = Math.max(LLM_MIN_TOKENS, opts.maxTokens || 800);
-    try { return await askLLMOnce(system, user, { ...opts, maxTokens: want }); }
+    try { return await withTokenFallback(o => askLLMOnce(system, user, o), opts); }
     catch (e) {
-        // 接口明确拒绝输出长度时，按原来的长度重发一次
-        if (want > (opts.maxTokens || 800) && tokenBudgetRejected(e)) return askLLMOnce(system, user, opts);
-        if (e.emptyLength) throw Object.assign(new Error(`AI 回复是空的（${e.diag || '没有更多信息'}）。带思考的模型会先把长度用在思考上：换不带思考的模型，或者在 AI 设置里把思考关掉`), { emptyLength: true, diag: e.diag });
+        if (e.emptyLength) throw Object.assign(new Error(`AI 回复是空的（${e.diag || '没有更多信息'}）。带思考的模型会先把长度用在思考上：到设置 → 翻译和 AI 把「回复长度上限」调大，或者换不带思考的模型`), { emptyLength: true, diag: e.diag });
         throw e;
     }
 }
@@ -4144,9 +4258,7 @@ ${PAIRS}
 /** 让 AI 看一张图（要能看图的模型）。imageDataUrl 是 data:image/... */
 /** 看图同理：一开始就给够长度 */
 async function askVision(system, text, imageDataUrl, opts = {}) {
-    const want = Math.max(LLM_MIN_TOKENS, opts.maxTokens || 800);
-    try { return await askVisionOnce(system, text, imageDataUrl, { ...opts, maxTokens: want }); }
-    catch (e) { if (want > (opts.maxTokens || 800) && tokenBudgetRejected(e)) return askVisionOnce(system, text, imageDataUrl, opts); throw e; }
+    return withTokenFallback(o => askVisionOnce(system, text, imageDataUrl, o), opts);
 }
 async function askVisionOnce(system, text, imageDataUrl, { maxTokens = 800, fn = '' } = {}) {
     const api = apiFor(fn);
@@ -4542,6 +4654,8 @@ function markerPrompt(prompt, { story } = {}) {
     const plan = readIllustrationPlan(prompt);
     const parsed = plan ? compileIllustrationPlan(plan, currentCast(), story === undefined ? undefined : imageStoryText(story)) : resolveImageCharacters(prompt, currentCast());
     if (parsed.unknown?.length) toastr.info(`「${parsed.unknown.join('、')}」没在角色页登记（或这次聊天没开），按图里写的标签画`, '智库', { timeOut: 4000 });
+    // 画面和角色动作全是空的：多半是写画面的 AI 回复空了，不画（不然会按画师串随便画一张，和正文无关）
+    if (!parsed.unknown?.length && !String(parsed.scene || '').replace(/\b(?:nsfw|sfw)\b|[,\s]/gi, '') && !(parsed.picks || []).some(p => String(p.tags || '').trim())) throw new Error('这张图没有画面描述，没画：多半是写画面的 AI 回复空了（带思考的模型把长度用完了）。到智库「设置 → 翻译和 AI」把「回复长度上限」调大，或者换个不带思考的模型');
     const rating = plan?.rating?.toLowerCase() || (hasNsfwRating(parsed.scene) ? 'nsfw' : undefined);
     const built = buildChatPrompt(parsed.scene, parsed.picks, { nsfw: rating === 'nsfw' });
     return { ...built, positive: applyIllustrationRating(built.positive, rating), cast: parsed.cast };
@@ -7898,7 +8012,7 @@ function viewLobby(d) {
     const nm = lobbyNsfwMode();
     // 只看男性 / 女性的 NSFW：带 NSFW 的分享只留对得上的；没有 NSFW 的照常显示
     // 只有男性裸体 / 只有女性裸体：带裸体的分享只留只有这一种的；没有裸体的照常显示。R18G 没打开就不显示
-    const whoOk = p => p.mine || ((nm === 'all' || nm === 'sfw' || !postHasNsfw(p) || (postWho(p).has(nm) && postWho(p).size === 1)) && (d.options.lobbyR18g || !(p.tags || []).includes('R18G')));
+    const whoOk = p => p.mine || ((nm === 'all' || !postHasNsfw(p) || (postWho(p).has(nm) && postWho(p).size === 1)) && (d.options.lobbyR18g || !(p.tags || []).includes('R18G')));
     const items = lb.items.filter(p => (p.mine || (!p.tags.some(t => blocked.has(t)) && !blk.users.includes(p.nickname) && !blk.posts.includes(p.id))) && (!lb.tag2 || p.tags.includes(lb.tag2)) && whoOk(p));
     const tags = lb.tags.map(t => t.tag).filter(t => t !== 'NSFW' && !AUD.includes(t) && !ORIENT.includes(t));
     for (const t of blocked) if (!tags.includes(t)) tags.push(t);
@@ -8070,7 +8184,16 @@ function viewSettings(d) {
     const modeBtn = (v, t) => `<button class="${n.naiMode === v ? 'on' : ''}" data-act="naimode" data-mode="${v}">${t}</button>`;
     const naiStatus = ui.naiTest ? `${ui.naiTest.warn ? '!' : ui.naiTest.ok ? '✓' : '✗'} ${esc(ui.naiTest.text)}` : N.isReady() ? '已填好' : '<span class="pc-warn-text">还没填 key</span>';
     const nai = setFold('nai', 'NovelAI', naiStatus, `
-      <div class="pc-seg three">${modeBtn('key', '填我的 key')}${modeBtn('tavern', '用酒馆里的')}${modeBtn('site', '第三方站点')}</div>
+      <div class="pc-seg four" style="grid-template-columns:repeat(2,minmax(0,1fr));border-radius:22px;margin-top:6px">${modeBtn('key', '填我的 key')}${modeBtn('tavern', '用酒馆里的')}${modeBtn('site', '第三方站点')}${modeBtn('gpt', 'OpenAI 兼容')}</div>
+      ${n.naiMode === 'gpt' ? `
+      <div class="pc-hint">没有 NovelAI 也能出图：走 OpenAI 格式的生图接口（gpt-image、dall-e，或者中转 / 公益站给的生图模型）。生图页、聊天生图、漫画都会走这里。标签会去掉质量词、画师名和权重，分角色合成一段发；不支持氛围、局部重绘，角色参考图只当参考，脸锁不住。</div>
+      <label class="pc-field"><span>地址（要带 /v1 这类后缀）</span><input data-st="gptUrl" value="${esc(n.gptUrl || '')}" placeholder="https://api.xxx.com/v1"></label>
+      <label class="pc-field"><span>Key</span><input data-st="gptKey" type="password" value="${esc(n.gptKey || '')}" autocomplete="off"></label>
+      <label class="pc-field"><span>模型</span><input data-st="gptModel" value="${esc(n.gptModel || '')}" placeholder="gpt-image-1"></label>
+      <label class="pc-field"><span>尺寸</span><select data-st="gptSize">${[['ratio', '按现在的宽高比自动选（1024×1536 / 1536×1024 / 1024×1024）'], ['auto', '让模型自己定（auto）'], ['1024x1024', '1024×1024'], ['1024x1536', '1024×1536'], ['1536x1024', '1536×1024'], ['1024x1792', '1024×1792（dall-e-3）'], ['1792x1024', '1792×1024（dall-e-3）']].map(([v, t]) => `<option value="${v}" ${String(n.gptSize || 'ratio') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      <label class="pc-field"><span>画风开头（加在提示词最前面）</span><input data-st="gptStyle" value="${esc(n.gptStyle ?? 'anime illustration')}" placeholder="anime illustration"></label>
+      <label class="pc-switch"><input type="checkbox" data-st-check="gptRewrite" ${String(n.gptRewrite) === 'true' ? 'checked' : ''}><span></span>先让 AI 把标签改写成一段英文描述<small>这类模型看整句英文比看标签准、纹理也少（每张图多一次 AI 调用，用「翻译和 AI」里的接口）</small></label>
+      <label class="pc-switch"><input type="checkbox" data-st-check="gptRefs" ${String(n.gptRefs) !== 'false' ? 'checked' : ''}><span></span>有角色参考图 / 垫图时一起发<small>走 /images/edits；站点不支持就关掉</small></label>` : ''}
       ${n.naiMode === 'key' ? `
       <label class="pc-field"><span>NovelAI key</span>
         <div class="pc-keyrow"><input data-st="naiKey" type="${ui.showKey ? 'text' : 'password'}" value="${esc(n.naiKey)}" placeholder="pst-…" autocomplete="off"><button class="pc-pill dashed" data-act="togglekey">${ui.showKey ? '藏起来' : '显示'}</button></div></label>
@@ -8090,6 +8213,8 @@ function viewSettings(d) {
     const ai0 = setFold('ai', '翻译和 AI', esc(T.currentApi().from) + (T.currentApi().model ? ' · ' + esc(T.currentApi().model) : ''), `
       <div class="pc-dim small">翻译、补全细节、读角色外貌、聊天生图都用这个。点一下就切换，可以存好几个。</div>
       ${apiChips()}
+      <label class="pc-field"><span>回复长度上限（token，所有 AI 功能共用）</span><input type="number" min="256" step="1000" inputmode="numeric" data-optstr="aiMaxTokens" value="${esc(String(d.options.aiMaxTokens || ''))}" placeholder="不填 = 16000"></label>
+      <div class="pc-hint">只是上限，用多少算多少，填大不会多花。带思考的模型（deepseek 思考、gemini 思考这类）思考也算在里面，回复空了、读卡读不全（人多时名字和外貌缺一截）就调大。模型不收这么大时会报错，再改小。</div>
       ${prof ? `
       <label class="pc-field"><span>名字</span><input data-api="name" value="${esc(prof.name)}"></label>
       <label class="pc-field"><span>API 地址（要带 /v1 这类后缀）</span><input data-api="url" value="${esc(prof.url)}" placeholder="https://api.xxx.com/v1"></label>
