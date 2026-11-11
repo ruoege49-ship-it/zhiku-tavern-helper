@@ -2464,7 +2464,7 @@ async function call(path, { method = 'GET', body } = {}) {
     });
     let json = null;
     try { json = await res.json(); } catch { /* 空响应 */ }
-    if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`);
+    if (!res.ok) throw Object.assign(new Error(json?.error?.message || json?.error || `HTTP ${res.status}`), { status: res.status });
     return json;
 }
 
@@ -2474,13 +2474,16 @@ const health = () => call('/health');
 const listPosts = ({ sort = 'new', tag = '', kind = '', q = '', nsfw = false, mine = false, offset = 0, limit = 20 } = {}) =>
     call(`/lobby/posts?${new URLSearchParams({ sort, tag, kind, q, nsfw: nsfw ? '1' : '0', mine: mine ? '1' : '0', offset, limit })}`);
 const listTags = () => call('/lobby/tags');
-const createPost = body => call('/lobby/posts', { method: 'POST', body: { nickname: getData().lobby.nickname, ...body } });
+// 每条分享都带编辑记录：第一条是发布
+const createPost = body => call('/lobby/posts', { method: 'POST', body: { nickname: getData().lobby.nickname, ...body, content: { ...(body.content || {}), history: Array.isArray(body.content?.history) && body.content.history.length ? body.content.history : [{ at: Date.now(), publish: true, what: '发布' }] } } });
 const likePost = id => call(`/lobby/posts/${id}/like`, { method: 'POST' });
 const copyPost = id => call(`/lobby/posts/${id}/copy`, { method: 'POST' });
 const reportPost = id => call(`/lobby/posts/${id}/report`, { method: 'POST' });
 const deletePost = id => call(`/lobby/posts/${id}`, { method: 'DELETE' });
+/** 改自己分享的：服务器支持 PUT 就直接改；不支持的话由调用方重新上传 */
+const updatePost = (id, body) => call(`/lobby/posts/${id}`, { method: 'PUT', body });
 
-return { serverBase, lobbyImgUrl, health, listPosts, listTags, createPost, likePost, copyPost, reportPost, deletePost };
+return { serverBase, lobbyImgUrl, health, listPosts, listTags, createPost, likePost, copyPost, reportPost, deletePost, updatePost };
 })();
 
 // ───── nai.js ─────
@@ -8023,17 +8026,16 @@ function viewLobby(d) {
       <label class="pc-search"><span class="pc-sr">搜索共享</span>${ICON.search}<input data-bind="lobby.q" data-enter="lobbysearch" value="${esc(lb.q)}" placeholder="搜画师名、标签"></label>
       <div class="pc-vt"><button class="${view === 'grid' ? 'on' : ''}" data-act="lobbyview" data-v="grid" aria-label="网格">${SYM.grid}</button><button class="${view === 'list' ? 'on' : ''}" data-act="lobbyview" data-v="list" aria-label="列表">${SYM.list}</button></div>
     </div>
+    <div class="pc-lbf">
     <div class="pc-chips">
       ${[['', '全部'], ['group', '画师组'], ['artist', '单个画师'], ['character', '角色'], ['outfit', '服装']].map(([k, t]) => `<button class="pc-pill ${!lb.mine && lb.kind === k ? 'on' : 'dashed'}" data-act="lobbykind" data-kind="${k}">${t}</button>`).join('')}
       <button class="pc-pill ${lb.mine ? 'on' : 'dashed'}" data-act="lobbymine">我分享的</button>
     </div>
-    <div class="pc-chips wrap">
-      ${[['sfw', '不看裸体'], ['male', '只有男性裸体'], ['female', '只有女性裸体'], ['all', '全都有']].map(([k, t]) => `<button class="pc-pill ${k !== 'sfw' ? 'nsfw' : ''} ${nm === k ? 'on' : 'dashed'}" data-act="lobbynsfw" data-v="${k}" title="只管共享里别人的图，你自己的例图一直显示">${t}</button>`).join('')}
+    <div class="pc-chips"><span class="pc-lbf-k">裸体</span>${[['sfw', '不看'], ['male', '只男性'], ['female', '只女性'], ['all', '全都有']].map(([k, t]) => `<button class="pc-pill ${k !== 'sfw' ? 'nsfw' : ''} ${nm === k ? 'on' : 'dashed'}" data-act="lobbynsfw" data-v="${k}" title="只管共享里别人的图，你自己的例图一直显示">${t}</button>`).join('')}<button class="pc-pill ${d.options.lobbyR18g ? 'nsfw on' : 'blocked'}" data-act="lobbyr18g" title="猎奇、血腥">${d.options.lobbyR18g ? 'R18G' : '⊘ R18G'}</button></div>
+    <div class="pc-chips"><span class="pc-lbf-k">标签</span>${AUD.map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="${t}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${t}</button>`).join('')}${tags.slice(0, 24).map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag2 === t ? 'on' : 'dashed'}" data-act="lobbytag2" data-tag="${esc(t)}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${esc(t)}</button>`).join('')}</div>
+    <div class="pc-tip">点 = 只看这类　长按 = 屏蔽</div>
     </div>
-    <div class="pc-chips">${AUD.map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="${t}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${t}</button>`).join('')}<button class="pc-pill ${d.options.lobbyR18g ? 'nsfw on' : 'blocked'}" data-act="lobbyr18g" title="猎奇、血腥">${d.options.lobbyR18g ? 'R18G 显示' : '⊘ R18G 已屏蔽'}</button></div>
-    ${tags.length ? `<div class="pc-chips">${tags.slice(0, 24).map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag2 === t ? 'on' : 'dashed'}" data-act="lobbytag2" data-tag="${esc(t)}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${esc(t)}</button>`).join('')}</div>
-` : ''}
-    <div class="pc-tip">点标签 = 只看这类　长按 = 屏蔽，带这个标签的都不显示（BL、BG 这些也一样）</div>
+    <style>.pc-lbf .pc-chips{gap:6px;margin:6px 0}.pc-lbf .pc-pill{font-size:13px;padding:4px 11px;min-height:0;line-height:1.5}.pc-lbf-k{align-self:center;font-size:15px;font-weight:600;margin-right:4px;white-space:nowrap}.pc-lbf .pc-tip{font-size:12px;margin:2px 0 6px}</style>
     <div class="pc-sort"><button class="${lb.sort === 'new' ? 'on' : ''}" data-act="lobbysort" data-sort="new">最新</button><button class="${lb.sort === 'hot' ? 'on' : ''}" data-act="lobbysort" data-sort="hot">最多人保存</button><button data-act="lobbyrefresh">刷新</button></div>
     ${lb.error ? `<div class="pc-card pc-pad pc-mt">连不上共享服务器：${esc(lb.error)}</div>` : ''}
     ${lb.loading && !lb.items.length ? '<div class="pc-tip pc-mt">加载中…</div>' : ''}
@@ -8057,6 +8059,91 @@ function lobbyGridCard(p) {
 }
 
 /** 点卡片：看全部例图、画师串，保存 / 点赞 / 举报 */
+/** 编辑记录：最新的在上面；只列这次改了的东西 */
+function lobbyHistoryHtml(p) {
+    const h = Array.isArray(p.content?.history) ? p.content.history.filter(e => e && typeof e === 'object') : [];
+    if (!h.length) return '';
+    const edits = h.filter(e => !e.publish).length;
+    const fmt = t => { const d = new Date(Number(t) || 0); return isNaN(d) ? '' : `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+    const rows = h.slice().reverse().map(e => {
+        const ch = (Array.isArray(e.changed) ? e.changed : []).join('、');
+        if (e.publish) return `<li><b>${esc(fmt(e.at))}</b> · 发布</li>`;
+        return `<li><b>${esc(fmt(e.at))}</b>${ch ? ` · 改了${esc(ch)}` : ''}${e.what && e.what !== `改了${ch}` ? `<br>${esc(e.what)}` : ''}${e.artistString && (Array.isArray(e.changed) ? e.changed : []).includes('画师串') ? `<br><span class="mono">原来：${esc(String(e.artistString).slice(0, 300))}</span>` : ''}${e.name && (Array.isArray(e.changed) ? e.changed : []).includes('名称') ? `<br>原来叫「${esc(e.name)}」` : ''}</li>`;
+    }).join('');
+    return `<details class="pc-details pc-mt-s" open><summary class="pc-dim small">编辑记录 · ${edits ? `改过 ${edits} 次` : '还没改过'}</summary><ol class="pc-dim small" style="padding-left:1.2em;margin:6px 0;line-height:1.6">${rows}</ol></details>`;
+}
+/** 修改自己分享的：名称、说明、画师串、负面、标签、封面剧透；记一条编辑记录 */
+function editLobbyPost(p) {
+    return new Promise(resolve => {
+        const tags0 = (p.tags || []).filter(t => t !== '剧透');
+        const box = modal(`<h3 class="pc-h3">修改分享</h3>
+          <label class="pc-field"><span>名称</span><input class="pc-input" data-ed-name maxlength="200" value="${esc(p.name || '')}"></label>
+          <label class="pc-field"><span>说明</span><textarea class="pc-textarea" data-ed-note maxlength="5000">${esc(p.note || '')}</textarea></label>
+          <div class="pc-chips wrap" style="margin-top:-4px"><button class="pc-pill dashed tiny" type="button" data-ed-tpl="short">套简单模板</button><button class="pc-pill dashed tiny" type="button" data-ed-tpl="long">套详细模板</button><button class="pc-pill dashed tiny" type="button" data-ed-roll>🎲 抽一句介绍</button></div>
+          ${p.content?.artistString !== undefined ? `<label class="pc-field"><span>画师串</span><textarea class="pc-textarea mono" data-ed-str maxlength="20000">${esc(p.content.artistString || '')}</textarea></label>
+          <label class="pc-field"><span>负面（可选）</span><textarea class="pc-textarea mono" data-ed-neg maxlength="20000">${esc(p.content.negative || '')}</textarea></label>` : ''}
+          <label class="pc-switch"><input type="checkbox" data-ed-spoiler ${(p.tags || []).includes('剧透') ? 'checked' : ''}><span></span>封面剧透</label>
+          <div class="pc-label">标签</div>${lobbyTagPicker(tags0)}
+          <label class="pc-field pc-mt-s"><span>这次改了什么（可选，会写进编辑记录）</span><input class="pc-input" data-ed-what maxlength="200" placeholder="比如：换了一位画师，权重调低"></label>
+          <p class="pc-dim small" data-tagerr></p>
+          <div class="pc-actions"><button class="pc-btn" type="button" data-x="no">取消</button><button class="pc-btn dark" type="button" data-x="ok">保存修改</button></div>`);
+        wireTagPicker(box);
+        const q = sel => box.querySelector(sel), noteEl = q('[data-ed-note]');
+        const append = t => { noteEl.value = (noteEl.value.trim() ? noteEl.value.replace(/\s*$/, '\n') : '') + t; };
+        box.addEventListener('click', ev => {
+            const tpl = ev.target.closest('[data-ed-tpl]')?.dataset.edTpl;
+            if (tpl) { if (!noteEl.value.includes(SHARE_TPL[tpl].split('：')[0] + '：')) append(SHARE_TPL[tpl]); return; }
+            if (ev.target.closest('[data-ed-roll]')) { append(`${pickOneOf(SHARE_NOTE_A)}，${pickOneOf(SHARE_NOTE_B)}。`); return; }
+            const x = ev.target.closest('[data-x]')?.dataset.x;
+            if (x === 'no') { box.closeModal(); resolve(null); }
+            if (x === 'ok') {
+                const tags = pickedTags(box).filter(t => LOBBY_TAG_SET.has(t));
+                if (postHasNsfw(p) && !tags.some(t => NSFW_WHO.includes(t))) { q('[data-tagerr]').textContent = '例图里有 NSFW 的，选一下是男性裸体还是女性裸体（都有就两个都选）'; return; }
+                if (q('[data-ed-spoiler]').checked) tags.push('剧透');
+                const str = q('[data-ed-str]') ? artistOnly(q('[data-ed-str]').value.trim()) : undefined;
+                if (str !== undefined && !M.parseArtistString(str).members.length) { q('[data-tagerr]').textContent = '画师串里要有 artist: 开头的画师'; return; }
+                box.closeModal();
+                resolve({ name: q('[data-ed-name]').value.trim() || p.name, note: noteEl.value.trim(), tags, artistString: str, negative: q('[data-ed-neg]') ? q('[data-ed-neg]').value.trim() : undefined, what: q('[data-ed-what]').value.trim() });
+            }
+        });
+    });
+}
+const lobbyEditing = new Set();
+async function saveLobbyEdit(p, f) {
+    if (!p.mine) throw new Error('只能修改自己的分享');
+    if (lobbyEditing.has(p.id)) return null;
+    lobbyEditing.add(p.id);
+    try { return await saveLobbyEditRequest(p, f); } finally { lobbyEditing.delete(p.id); }
+}
+async function saveLobbyEditRequest(p, f) {
+    const changed = [];
+    if (f.name !== p.name) changed.push('名称');
+    if (f.note !== (p.note || '')) changed.push('说明');
+    if (f.artistString !== undefined && f.artistString !== (p.content?.artistString || '')) changed.push('画师串');
+    if (f.negative !== undefined && f.negative !== (p.content?.negative || '')) changed.push('负面');
+    if ([...f.tags].sort().join() !== [...(p.tags || [])].sort().join()) changed.push('标签');
+    if (!changed.length && !f.what) { toastr.info('什么都没改', '共享'); return null; }
+    const entry = { at: Date.now(), changed, what: f.what || `改了${changed.join('、') || '内容'}`, name: p.name, note: p.note || '', artistString: p.content?.artistString || '', negative: p.content?.negative || '', tags: p.tags || [] };
+    const content = { ...(p.content || {}), ...(f.artistString !== undefined ? { artistString: f.artistString, members: M.parseArtistString(f.artistString).members } : {}), ...(f.negative !== undefined ? (f.negative ? { negative: f.negative } : { negative: undefined }) : {}), history: [...(Array.isArray(p.content?.history) && p.content.history.length ? p.content.history : [{ at: p.createdAt, publish: true, what: '发布' }]), entry].slice(-30), editedAt: entry.at };
+    if (content.negative === undefined) delete content.negative;
+    const body = { name: f.name, note: f.note, tags: f.tags, content, expectedEditedAt: p.content?.editedAt || 0 };
+    try {
+        const updated = await L.updatePost(p.id, body);
+        return { ...p, name: body.name, note: body.note, tags: body.tags, content, ...(updated?.id === p.id ? updated : {}) };
+    } catch (e) {
+        // 服务器还不支持直接改：重新上传一条，再删掉旧的（点赞和保存数会清零）
+        if (![405, 501].includes(e?.status) && !(e?.status === 404 && /接口不存在|cannot put/i.test(String(e?.message || '')))) throw e;
+        if (!(await confirmBox('共享服务器还不支持直接修改，要重新上传一条再删掉旧的吗？编辑记录会带过去，点赞和保存数会清零。'))) return null;
+        const images = [];
+        for (const img of p.images || []) {
+            images.push({ data: await shrinkDataUrl(await urlToDataUrl(L.lobbyImgUrl(img.url))), nsfw: !!img.nsfw });
+        }
+        const r = await L.createPost({ kind: p.kind, ...body, nsfw: postHasNsfw(p), images });
+        if (!r?.id || r.id === p.id) throw new Error('服务器未返回新分享 ID，已保留旧分享，请刷新核对');
+        try { await L.deletePost(p.id); } catch { throw new Error('新分享已上传（' + r.id + '），旧分享未确认删除；请刷新核对，不要重复提交'); }
+        return { reupload: true, id: r.id };
+    }
+}
 function openLobbySheet(p) {
     DOC.querySelector('.pc-sheet-backdrop')?.remove();
     const back = DOC.createElement('div');
@@ -8069,9 +8156,10 @@ function openLobbySheet(p) {
       ${p.content?.artistString ? `<div class="pc-label">画师串</div><div class="pc-dim small mono" style="word-break:break-all;max-height:7.5em;overflow:auto;scrollbar-width:none">${markStr(getData(), p.content.artistString)}</div>${banWarn(getData(), p.content.artistString)}` : ''}
       ${p.content?.negative ? `<details class="pc-details pc-mt-s"><summary class="pc-dim small">负面（${p.content.negative.length} 字，点开看）</summary><div class="pc-dim small mono" style="word-break:break-all">${esc(p.content.negative)}</div></details>` : ''}
       ${p.note ? `<p class="pc-quote small">${esc(p.note)}</p>` : ''}
+      ${lobbyHistoryHtml(p)}
       <div class="pc-chips wrap">${p.tags.map(t => `<span class="pc-tagchip ${t === 'NSFW' ? 'nsfw' : ''}">${esc(t)}</span>`).join('')}</div>
       <div class="pc-actions wrap">
-        ${p.mine ? `<button class="pc-btn danger" data-act="lobbydel" data-id="${p.id}">删除</button>` : `<button class="pc-btn" data-act="lobbyreport" data-id="${p.id}">举报</button><button class="pc-btn" data-act="lobbyblockpost" data-id="${p.id}">屏蔽这条</button><button class="pc-btn" data-act="lobbyblockuser" data-nick="${esc(p.nickname)}">屏蔽作者</button>`}
+        ${p.mine ? `<button class="pc-btn danger" data-act="lobbydel" data-id="${p.id}">删除</button><button class="pc-btn" data-act="lobbyedit" data-id="${p.id}">修改</button>` : `<button class="pc-btn" data-act="lobbyreport" data-id="${p.id}">举报</button><button class="pc-btn" data-act="lobbyblockpost" data-id="${p.id}">屏蔽这条</button><button class="pc-btn" data-act="lobbyblockuser" data-nick="${esc(p.nickname)}">屏蔽作者</button>`}
         <button class="pc-btn" data-act="lobbylike" data-id="${p.id}">♡ ${p.likes}</button>
         <button class="pc-btn dark" data-act="lobbycopy" data-id="${p.id}">${p.copied ? '已保存' : '保存到我的' + (p.kind === 'character' || p.kind === 'outfit' ? '角色' : '智库')}</button>
       </div></section>`;
@@ -8343,6 +8431,8 @@ function buzz() { try { DOC.defaultView?.navigator?.vibrate?.(8); } catch { /* �
 // 长按
 const lp = { timer: 0, fired: 0, x: 0, y: 0 };
 function onPointerDown(ev) {
+    const dh = ev.target.closest?.('[data-aipdrag]');
+    if (dh) { startAiDrag(ev, dh); return; }
     const t = ev.target.closest?.('[data-lp]');
     if (!t || (ui.selecting && t.dataset.lp === 'ticket')) return;
     lp.x = ev.clientX; lp.y = ev.clientY;
@@ -8639,9 +8729,9 @@ async function onClick(ev, outside = false) {
             }
             case 'aipadd': {
                 const p = T.aiCfg().list[T.aiCfg().active]; if (!p) break;
-                const t = await promptText('这一条的内容（之后点左边可以切 system / user / assistant）', '', true);
-                if (t == null || !t.trim()) break;
-                p.ents.splice(p.ents.findIndex(e => e.ctx), 0, { id: M.uid('e'), n: '条目 ' + p.ents.length, r: 'system', on: true, t: t.trim() });
+                const r = await editAiEntry({ n: '条目 ' + p.ents.length, r: 'system', t: '' }, { isNew: true });
+                if (!r || !r.t.trim()) break;
+                p.ents.splice(Math.max(0, p.ents.findIndex(e => e.ctx)), 0, { id: M.uid('e'), n: r.n, r: r.r, on: true, t: r.t.trim() });
                 commit(); render(); break;
             }
             case 'aiprole': { const p = T.aiCfg().list[T.aiCfg().active]; const e = p?.ents[Number(el.dataset.i)]; if (!e || e.ctx) break; const R = ['system', 'user', 'assistant']; e.r = R[(R.indexOf(e.r) + 1) % 3]; commit(); render(); break; }
@@ -8663,12 +8753,10 @@ async function onClick(ev, outside = false) {
                 const e = own ? own.ents[i] : T.entriesFor(cfg.active, ui.stPresets)?.[i];
                 if (!e) break;
                 if (!own) { modal(`<h3 class="pc-h3">${esc(e.n)}</h3><div class="pc-dim small">${esc(e.r)} · 跟着酒馆的预设，这里只能看</div><textarea class="pc-textarea mono" readonly style="min-height:240px">${esc(e.t || '')}</textarea>`); break; }
-                const name = await promptText('名字', e.n);
-                if (name == null) break;
-                const t = await promptText(`「${name.trim() || e.n}」的内容（留空就删掉这一条）`, e.t || '', true);
-                if (t == null) break;
-                if (!t.trim() && await confirmBox('内容空了，删掉这一条？', { ok: '删除', cancel: '留着' })) own.ents.splice(i, 1);
-                else { e.n = name.trim() || e.n; e.t = t; }
+                const r = await editAiEntry(e);
+                if (!r) break;
+                if (r.del || (!r.t.trim() && await confirmBox('内容空了，删掉这一条？', { ok: '删除', cancel: '留着' }))) own.ents.splice(i, 1);
+                else Object.assign(e, { n: r.n || e.n, r: r.r, t: r.t });
                 commit(); render(); break;
             }
             case 'aipfn': ui.aipOpen = ui.aipOpen === el.dataset.k ? '' : el.dataset.k; render(); break;
@@ -9071,6 +9159,19 @@ async function onClick(ev, outside = false) {
                 if (!(await confirmBox('举报这一条？被几个人举报后会自动隐藏。'))) break;
                 await L.reportPost(el.dataset.id);
                 toastr.info('已举报', '共享');
+                break;
+            }
+            case 'lobbyedit': {
+                const p = ui.lobby.items.find(x => x.id === el.dataset.id);
+                if (!p) break;
+                const f = await editLobbyPost(p);
+                if (!f) break;
+                try {
+                    const r = await saveLobbyEdit(p, f);
+                    if (!r) break;
+                    if (r.reupload) { toastr.success('已重新上传，旧的删掉了', '共享'); loadLobby(); }
+                    else { Object.assign(p, r); toastr.success('改好了，编辑记录加了一条', '共享'); render(); }
+                } catch (e) { toastr.error(e.message, '修改失败'); }
                 break;
             }
             case 'lobbydel': {
@@ -9827,14 +9928,12 @@ function viewAiPreset(d) {
     const stName = act.slice(7) || curST;
     const chip = (v, t) => `<button class="pc-pill ${act === v || (v === 'tavern:' && kind === 'tavern') ? 'on' : 'dashed'}" data-act="aipuse" data-v="${esc(v)}">${t}</button>`;
     const entRow = (e, i) => {
-        const moveUp = !ro && i > 0, moveDown = !ro && i < ents.length - 1;
-        return `<div class="pc-aient ${e.ctx ? 'ctx' : ''} ${e.mark && !e.on ? 'skip' : ''} ${!e.on && !e.ctx && !e.mark ? 'off' : ''}">
+        return `<div class="pc-aient ${e.ctx ? 'ctx' : ''} ${e.mark && !e.on ? 'skip' : ''} ${!e.on && !e.ctx && !e.mark ? 'off' : ''}" data-ai-i="${i}">
+          ${ro ? '' : `<span class="pc-aidrag" data-aipdrag="${i}" aria-label="按住拖动排序" title="按住拖动排序">⋮⋮</span>`}
           <button class="pc-airole ${e.r}" data-act="aiprole" data-i="${i}" ${ro || e.ctx ? 'disabled' : ''}>${esc(e.r)}</button>
-          <div class="pc-grow"><b>${e.ctx ? '📌 ' : ''}${esc(e.n)}</b><small>${e.ctx ? '智库的指令 + 这次要处理的内容放在这里' : e.mark ? (e.on ? '酒馆自动填：' + esc(e.n) + (/worldInfo/.test(e.mark) ? '（世界书暂时带不了）' : '') : '角色卡、世界书这类，默认不发') : esc(String(e.t || '').slice(0, 80))}</small></div>
+          <div class="pc-grow" ${e.ctx || e.mark ? '' : `data-act="aipedit" data-i="${i}" style="cursor:pointer"`}><b>${e.ctx ? '📌 ' : ''}${esc(e.n)}</b><small>${e.ctx ? '智库的指令 + 这次要处理的内容放在这里' : e.mark ? (e.on ? '酒馆自动填：' + esc(e.n) + (/worldInfo/.test(e.mark) ? '（世界书暂时带不了）' : '') : '角色卡、世界书这类，默认不发') : esc(String(e.t || '').slice(0, 80))}</small></div>
           ${e.ctx ? '' : `<button class="pc-aisw ${e.on ? 'on' : ''}" data-act="aipsw" data-i="${i}" ${ro && !e.mark ? 'disabled' : ''} aria-label="开关"></button>`}
-          ${moveUp ? `<button class="pc-aiib" data-act="aipmove" data-i="${i}" data-d="-1" aria-label="上移">↑</button>` : ''}
-          ${moveDown ? `<button class="pc-aiib" data-act="aipmove" data-i="${i}" data-d="1" aria-label="下移">↓</button>` : ''}
-          ${e.ctx || e.mark ? '' : `<button class="pc-aiib" data-act="aipedit" data-i="${i}">${ro ? '看' : '✎'}</button>`}</div>`;
+          ${e.ctx || e.mark ? '' : `<button class="pc-aiib" data-act="aipedit" data-i="${i}" aria-label="${ro ? '看' : '编辑'}">${ro ? '看' : '✎'}</button>`}</div>`;
     };
     const fnRows = T.AI_FNS.map(([k, n, where]) => {
         const f = cfg.fn[k] || { extra: [] }, extra = f.extra || [], seen = T.aiSeen[k];
@@ -9870,6 +9969,12 @@ function viewAiPreset(d) {
 .pc-aisw::after{content:"";position:absolute;top:3px;left:3px;width:17px;height:17px;border-radius:50%;background:var(--pc-gold);transition:left .15s}
 .pc-aisw.on{background:var(--pc-ink)}.pc-aisw.on::after{left:20px}
 .pc-aisw[disabled]{cursor:default}
+.pc-aidrag{flex:0 0 auto;width:22px;margin-left:-6px;text-align:center;font-size:16px;letter-spacing:-3px;color:var(--pc-ink-soft);cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;padding:8px 0}
+.pc-aient.ctx .pc-aidrag{color:rgba(244,239,228,.7)}
+.pc-aient.dragging{position:relative;z-index:5;box-shadow:0 8px 22px rgba(0,0,0,.22);opacity:.96;transition:none}
+.pc-aient.shift-up{transform:translateY(calc(-100% - 8px));transition:transform .15s}
+.pc-aient.shift-down{transform:translateY(calc(100% + 8px));transition:transform .15s}
+.pc-aient{transition:transform .15s}
 .pc-aiib{flex:0 0 auto;width:28px;height:28px;border-radius:8px;border:1.5px dashed var(--pc-dash);background:transparent;color:inherit;cursor:pointer;font-size:12px}
 .pc-aient.ctx .pc-aiib{border-color:rgba(244,239,228,.55)}
 .pc-castadd{width:100%;margin:9px 0 6px;min-height:42px;border:1.5px dashed var(--pc-dash);border-radius:14px;background:transparent;font-family:var(--pc-font);font-size:14px;color:var(--pc-ink);cursor:pointer}
@@ -9896,7 +10001,7 @@ function viewAiPreset(d) {
         <div class="pc-hint">只对「翻译和 AI」里用「酒馆现在连接的 API」或「单独填」的聊天补全接口有效；酒馆连的是文本补全时，会把条目合成一段发。</div>
       </section>
       <section class="pc-card pc-pad pc-mt">
-        <h3 class="pc-h3" style="margin:0">条目</h3><div class="pc-dim small">从上往下按顺序发。</div>
+        <h3 class="pc-h3" style="margin:0">条目</h3><div class="pc-dim small">从上往下按顺序发。${ro ? '' : '按住左边 ⋮⋮ 拖动排序，点条目改名字和内容。'}</div>
         ${ents ? ents.map(entRow).join('') : '<div class="pc-dim small pc-mt-s">正在读这个预设…</div>'}
         ${kind === 'own' ? '<button class="pc-castadd" data-act="aipadd">＋ 加一条</button>' : ''}
       </section>
@@ -10414,6 +10519,57 @@ function renderStub() {
 
 // ═════════════════════ 弹窗小工具 ═════════════════════
 
+/** 预设条目：名字、角色、内容放在一个弹窗里改 */
+function editAiEntry(e, { isNew = false } = {}) {
+    return new Promise(resolve => {
+        let role = e.r || 'system';
+        const box = modal(`<h3 class="pc-h3">${isNew ? '加一条' : '改条目'}</h3>
+          <label class="pc-field"><span>名字</span><input class="pc-input" data-ae-n value="${esc(e.n || '')}"></label>
+          <div class="pc-label">谁说的</div><div class="pc-seg three" data-ae-r>${['system', 'user', 'assistant'].map(r => `<button type="button" class="${role === r ? 'on' : ''}" data-v="${r}">${r}</button>`).join('')}</div>
+          <label class="pc-field pc-mt-s"><span>内容</span><textarea class="pc-textarea mono" data-ae-t style="min-height:260px">${esc(e.t || '')}</textarea></label>
+          <div class="pc-actions">${isNew ? '' : '<button class="pc-linkdanger" type="button" data-x="del">删掉这一条</button>'}<button class="pc-btn" type="button" data-x="no">取消</button><button class="pc-btn dark" type="button" data-x="ok">${isNew ? '加上' : '保存'}</button></div>`);
+        box.addEventListener('click', async ev => {
+            const rb = ev.target.closest('[data-ae-r] [data-v]');
+            if (rb) { role = rb.dataset.v; box.querySelectorAll('[data-ae-r] [data-v]').forEach(b => b.classList.toggle('on', b === rb)); return; }
+            const x = ev.target.closest('[data-x]')?.dataset.x;
+            if (x === 'no') { box.closeModal(); resolve(null); }
+            if (x === 'del') { if (await confirmBox('删掉这一条？', { ok: '删除', cancel: '留着' })) { box.closeModal(); resolve({ del: true }); } }
+            if (x === 'ok') { const n = box.querySelector('[data-ae-n]').value.trim(), t = box.querySelector('[data-ae-t]').value; if (isNew && !t.trim()) { box.querySelector('[data-ae-t]').focus(); return; } box.closeModal(); resolve({ n, r: role, t }); }
+        });
+    });
+}
+/** 预设条目：按住 ⋮⋮ 拖动排序 */
+function startAiDrag(ev, handle) {
+    const row = handle.closest('.pc-aient'), list = [...row.parentElement.querySelectorAll('.pc-aient')];
+    const from = list.indexOf(row), cfg = T.aiCfg(), active = cfg.active, preset = cfg.list[active], entries = preset?.ents?.slice();
+    if (from < 0 || !entries || entries.length !== list.length) return;
+    ev.preventDefault();
+    handle.setPointerCapture?.(ev.pointerId);
+    const y0 = ev.clientY, rects = list.map(r => r.getBoundingClientRect());
+    let to = from;
+    row.classList.add('dragging');
+    const move = e => {
+        const dy = e.clientY - y0;
+        row.style.transform = `translateY(${dy}px)`;
+        const mid = rects[from].top + rects[from].height / 2 + dy;
+        to = from;
+        for (let k = 0; k < rects.length; k++) {
+            if (k < from && mid < rects[k].top + rects[k].height / 2) { to = k; break; }
+        }
+        for (let k = rects.length - 1; k > from; k--) {
+            if (mid > rects[k].top + rects[k].height / 2) { to = k; break; }
+        }
+        list.forEach((r, k) => { if (r === row) return; r.classList.toggle('shift-down', k >= to && k < from); r.classList.toggle('shift-up', k <= to && k > from); });
+    };
+    const up = ev => {
+        handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); handle.removeEventListener('pointercancel', up);
+        list.forEach(r => { r.classList.remove('shift-up', 'shift-down', 'dragging'); r.style.transform = ''; });
+        const p = T.aiCfg().list[T.aiCfg().active];
+        if (ev.type !== 'pointercancel' && T.aiCfg().active === active && p === preset && p.ents.length === entries.length && entries.every((e,i)=>p.ents[i]===e) && to !== from) { const [it] = p.ents.splice(from, 1); p.ents.splice(to, 0, it); commit(); }
+        render();
+    };
+    handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', up); handle.addEventListener('pointercancel', up);
+}
 function modal(inner) {
     const back = DOC.createElement('div');
     back.className = 'pc-modal-backdrop';
