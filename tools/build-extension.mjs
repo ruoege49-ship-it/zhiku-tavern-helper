@@ -3689,6 +3689,20 @@ patch(`            case 'lobbydel': {`,`            case 'lobbyedit': {
                 break;
             }
             case 'lobbydel': {`);
+// 0.8.36：每条分享默认带编辑记录（发布算第一条），详情里默认展开
+patch(`\${e.what ? \`<br>\${esc(e.what)}\` : ''}`,`\${e.what && e.what !== \`改了\${ch}\` ? \`<br>\${esc(e.what)}\` : ''}`);
+patch(`const createPost = body => call('/lobby/posts', { method: 'POST', body: { nickname: getData().lobby.nickname, ...body } });`,`// 每条分享都带编辑记录：第一条是发布
+const createPost = body => call('/lobby/posts', { method: 'POST', body: { nickname: getData().lobby.nickname, ...body, content: { ...(body.content || {}), history: Array.isArray(body.content?.history) && body.content.history.length ? body.content.history : [{ at: Date.now(), publish: true, what: '发布' }] } } });`);
+patch(`    const h = Array.isArray(p.content?.history) ? p.content.history : [];
+    if (!h.length) return '';`,`    const h = Array.isArray(p.content?.history) ? p.content.history : [];
+    if (!h.length) return '';
+    const edits = h.filter(e => !e.publish).length;`);
+patch(`        const ch = (e.changed || []).join('、');
+        return \`<li><b>\${esc(fmt(e.at))}</b>\${ch ? \` · 改了\${esc(ch)}\` : ''}`,`        const ch = (e.changed || []).join('、');
+        if (e.publish) return \`<li><b>\${esc(fmt(e.at))}</b> · 发布</li>\`;
+        return \`<li><b>\${esc(fmt(e.at))}</b>\${ch ? \` · 改了\${esc(ch)}\` : ''}`);
+patch(`    return \`<details class="pc-details pc-mt-s"><summary class="pc-dim small">改过 \${h.length} 次 · 编辑记录</summary>`,`    return \`<details class="pc-details pc-mt-s" open><summary class="pc-dim small">编辑记录 · \${edits ? \`改过 \${edits} 次\` : '还没改过'}</summary>`);
+patch(`    const entry = { at: Date.now(), changed, what: f.what || '',`,`    const entry = { at: Date.now(), changed, what: f.what || \`改了\${changed.join('、') || '内容'}\`,`);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;

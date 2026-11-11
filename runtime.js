@@ -2474,7 +2474,8 @@ const health = () => call('/health');
 const listPosts = ({ sort = 'new', tag = '', kind = '', q = '', nsfw = false, mine = false, offset = 0, limit = 20 } = {}) =>
     call(`/lobby/posts?${new URLSearchParams({ sort, tag, kind, q, nsfw: nsfw ? '1' : '0', mine: mine ? '1' : '0', offset, limit })}`);
 const listTags = () => call('/lobby/tags');
-const createPost = body => call('/lobby/posts', { method: 'POST', body: { nickname: getData().lobby.nickname, ...body } });
+// 每条分享都带编辑记录：第一条是发布
+const createPost = body => call('/lobby/posts', { method: 'POST', body: { nickname: getData().lobby.nickname, ...body, content: { ...(body.content || {}), history: Array.isArray(body.content?.history) && body.content.history.length ? body.content.history : [{ at: Date.now(), publish: true, what: '发布' }] } } });
 const likePost = id => call(`/lobby/posts/${id}/like`, { method: 'POST' });
 const copyPost = id => call(`/lobby/posts/${id}/copy`, { method: 'POST' });
 const reportPost = id => call(`/lobby/posts/${id}/report`, { method: 'POST' });
@@ -8063,12 +8064,14 @@ function lobbyGridCard(p) {
 function lobbyHistoryHtml(p) {
     const h = Array.isArray(p.content?.history) ? p.content.history : [];
     if (!h.length) return '';
+    const edits = h.filter(e => !e.publish).length;
     const fmt = t => { const d = new Date(Number(t) || 0); return isNaN(d) ? '' : `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
     const rows = h.slice().reverse().map(e => {
         const ch = (e.changed || []).join('、');
-        return `<li><b>${esc(fmt(e.at))}</b>${ch ? ` · 改了${esc(ch)}` : ''}${e.what ? `<br>${esc(e.what)}` : ''}${e.artistString && (e.changed || []).includes('画师串') ? `<br><span class="mono">原来：${esc(String(e.artistString).slice(0, 300))}</span>` : ''}${e.name && (e.changed || []).includes('名称') ? `<br>原来叫「${esc(e.name)}」` : ''}</li>`;
+        if (e.publish) return `<li><b>${esc(fmt(e.at))}</b> · 发布</li>`;
+        return `<li><b>${esc(fmt(e.at))}</b>${ch ? ` · 改了${esc(ch)}` : ''}${e.what && e.what !== `改了${ch}` ? `<br>${esc(e.what)}` : ''}${e.artistString && (e.changed || []).includes('画师串') ? `<br><span class="mono">原来：${esc(String(e.artistString).slice(0, 300))}</span>` : ''}${e.name && (e.changed || []).includes('名称') ? `<br>原来叫「${esc(e.name)}」` : ''}</li>`;
     }).join('');
-    return `<details class="pc-details pc-mt-s"><summary class="pc-dim small">改过 ${h.length} 次 · 编辑记录</summary><ol class="pc-dim small" style="padding-left:1.2em;margin:6px 0;line-height:1.6">${rows}</ol></details>`;
+    return `<details class="pc-details pc-mt-s" open><summary class="pc-dim small">编辑记录 · ${edits ? `改过 ${edits} 次` : '还没改过'}</summary><ol class="pc-dim small" style="padding-left:1.2em;margin:6px 0;line-height:1.6">${rows}</ol></details>`;
 }
 /** 修改自己分享的：名称、说明、画师串、负面、标签、封面剧透；记一条编辑记录 */
 function editLobbyPost(p) {
@@ -8114,7 +8117,7 @@ async function saveLobbyEdit(p, f) {
     if (f.negative !== undefined && f.negative !== (p.content?.negative || '')) changed.push('负面');
     if ([...f.tags].sort().join() !== [...(p.tags || [])].sort().join()) changed.push('标签');
     if (!changed.length && !f.what) { toastr.info('什么都没改', '共享'); return null; }
-    const entry = { at: Date.now(), changed, what: f.what || '', name: p.name, note: p.note || '', artistString: p.content?.artistString || '', negative: p.content?.negative || '', tags: p.tags || [] };
+    const entry = { at: Date.now(), changed, what: f.what || `改了${changed.join('、') || '内容'}`, name: p.name, note: p.note || '', artistString: p.content?.artistString || '', negative: p.content?.negative || '', tags: p.tags || [] };
     const content = { ...(p.content || {}), ...(f.artistString !== undefined ? { artistString: f.artistString } : {}), ...(f.negative !== undefined ? (f.negative ? { negative: f.negative } : { negative: undefined }) : {}), history: [...(Array.isArray(p.content?.history) ? p.content.history : []), entry].slice(-30), editedAt: entry.at };
     if (content.negative === undefined) delete content.negative;
     const body = { name: f.name, note: f.note, tags: f.tags, content };
