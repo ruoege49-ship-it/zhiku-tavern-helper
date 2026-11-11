@@ -3507,6 +3507,23 @@ patch(`        } finally { if (adapting.get(id) === task) adapting.delete(id); r
 patch(`              \${sw('comicAuto', '回复写完自动画成漫画', 'AI 自己把回复改编成分镜再画（每楼多一次 AI 调用，只画最新一楼）；关掉的话，在楼层里点「画成漫画」再画', true)}`,`              \${sw('comicAutoAdapt', '回复写完自动写分镜', 'AI 自己把回复改编成分镜（每楼多一次 AI 调用，只管最新一楼、每楼只写一次）；关掉的话，在楼层里点「画成漫画」再写', true)}
               \${sw('comicAuto', '分镜写好自动出图', '关掉的话，分镜写好先放着，在楼层里点「生成这一页」再画', true)}
               <div class="pc-hint">写分镜用的 AI：\${esc(typeof __mod_translate !== 'undefined' ? __mod_translate.apiFor('comic').from || '' : '')}。要换接口、模型或者加要求，到智库「设置 → AI 预设 → 各个功能 → 漫画改编」。</div>`);
+// 0.8.36：漫画「自动出漫画」一个开关 +「分镜从哪来」（只用写好的 / 没写就让 AI 写）
+patch(`        if (stopped || (!manual && !enabled())) return;
+        const msg = getContext().chat?.[id];
+        if (!msg || msg.is_user || msg.is_system) return;
+        const blocks = comicBlocks(srcOf(msg));
+        // 有分镜了但关了自动出图：只显示「生成这一页」，等手动点
+        if (blocks.length && !manual && opts().comicAuto === false) { render(id); return; }`,`        if (stopped || (!manual && (!enabled() || opts().comicAuto === false))) return;
+        const msg = getContext().chat?.[id];
+        if (!msg || msg.is_user || msg.is_system) return;
+        const blocks = comicBlocks(srcOf(msg));`);
+patch(`            if (!manual && opts().comicAutoAdapt !== false && id ===`,`            if (!manual && opts().comicSrc !== 'extract' && id ===`);
+patch(`                try { await adapt(id, { draw: opts().comicAuto !== false }); } catch (e) { console.warn('[智库] 漫画自动改编', e); }`,`                try { await adapt(id); } catch (e) { console.warn('[智库] 漫画自动改编', e); }`);
+patch(`              \${sw('comicAutoAdapt', '回复写完自动写分镜', 'AI 自己把回复改编成分镜（每楼多一次 AI 调用，只管最新一楼、每楼只写一次）；关掉的话，在楼层里点「画成漫画」再写', true)}
+              \${sw('comicAuto', '分镜写好自动出图', '关掉的话，分镜写好先放着，在楼层里点「生成这一页」再画', true)}`,`              \${sw('comicAuto', '回复写完自动出漫画', '关掉的话，在楼层里点「画成漫画」「生成这一页」再画', true)}
+              <div class="pc-label">分镜从哪来</div>
+              \${seg('comicSrc', [['extract', '只用写好的'], ['ai', '没写就让 AI 写']], 'ai')}
+              <div class="pc-hint">\${opts().comicSrc === 'extract' ? '只画回复里已经写好的 &lt;image&gt;@page 分镜（漫画台预设会让正文模型写）；回复里没有分镜就不自动画，要画就在楼层里点「画成漫画」让 AI 写。' : '回复里有写好的分镜（漫画台预设）就照着画；没有就让 AI 把这一楼改编成分镜再画（每楼多一次 AI 调用，只管最新一楼、每楼只写一次）。'}</div>`);
 s=applyImg2imgCompatibility(s);
 s=applyWardrobeCanonCompatibility(s);
 s=applyBatchScenesCompatibility(s);
