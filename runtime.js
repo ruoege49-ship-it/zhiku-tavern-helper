@@ -8026,17 +8026,16 @@ function viewLobby(d) {
       <label class="pc-search"><span class="pc-sr">搜索共享</span>${ICON.search}<input data-bind="lobby.q" data-enter="lobbysearch" value="${esc(lb.q)}" placeholder="搜画师名、标签"></label>
       <div class="pc-vt"><button class="${view === 'grid' ? 'on' : ''}" data-act="lobbyview" data-v="grid" aria-label="网格">${SYM.grid}</button><button class="${view === 'list' ? 'on' : ''}" data-act="lobbyview" data-v="list" aria-label="列表">${SYM.list}</button></div>
     </div>
+    <div class="pc-lbf">
     <div class="pc-chips">
       ${[['', '全部'], ['group', '画师组'], ['artist', '单个画师'], ['character', '角色'], ['outfit', '服装']].map(([k, t]) => `<button class="pc-pill ${!lb.mine && lb.kind === k ? 'on' : 'dashed'}" data-act="lobbykind" data-kind="${k}">${t}</button>`).join('')}
       <button class="pc-pill ${lb.mine ? 'on' : 'dashed'}" data-act="lobbymine">我分享的</button>
     </div>
-    <div class="pc-chips wrap">
-      ${[['sfw', '不看裸体'], ['male', '只有男性裸体'], ['female', '只有女性裸体'], ['all', '全都有']].map(([k, t]) => `<button class="pc-pill ${k !== 'sfw' ? 'nsfw' : ''} ${nm === k ? 'on' : 'dashed'}" data-act="lobbynsfw" data-v="${k}" title="只管共享里别人的图，你自己的例图一直显示">${t}</button>`).join('')}
+    <div class="pc-chips"><span class="pc-lbf-k">裸体</span>${[['sfw', '不看'], ['male', '只男性'], ['female', '只女性'], ['all', '全都有']].map(([k, t]) => `<button class="pc-pill ${k !== 'sfw' ? 'nsfw' : ''} ${nm === k ? 'on' : 'dashed'}" data-act="lobbynsfw" data-v="${k}" title="只管共享里别人的图，你自己的例图一直显示">${t}</button>`).join('')}<button class="pc-pill ${d.options.lobbyR18g ? 'nsfw on' : 'blocked'}" data-act="lobbyr18g" title="猎奇、血腥">${d.options.lobbyR18g ? 'R18G' : '⊘ R18G'}</button></div>
+    <div class="pc-chips"><span class="pc-lbf-k">标签</span>${AUD.map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="${t}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${t}</button>`).join('')}${tags.slice(0, 24).map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag2 === t ? 'on' : 'dashed'}" data-act="lobbytag2" data-tag="${esc(t)}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${esc(t)}</button>`).join('')}</div>
+    <div class="pc-tip">点 = 只看这类　长按 = 屏蔽</div>
     </div>
-    <div class="pc-chips">${AUD.map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="${t}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${t}</button>`).join('')}<button class="pc-pill ${d.options.lobbyR18g ? 'nsfw on' : 'blocked'}" data-act="lobbyr18g" title="猎奇、血腥">${d.options.lobbyR18g ? 'R18G 显示' : '⊘ R18G 已屏蔽'}</button></div>
-    ${tags.length ? `<div class="pc-chips">${tags.slice(0, 24).map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag2 === t ? 'on' : 'dashed'}" data-act="lobbytag2" data-tag="${esc(t)}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${esc(t)}</button>`).join('')}</div>
-` : ''}
-    <div class="pc-tip">点标签 = 只看这类　长按 = 屏蔽，带这个标签的都不显示（BL、BG 这些也一样）</div>
+    <style>.pc-lbf .pc-chips{gap:6px;margin:6px 0}.pc-lbf .pc-pill{font-size:13px;padding:4px 11px;min-height:0;line-height:1.5}.pc-lbf-k{align-self:center;font-size:15px;font-weight:600;margin-right:4px;white-space:nowrap}.pc-lbf .pc-tip{font-size:12px;margin:2px 0 6px}</style>
     <div class="pc-sort"><button class="${lb.sort === 'new' ? 'on' : ''}" data-act="lobbysort" data-sort="new">最新</button><button class="${lb.sort === 'hot' ? 'on' : ''}" data-act="lobbysort" data-sort="hot">最多人保存</button><button data-act="lobbyrefresh">刷新</button></div>
     ${lb.error ? `<div class="pc-card pc-pad pc-mt">连不上共享服务器：${esc(lb.error)}</div>` : ''}
     ${lb.loading && !lb.items.length ? '<div class="pc-tip pc-mt">加载中…</div>' : ''}

@@ -3703,6 +3703,29 @@ patch(`        const ch = (e.changed || []).join('、');
         return \`<li><b>\${esc(fmt(e.at))}</b>\${ch ? \` · 改了\${esc(ch)}\` : ''}`);
 patch(`    return \`<details class="pc-details pc-mt-s"><summary class="pc-dim small">改过 \${h.length} 次 · 编辑记录</summary>`,`    return \`<details class="pc-details pc-mt-s" open><summary class="pc-dim small">编辑记录 · \${edits ? \`改过 \${edits} 次\` : '还没改过'}</summary>`);
 patch(`    const entry = { at: Date.now(), changed, what: f.what || '',`,`    const entry = { at: Date.now(), changed, what: f.what || \`改了\${changed.join('、') || '内容'}\`,`);
+// 0.8.36：共享筛选栏紧凑一点：标签缩小，裸体和 R18G 一行，题材和标签一行
+patch(`    <div class="pc-chips">
+      \${[['', '全部'], ['group', '画师组'], ['artist', '单个画师'], ['character', '角色'], ['outfit', '服装']].map(([k, t]) => \`<button class="pc-pill \${!lb.mine && lb.kind === k ? 'on' : 'dashed'}" data-act="lobbykind" data-kind="\${k}">\${t}</button>\`).join('')}
+      <button class="pc-pill \${lb.mine ? 'on' : 'dashed'}" data-act="lobbymine">我分享的</button>
+    </div>
+    <div class="pc-chips wrap">
+      \${[['sfw', '不看裸体'], ['male', '只有男性裸体'], ['female', '只有女性裸体'], ['all', '全都有']].map(([k, t]) => \`<button class="pc-pill \${k !== 'sfw' ? 'nsfw' : ''} \${nm === k ? 'on' : 'dashed'}" data-act="lobbynsfw" data-v="\${k}" title="只管共享里别人的图，你自己的例图一直显示">\${t}</button>\`).join('')}
+    </div>
+    <div class="pc-chips">\${AUD.map(t => \`<button class="pc-pill \${blocked.has(t) ? 'blocked' : lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}" data-lp="ltag">\${blocked.has(t) ? '⊘ ' : ''}\${t}</button>\`).join('')}<button class="pc-pill \${d.options.lobbyR18g ? 'nsfw on' : 'blocked'}" data-act="lobbyr18g" title="猎奇、血腥">\${d.options.lobbyR18g ? 'R18G 显示' : '⊘ R18G 已屏蔽'}</button></div>
+    \${tags.length ? \`<div class="pc-chips">\${tags.slice(0, 24).map(t => \`<button class="pc-pill \${blocked.has(t) ? 'blocked' : lb.tag2 === t ? 'on' : 'dashed'}" data-act="lobbytag2" data-tag="\${esc(t)}" data-lp="ltag">\${blocked.has(t) ? '⊘ ' : ''}\${esc(t)}</button>\`).join('')}</div>
+\` : ''}
+    <div class="pc-tip">点标签 = 只看这类　长按 = 屏蔽，带这个标签的都不显示（BL、BG 这些也一样）</div>
+`,`    <div class="pc-lbf">
+    <div class="pc-chips">
+      \${[['', '全部'], ['group', '画师组'], ['artist', '单个画师'], ['character', '角色'], ['outfit', '服装']].map(([k, t]) => \`<button class="pc-pill \${!lb.mine && lb.kind === k ? 'on' : 'dashed'}" data-act="lobbykind" data-kind="\${k}">\${t}</button>\`).join('')}
+      <button class="pc-pill \${lb.mine ? 'on' : 'dashed'}" data-act="lobbymine">我分享的</button>
+    </div>
+    <div class="pc-chips"><span class="pc-lbf-k">裸体</span>\${[['sfw', '不看'], ['male', '只男性'], ['female', '只女性'], ['all', '全都有']].map(([k, t]) => \`<button class="pc-pill \${k !== 'sfw' ? 'nsfw' : ''} \${nm === k ? 'on' : 'dashed'}" data-act="lobbynsfw" data-v="\${k}" title="只管共享里别人的图，你自己的例图一直显示">\${t}</button>\`).join('')}<button class="pc-pill \${d.options.lobbyR18g ? 'nsfw on' : 'blocked'}" data-act="lobbyr18g" title="猎奇、血腥">\${d.options.lobbyR18g ? 'R18G' : '⊘ R18G'}</button></div>
+    <div class="pc-chips"><span class="pc-lbf-k">标签</span>\${AUD.map(t => \`<button class="pc-pill \${blocked.has(t) ? 'blocked' : lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="\${t}" data-lp="ltag">\${blocked.has(t) ? '⊘ ' : ''}\${t}</button>\`).join('')}\${tags.slice(0, 24).map(t => \`<button class="pc-pill \${blocked.has(t) ? 'blocked' : lb.tag2 === t ? 'on' : 'dashed'}" data-act="lobbytag2" data-tag="\${esc(t)}" data-lp="ltag">\${blocked.has(t) ? '⊘ ' : ''}\${esc(t)}</button>\`).join('')}</div>
+    <div class="pc-tip">点 = 只看这类　长按 = 屏蔽</div>
+    </div>
+    <style>.pc-lbf .pc-chips{gap:6px;margin:6px 0}.pc-lbf .pc-pill{font-size:13px;padding:4px 11px;min-height:0;line-height:1.5}.pc-lbf-k{align-self:center;font-size:15px;font-weight:600;margin-right:4px;white-space:nowrap}.pc-lbf .pc-tip{font-size:12px;margin:2px 0 6px}</style>
+`);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
