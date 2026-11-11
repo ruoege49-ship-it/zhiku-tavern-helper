@@ -2,6 +2,7 @@ import {applyAiBudgetCompatibility} from './ai-budget-compat.mjs';
 import {applyImageChannelCompatibility} from './image-channel-compat.mjs';
 import {applyShareEditCompatibility} from './share-edit-compat.mjs';
 import {applySampleWeightCompatibility} from './sample-weight-compat.mjs';
+import {applyWardrobeDisplayCompatibility} from './wardrobe-display-compat.mjs';
 import {applyBatchScenesCompatibility} from './batch-scenes-compat.mjs';
 import {applyWardrobeCanonCompatibility} from './wardrobe-canon-compat.mjs';
 import {applyImg2imgCompatibility} from './img2img-compat.mjs';
@@ -3855,8 +3856,34 @@ patch(`      <button class="pc-pill tiny dashed" data-act="edittpl" data-scope="
 }`);
 patch(`            case 'batchscene': ui.batch.sceneSig = el.dataset.v || ''; render(); break;`,`            case 'batchscene': ui.batch.sceneSig = el.dataset.v || ''; render(); break;
             case 'soloweight': d.options.sampleSoloWeight = Number(el.dataset.v) || 1; commit({ silent: true }); render(); break;`);
+// 0.8.36：改了楼层文字后通知一声（酒馆助手等会重新渲染 ```html 美化），不然状态栏会变成一大段代码
+patch(`function createMarkerController({context,getData,generate,upload,notify,document:doc=globalThis.document,resolveUrl=u=>u}) {`,`function createMarkerController({context,getData,generate,upload,notify,document:doc=globalThis.document,resolveUrl=u=>u}) {
+    const zkMsgUpdated=id=>{try{const c=context(),ev=c.eventTypes||c.event_types;if(ev?.MESSAGE_UPDATED)Promise.resolve(c.eventSource?.emit?.(ev.MESSAGE_UPDATED,id)).catch(()=>{});}catch{}};`);
+patch(`try {await context().saveChat();context().updateMessageBlock(id,msg);decorate(id);}`,`try {await context().saveChat();context().updateMessageBlock(id,msg);decorate(id);zkMsgUpdated(id);}`);
+patch(`            if(msg && parseImageMarkers(msg.mes,cfg.start,cfg.end).length)context().updateMessageBlock(id,msg);`,`            if(msg && parseImageMarkers(msg.mes,cfg.start,cfg.end).length){context().updateMessageBlock(id,msg);zkMsgUpdated(id);}`);
+// 0.8.36：衣柜卡片图看上半身 / 全身；展示图可以换模特
+patch(`    <div class="pc-grid2 pc-mt-s">\${list.map(({ o, owner, holders }) => \`<article class="pc-ticket" data-act="openoutfit"`,`    <div class="pc-row-between pc-mt-s"><span class="pc-dim small">卡片上的图</span><div class="pc-chips" style="margin:0">\${[['head', '裁成一样高'], ['full', '展示整张']].map(([k, t]) => \`<button class="pc-pill tiny \${(d.options.wardThumb || 'head') === k ? 'on' : 'dashed'}" data-act="wardthumb" data-v="\${k}">\${t}</button>\`).join('')}</div></div>
+    <style>.pc-wardgrid.thumb-head .pc-ticket-img img{object-fit:cover;object-position:50% 8%}.pc-wardgrid.thumb-full{align-items:start}.pc-wardgrid.thumb-full .pc-ticket-img{height:auto!important;-webkit-mask-image:none;mask-image:none}.pc-wardgrid.thumb-full .pc-ticket-img img{height:auto;object-fit:contain;display:block}</style>
+    <div class="pc-grid2 pc-mt-s pc-wardgrid thumb-\${d.options.wardThumb === 'full' ? 'full' : 'head'}">\${list.map(({ o, owner, holders }) => \`<article class="pc-ticket" data-act="openoutfit"`);
+patch(`    <button class="pc-btn pc-mt-s wide" data-act="outimggen" \${u.busy ? 'disabled' : ''}>`,`    <label class="pc-field pc-mt"><span>展示图的模特</span><select class="pc-input" data-outmodel>\${[['owner', owner ? \`跟穿的人（\${owner.name}）\` : '跟穿的人（还没给谁穿，用男模特）'], ['boy', '男模特'], ['girl', '女模特'], ...people.map(c => [c.key, c.name])].map(([v, t]) => \`<option value="\${esc(v)}" \${(d.options.outfitModel || 'owner') === v ? 'selected' : ''}>\${esc(t)}</option>\`).join('')}</select></label>
+    <button class="pc-btn pc-mt-s wide" data-act="outimggen" \${u.busy ? 'disabled' : ''}>`);
+patch(`            const owner = ui.outfit.draft ? C.getChar(ui.outfit.dest) : C.findOutfit(ui.outfit.owner, ui.outfit.id)?.owner;
+            ui.outfit.busy = 'gen'; render();`,`            const owner0 = ui.outfit.draft ? C.getChar(ui.outfit.dest) : C.findOutfit(ui.outfit.owner, ui.outfit.id)?.owner;
+            // 模特：跟穿的人 / 男模特 / 女模特 / 指定角色
+            const mk = d.options.outfitModel || 'owner';
+            const owner = mk === 'owner' ? owner0 : (mk === 'boy' || mk === 'girl') ? null : (C.getChar(mk) || owner0);
+            const modelTags = mk === 'girl' ? '1girl, solo, adult' : '1boy, solo, male focus, adult';
+            ui.outfit.busy = 'gen'; render();`);
+patch(`owner ? C.lookTags(owner) : '1boy, solo, male focus, adult', C.tagText(o.tags)`,`owner ? C.lookTags(owner) : modelTags, C.tagText(o.tags)`);
+patch(`        case 'outimggen': {`,`        case 'wardthumb': d.options.wardThumb = el.dataset.v; commit({ silent: true }); render(); return true;
+        case 'outimggen': {`);
+patch(`    if (el.dataset.bsneg !== undefined) {`,`    if (el.dataset.outmodel !== undefined) { getData().options.outfitModel = el.value; commit({ silent: true }); return; }
+    if (el.dataset.bsneg !== undefined) {`);
+// 0.8.36：电脑上面板变宽，卡片按宽度排更多列
+patch(`.pc-shell { height: 100%; max-width: 620px; margin: 0 auto; display: flex; flex-direction: column; }`,`.pc-shell { height: 100%; max-width: 620px; margin: 0 auto; display: flex; flex-direction: column; } @media (min-width: 1000px) { .pc-shell { max-width: min(1180px, 92vw); } .pc-shell .pc-grid2, .pc-overlay .pc-grid2 { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); } .pc-shell .pc-grid3, .pc-overlay .pc-grid3 { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); } .pc-shell .pc-card.pc-pad, .pc-shell details.pc-fold { max-width: 100%; } .pc-nav, .pc-head { max-width: none; } .pc-modal, .pc-sheet { max-width: 720px; } }`);
 s=applyShareEditCompatibility(s);
 s=applySampleWeightCompatibility(s);
+s=applyWardrobeDisplayCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;

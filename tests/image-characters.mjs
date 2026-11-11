@@ -51,6 +51,7 @@ assert.equal(imageStoryText('<content>未完正文'),'');
 const insertion=imageInsertionPoint(story,'小蓝挥手。');
 assert.equal(insertion,story.indexOf('</content>'));
 assert.equal(imageInsertionPoint(story,'没有匹配的原句'),insertion);
+{const t='他走进房间。小蓝挥手。\n\n```html\n<div>小蓝挥手。</div>\n```';assert.equal(imageInsertionPoint(t,'小蓝挥手。'),11,'不插进代码块');const t2='正文第一段。\n```html\n<div>x</div>\n```';assert.equal(t2.slice(0,imageInsertionPoint(t2,'找不到这句话啊')),'正文第一段。','找不到时放在状态栏前面');}
 assert.match(imageCastInstruction(names),/候选名单不是全员入画/);
 
 // Execute the generated runtime modules and the real generation adapter with mocked I/O.

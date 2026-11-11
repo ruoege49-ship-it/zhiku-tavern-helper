@@ -1,5 +1,5 @@
 import { illustrationRequest, compileIllustrationPlan, illustrationMarkerText } from './illustration-plans.js';
-import { imageStoryText, imageInsertionPoint, cleanImageTags, resolveImageCharacters } from './image-characters.js';
+import { imageStoryText, imageInsertionPoint, safeImageInsertionPoint, cleanImageTags, resolveImageCharacters } from './image-characters.js';
 import { parseImageMarkers, shiftImageRecords } from './marker-generation.js';
 import { locateSelectedText, selectedImageStory, selectionTextMap } from './selected-image.js';
 
@@ -68,7 +68,7 @@ export function createIllustrationPlanner({ getContext, getData, settings, roste
         if (!selected.length) { warn('没有可用的画面方案；请检查提示词输出格式或重新生成正文');forget();return; }
         // Locate against the original story once. Preserve order for images sharing an anchor.
         const insertions = new Map();
-        for(const shot of selected){const at=manual?selection.insertAt:imageInsertionPoint(source,shot.anchor);if(!Number.isInteger(at)||at<0||at>source.length)throw new Error('选段插入位置无效');insertions.set(at,[...(insertions.get(at)||[]),shot]);}
+        for(const shot of selected){const at=manual?safeImageInsertionPoint(source,selection.insertAt):imageInsertionPoint(source,shot.anchor);if(!Number.isInteger(at)||at<0||at>source.length)throw new Error('选段插入位置无效');insertions.set(at,[...(insertions.get(at)||[]),shot]);}
         let next='',cursor=0;const positions=new Set(),shifts=[];
         for(const [at,shots] of [...insertions].sort((a,b)=>a[0]-b[0])){next+=source.slice(cursor,at);const before=next.length;for(const shot of shots){next+='\n';positions.add(next.length);next+=shot.raw+'\n';}shifts.push({at,length:next.length-before});cursor=at;}
         next+=source.slice(cursor);
@@ -83,7 +83,11 @@ export function createIllustrationPlanner({ getContext, getData, settings, roste
         const now=getContext();
         if(stopped || chatKey(now)!==chatId || now.chat?.[id]!==msg || msg.swipe_id!==swipe)return;
         const tokenIndices=parseImageMarkers(next,cfg.start,cfg.end).map((t,i)=>positions.has(t.index)?i:-1).filter(i=>i>=0);
-        now.updateMessageBlock?.(id,msg);await afterSave(id,{manual,tokenIndices});
+        // SillyTavern 1.14.0 public/scripts/st-context.js exports eventTypes and eventSource.
+        now.updateMessageBlock?.(id,msg);try{const ev=now.eventTypes||now.event_types;if(ev?.MESSAGE_UPDATED)await now.eventSource?.emit?.(ev.MESSAGE_UPDATED,id);}catch{}
+        const latest=getContext();
+        if(stopped||chatKey(latest)!==chatId||latest.chat?.[id]!==msg||msg.swipe_id!==swipe||msg.mes!==next)return;
+        await afterSave(id,{manual,tokenIndices});
         return selected.length;
     }
     async function selected(selection) {
