@@ -3524,6 +3524,10 @@ patch(`              \${sw('comicAutoAdapt', '回复写完自动写分镜', 'AI 
               <div class="pc-label">分镜从哪来</div>
               \${seg('comicSrc', [['extract', '只用写好的'], ['ai', '没写就让 AI 写']], 'ai')}
               <div class="pc-hint">\${opts().comicSrc === 'extract' ? '只画回复里已经写好的 &lt;image&gt;@page 分镜（漫画台预设会让正文模型写）；回复里没有分镜就不自动画，要画就在楼层里点「画成漫画」让 AI 写。' : '回复里有写好的分镜（漫画台预设）就照着画；没有就让 AI 把这一楼改编成分镜再画（每楼多一次 AI 调用，只管最新一楼、每楼只写一次）。'}</div>`);
+// 0.8.36：画面描述是空的就不画，免得画出和正文无关的图
+patch(`    if (parsed.unknown?.length) toastr.info(\`「\${parsed.unknown.join('、')}」没在角色页登记（或这次聊天没开），按图里写的标签画\`, '智库', { timeOut: 4000 });`,`    if (parsed.unknown?.length) toastr.info(\`「\${parsed.unknown.join('、')}」没在角色页登记（或这次聊天没开），按图里写的标签画\`, '智库', { timeOut: 4000 });
+    // 画面和角色动作全是空的：多半是写画面的 AI 回复空了，不画（不然会按画师串随便画一张，和正文无关）
+    if (!parsed.unknown?.length && !String(parsed.scene || '').replace(/\\b(?:nsfw|sfw)\\b|[,\\s]/gi, '') && !(parsed.picks || []).some(p => String(p.tags || '').trim())) throw new Error('这张图没有画面描述，没画：多半是写画面的 AI 回复空了（带思考的模型把长度用完了）。到智库「设置 → 翻译和 AI」把「回复长度上限」调大，或者换个不带思考的模型');`);
 s=applyImg2imgCompatibility(s);
 s=applyWardrobeCanonCompatibility(s);
 s=applyBatchScenesCompatibility(s);
