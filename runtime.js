@@ -2350,49 +2350,124 @@ function utf8ToBase64(str) {
     return btoa(bin);
 }
 
-async function loadData() {
+// 数据存四份：酒馆里的 json 文件（主）、酒馆设置（文件存不了时）、浏览器 IndexedDB、localStorage。
+// 读的时候挑 options.savedAt 最新的一份。有些手机酒馆客户端不支持 /user/files，或退出时会清掉 localStorage。
+const EXT_KEY = 'zhiku_data_backup';
+const savedAt = raw => { const n = Number(raw?.options?.savedAt); return Number.isFinite(n) && n > 0 ? n : 0; };
+let fileOk = false;
+let idbSaving = Promise.resolve();
+// Reject error payloads, arrays and broken libraries before they can outrank a good backup.
+function backupData(value) {
     try {
-        const res = await fetch(`/user/files/${DATA_FILE}?t=${Date.now()}`, { cache: 'no-store' });
-        if (res.status === 404) {
-            const backup = localStorage.getItem(LOCAL_BACKUP);
-            data = normalizeData(backup ? JSON.parse(backup) : null);
-            loadedFromServer = true;
-        } else if (res.ok) {
-            data = normalizeData(await res.json());
-            loadedFromServer = true;
-        } else {
-            throw new Error(`HTTP ${res.status}`);
-        }
-    } catch (e) {
-        console.warn('[票册] 从酒馆读取数据失败，先用本地备份', e);
-        const backup = localStorage.getItem(LOCAL_BACKUP);
-        data = normalizeData(backup ? JSON.parse(backup) : null);
-        loadedFromServer = false;
-        toastr.warning('票册数据没能从酒馆读到，这次的改动先存在浏览器里。', '画师票册');
-    }
+        const raw = typeof value === 'string' ? JSON.parse(value) : value;
+        const record = v => v && typeof v === 'object' && !Array.isArray(v);
+        if (!record(raw) || !record(raw.artists) || !record(raw.groups)) return null;
+        for (const k of ['collections', 'templates', 'characters', 'options', 'outfits']) if (raw[k] != null && !record(raw[k])) return null;
+        normalizeData(structuredClone(raw));
+        return raw;
+    } catch { return null; }
+}
+// Each operation owns its connection and deadline; blocked/unavailable IDB must not block file saves.
+function idbOperation(k, value, writing = false) {
+    return new Promise(resolve => {
+        let db, tx, ended = false, result = null;
+        const finish = v => { if (ended) return; ended = true; window.clearTimeout(timer); try { db?.close(); } catch {} resolve(v); };
+        const timer = window.setTimeout(() => { try { tx?.abort(); } catch {} finish(null); }, 1500);
+        try {
+            const open = indexedDB.open('zhiku_store', 1);
+            open.onupgradeneeded = () => { if (!open.result.objectStoreNames.contains('kv')) open.result.createObjectStore('kv'); };
+            open.onerror = open.onblocked = () => finish(null);
+            open.onsuccess = () => {
+                db = open.result; if (ended) { db.close(); return; }
+                try {
+                    tx = db.transaction('kv', writing ? 'readwrite' : 'readonly');
+                    const store = tx.objectStore('kv'), request = writing ? store.put(value, k) : store.get(k);
+                    request.onsuccess = () => { result = writing ? true : request.result ?? null; };
+                    request.onerror = () => finish(null);
+                    tx.oncomplete = () => finish(result); tx.onerror = tx.onabort = () => finish(null);
+                } catch { finish(null); }
+            };
+        } catch { finish(null); }
+    });
+}
+const idbGet = k => idbOperation(k);
+const idbSet = (k, value) => (idbSaving = idbSaving.then(() => idbOperation(k, value, true)));
+async function fileRequest(url, options = {}) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 10000);
+    try { const response = await fetch(url, { ...options, signal: controller.signal }); return { ok: response.ok, status: response.status, text: await response.text() }; }
+    finally { window.clearTimeout(timer); }
+}
+const extSettings = () => { try { return SillyTavern.getContext().extensionSettings || null; } catch { return null; } };
+function saveExt(raw) {
+    try {
+        const es = extSettings(); if (!es) return;
+        if (raw) { if (savedAt(es[EXT_KEY]) > savedAt(raw)) return; es[EXT_KEY] = raw; } else if (es[EXT_KEY]) delete es[EXT_KEY]; else return;
+        SillyTavern.getContext().saveSettingsDebounced();
+    } catch { /* 存不了就算了 */ }
+}
+
+async function loadData() {
+    let server = null, serverOk = false;
+    try {
+        const res = await fileRequest(`/user/files/${DATA_FILE}?t=${Date.now()}`, { cache: 'no-store' });
+        if (res.status === 404) serverOk = true;
+        else if (res.ok && (server = backupData(res.text))) serverOk = true;
+        else throw new Error(`数据文件不可读（HTTP ${res.status}）`);
+    } catch (e) { console.warn('[智库] 从酒馆文件读数据失败，用其它备份', e); }
+    const found = [];
+    const add = (kind, raw) => { const value = backupData(raw); if (value) found.push([kind, value]); };
+    add('file', server); add('ext', extSettings()?.[EXT_KEY]); add('idb', await idbGet('data'));
+    try { add('local', localStorage.getItem(LOCAL_BACKUP)); } catch {}
+    let best = null;
+    for (const candidate of found) if (!best || savedAt(candidate[1]) > savedAt(best[1])) best = candidate;
+    data = normalizeData(best ? structuredClone(best[1]) : null);
+    loadedFromServer = true; fileOk = serverOk;
+    if (!serverOk) toastr.warning('这个酒馆读不到智库的数据文件，画师库改存在酒馆设置和浏览器里。', '智库', { timeOut: 5000 });
     emit();
+    if (best && best[0] !== 'file' && (!server || savedAt(best[1]) > savedAt(server))) commit({ immediate: true, silent: true });
     return data;
 }
 
-async function writeNow() {
+function snapshotData() {
     const json = JSON.stringify(data);
-    try { localStorage.setItem(LOCAL_BACKUP, json); } catch { /* 太大就算了 */ }
-    if (!loadedFromServer) return; // 没读到服务器的数据时不覆盖，免得把服务器上的旧数据清掉
-    const res = await fetch('/api/files/upload', {
-        method: 'POST',
-        headers: headers(),
-        body: JSON.stringify({ name: DATA_FILE, data: utf8ToBase64(json) }),
-    });
+    // Synchronous local backup happens before waiting for any older network request.
+    try { localStorage.setItem(LOCAL_BACKUP, json); } catch {}
+    void idbSet('data', json);
+    if (!fileOk) saveExt(JSON.parse(json));
+    return json;
+}
+async function writeNow(json) {
+    const quiet = !fileOk;
+    try { await tryFile(json); }
+    catch (e) { fileOk = false; saveExt(JSON.parse(json)); if (!quiet) throw e; }
+}
+async function tryFile(json) {
+    if (!fileOk) {
+        const probe = await fileRequest(`/user/files/${DATA_FILE}?t=${Date.now()}`, { cache: 'no-store' });
+        const existing = probe.ok && backupData(probe.text);
+        if (probe.status !== 404 && !existing) throw new Error('数据文件仍不可读，保留备份，暂不覆盖服务器文件');
+        if (existing && savedAt(existing) > savedAt(JSON.parse(json))) throw new Error('服务器已有更新的画师库，保留本地备份，请重新打开智库读取');
+    }
+    const res = await fileRequest('/api/files/upload', { method: 'POST', headers: headers(), body: JSON.stringify({ name: DATA_FILE, data: utf8ToBase64(json) }) });
     if (!res.ok) throw new Error(`保存失败 HTTP ${res.status}`);
+    // A mobile bridge may return HTTP 200 with an HTML page: verify the saved contents.
+    const check = await fileRequest(`/user/files/${DATA_FILE}?t=${Date.now()}`, { cache: 'no-store' });
+    const back = check.ok && backupData(check.text);
+    if (!back || JSON.stringify(back) !== json) throw new Error('上传后未读回同一份画师库，已保留其它备份');
+    fileOk = true;
+    if (extSettings()?.[EXT_KEY] && savedAt(extSettings()[EXT_KEY]) <= savedAt(back)) saveExt(null);
 }
 
 /** 改完数据调用：立刻通知界面，稍后写到服务器 */
 function commit({ immediate = false, silent = false } = {}) {
+    data.options = { ...(data.options || {}), savedAt: Math.max(Date.now(), savedAt(data) + 1) };
     if (!silent) emit();
     clearTimeout(saveTimer);
     const run = () => {
         saveTimer = null;
-        saving = saving.then(writeNow).catch(e => {
+        const json = snapshotData();
+        saving = saving.then(() => writeNow(json)).catch(e => {
             console.error('[票册] 保存失败', e);
             toastr.error('票册保存到酒馆失败：' + e.message, '画师票册');
         });
@@ -2408,6 +2483,11 @@ function replaceData(next) {
     loadedFromServer = true;
     return commit({ immediate: true });
 }
+// Snapshot synchronously on backgrounding; detach listeners when this runtime stops.
+const flushNow = () => { if (saveTimer !== null) commit({ immediate: true, silent: true }); };
+const onHidden = () => { if (document.visibilityState === 'hidden') flushNow(); };
+try { document.addEventListener('visibilitychange', onHidden); window.addEventListener('pagehide', flushNow); } catch {}
+function detach() { try { document.removeEventListener('visibilitychange', onHidden); window.removeEventListener('pagehide', flushNow); } catch {} }
 
 // ───────────── 例图 ─────────────
 
@@ -2471,7 +2551,7 @@ async function shrinkDataUrl(dataUrl, maxSide = 1024, quality = 0.88) {
     return c.toDataURL('image/jpeg', quality);
 }
 
-return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };
+return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, detach, flush: async () => { if (saveTimer !== null) commit({ immediate: true, silent: true }); await saving; await idbSaving; } };
 })();
 
 // ───── lobby.js ─────
@@ -9703,7 +9783,17 @@ async function onChangeEv(ev) {
     if (el.dataset.vibeadd) { await addVibeFiles(el.dataset.vibeadd, [...el.files]); el.value = ''; return; }
     if (el.dataset.aqt !== undefined) {
         N.settings().AQT_novelai = el.checked ? 'on' : '';
-        N.save(); render(); return;
+        N.save();
+        // 只改旁边的字，不整页重画（有的手机酒馆客户端在折叠栏里点开关后重画会白屏）
+        try {
+            const pv2 = previewHtml(N.settings());
+            const sm = el.closest('label')?.querySelector('small');
+            if (sm) sm.textContent = pv2.aqt || '现在不加';
+            const sum = el.closest('details')?.querySelector('summary i');
+            if (sum) sum.textContent = sum.textContent.replace(/质量词 [开关]/, '质量词 ' + (pv2.aqt ? '开' : '关'));
+        } catch (e) { console.warn('[智库]', e); }
+        updateStudioPreview();
+        return;
     }
     if (el.dataset.st === 'UCP_novelai' && el.value === 'custom' && !String(N.settings().UCP_custom || '').trim()) {
         // 第一次选自定义：先放进原来预设的内容，在它基础上改
@@ -11181,6 +11271,7 @@ return {
     start,
     async stop() {
         if (globalThis.__zhikuDl) { DOC.removeEventListener('click', globalThis.__zhikuDl, true); delete globalThis.__zhikuDl; }
+        __mod_store.detach();
         await __mod_store.flush();
         ownCleanup?.();
         while (cleanups.length) { try { cleanups.pop()?.(); } catch {} }

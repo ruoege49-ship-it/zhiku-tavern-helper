@@ -4,6 +4,7 @@ import {applyShareEditCompatibility} from './share-edit-compat.mjs';
 import {applySampleWeightCompatibility} from './sample-weight-compat.mjs';
 import {applyWardrobeDisplayCompatibility} from './wardrobe-display-compat.mjs';
 import {applyCharacterAlbumCompatibility} from './character-album-compat.mjs';
+import {applyStorageRecoveryCompatibility} from './storage-recovery-compat.mjs';
 import {applyBatchScenesCompatibility} from './batch-scenes-compat.mjs';
 import {applyWardrobeCanonCompatibility} from './wardrobe-canon-compat.mjs';
 import {applyImg2imgCompatibility} from './img2img-compat.mjs';
@@ -3936,10 +3937,162 @@ patch(`function avatarUrl(c) {
     if (c.kind === 'user') return`);
 patch(`    if (el.dataset.outmodel !== undefined) {`,`    if (el.dataset.chartestextra !== undefined) { ui.charTestExtra = el.value; return; }
     if (el.dataset.outmodel !== undefined) {`);
+// 0.8.38：画师库数据多存几份（酒馆设置、IndexedDB），挑最新的读；切到后台马上存（手机酒馆客户端退出重进数据没了）
+patch(`async function loadData() {
+    try {
+        const res = await fetch(\`/user/files/\${DATA_FILE}?t=\${Date.now()}\`, { cache: 'no-store' });
+        if (res.status === 404) {
+            const backup = localStorage.getItem(LOCAL_BACKUP);
+            data = normalizeData(backup ? JSON.parse(backup) : null);
+            loadedFromServer = true;
+        } else if (res.ok) {
+            data = normalizeData(await res.json());
+            loadedFromServer = true;
+        } else {
+            throw new Error(\`HTTP \${res.status}\`);
+        }
+    } catch (e) {
+        console.warn('[票册] 从酒馆读取数据失败，先用本地备份', e);
+        const backup = localStorage.getItem(LOCAL_BACKUP);
+        data = normalizeData(backup ? JSON.parse(backup) : null);
+        loadedFromServer = false;
+        toastr.warning('票册数据没能从酒馆读到，这次的改动先存在浏览器里。', '画师票册');
+    }
+    emit();
+    return data;
+}
+
+async function writeNow() {
+    const json = JSON.stringify(data);
+    try { localStorage.setItem(LOCAL_BACKUP, json); } catch { /* 太大就算了 */ }
+    if (!loadedFromServer) return; // 没读到服务器的数据时不覆盖，免得把服务器上的旧数据清掉
+    const res = await fetch('/api/files/upload', {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({ name: DATA_FILE, data: utf8ToBase64(json) }),
+    });
+    if (!res.ok) throw new Error(\`保存失败 HTTP \${res.status}\`);
+}`,`// 数据存四份：酒馆里的 json 文件（主）、酒馆设置（文件存不了时）、浏览器 IndexedDB、localStorage。
+// 读的时候挑 options.savedAt 最新的一份。有些手机酒馆客户端不支持 /user/files，或退出时会清掉 localStorage。
+const EXT_KEY = 'zhiku_data_backup';
+const savedAt = raw => Number(raw?.options?.savedAt) || 0;
+let fileOk = false;
+function idbOpen() {
+    return new Promise((ok, no) => {
+        const r = indexedDB.open('zhiku_store', 1);
+        r.onupgradeneeded = () => r.result.createObjectStore('kv');
+        r.onsuccess = () => ok(r.result); r.onerror = () => no(r.error);
+    });
+}
+async function idbGet(k) {
+    try { const db = await idbOpen(); return await new Promise(ok => { const q = db.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => ok(q.result ?? null); q.onerror = () => ok(null); }); }
+    catch { return null; }
+}
+async function idbSet(k, v) {
+    try { const db = await idbOpen(); await new Promise(ok => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = ok; t.onerror = ok; t.onabort = ok; }); }
+    catch { /* 不支持就算了 */ }
+}
+const extSettings = () => { try { return SillyTavern.getContext().extensionSettings || null; } catch { return null; } };
+function saveExt(raw) {
+    try {
+        const es = extSettings(); if (!es) return;
+        if (raw) es[EXT_KEY] = raw; else if (es[EXT_KEY]) delete es[EXT_KEY]; else return;
+        SillyTavern.getContext().saveSettingsDebounced();
+    } catch { /* 存不了就算了 */ }
+}
+
+async function loadData() {
+    let server = null, serverOk = false;
+    try {
+        const res = await fetch(\`/user/files/\${DATA_FILE}?t=\${Date.now()}\`, { cache: 'no-store' });
+        if (res.status === 404) serverOk = true;
+        else if (res.ok) {
+            const text = await res.text();
+            try { server = JSON.parse(text); serverOk = !!server && typeof server === 'object'; }
+            catch { throw new Error('读到的不是数据（这个酒馆可能不支持 /user/files）'); }
+        } else throw new Error(\`HTTP \${res.status}\`);
+    } catch (e) { console.warn('[智库] 从酒馆文件读数据失败，用其它备份', e); }
+    const found = [];
+    if (server) found.push(['file', server]);
+    const ext = extSettings()?.[EXT_KEY];
+    if (ext && typeof ext === 'object') found.push(['ext', ext]);
+    const idb = await idbGet('data');
+    if (idb) { try { found.push(['idb', typeof idb === 'string' ? JSON.parse(idb) : idb]); } catch { /* 坏了 */ } }
+    try { const b = localStorage.getItem(LOCAL_BACKUP); if (b) found.push(['local', JSON.parse(b)]); } catch { /* 坏了 */ }
+    // 挑最新的；一样新（老数据都没有时间）就按 文件 → 酒馆设置 → IndexedDB → localStorage
+    let best = null;
+    for (const f of found) if (!best || savedAt(f[1]) > savedAt(best[1])) best = f;
+    data = normalizeData(best ? best[1] : null);
+    loadedFromServer = true;
+    fileOk = serverOk;
+    if (!serverOk) toastr.warning('这个酒馆读不到智库的数据文件，画师库改存在酒馆设置和浏览器里。', '智库', { timeOut: 5000 });
+    emit();
+    // 备份比文件新（上次没来得及存到文件 / 文件存不了）：马上再存一遍
+    if (best && best[0] !== 'file' && (!server || savedAt(best[1]) > savedAt(server))) commit({ immediate: true, silent: true });
+    return data;
+}
+
+async function writeNow() {
+    data.options = { ...(data.options || {}), savedAt: Date.now() };
+    const json = JSON.stringify(data);
+    try { localStorage.setItem(LOCAL_BACKUP, json); } catch { /* 太大就算了 */ }
+    await idbSet('data', json);
+    if (!fileOk) { saveExt(JSON.parse(json)); await tryFile(json, true); return; }
+    try { await tryFile(json, false); }
+    catch (e) { saveExt(JSON.parse(json)); throw e; }
+}
+/** 写进酒馆里的 json 文件；quiet：文件本来就存不了，只是试试，成功了就换回用文件 */
+async function tryFile(json, quiet) {
+    let res;
+    try {
+        res = await fetch('/api/files/upload', { method: 'POST', headers: headers(), body: JSON.stringify({ name: DATA_FILE, data: utf8ToBase64(json) }) });
+    } catch (e) { if (quiet) return; throw e; }
+    if (!res.ok) { if (quiet) return; throw new Error(\`保存失败 HTTP \${res.status}\`); }
+    if (quiet) {
+        // 上传成功也要读得回来才算数
+        try { const r = await fetch(\`/user/files/\${DATA_FILE}?t=\${Date.now()}\`, { cache: 'no-store' }); const back = JSON.parse(await r.text()); if (savedAt(back) !== savedAt(JSON.parse(json))) return; }
+        catch { return; }
+        fileOk = true;
+    }
+    if (extSettings()?.[EXT_KEY]) saveExt(null);
+}`);
+patch(`function replaceData(next) {
+    data = normalizeData(next);
+    loadedFromServer = true;
+    return commit({ immediate: true });
+}`,`function replaceData(next) {
+    data = normalizeData(next);
+    loadedFromServer = true;
+    return commit({ immediate: true });
+}
+// 切到后台 / 关掉页面时，还没存的马上存（手机上切走 App 可能直接被杀掉）
+try {
+    const flushNow = () => { if (saveTimer !== null) commit({ immediate: true, silent: true }); };
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushNow(); });
+    window.addEventListener('pagehide', flushNow);
+} catch { /* 没有 document 的环境 */ }`);
+// 0.8.38：质量词开关不整页重画（手机客户端点了白屏）
+patch(`    if (el.dataset.aqt !== undefined) {
+        N.settings().AQT_novelai = el.checked ? 'on' : '';
+        N.save(); render(); return;
+    }`,`    if (el.dataset.aqt !== undefined) {
+        N.settings().AQT_novelai = el.checked ? 'on' : '';
+        N.save();
+        // 只改旁边的字，不整页重画（有的手机酒馆客户端在折叠栏里点开关后重画会白屏）
+        try {
+            const pv2 = previewHtml(N.settings());
+            const sm = el.closest('label')?.querySelector('small');
+            if (sm) sm.textContent = pv2.aqt || '现在不加';
+            const sum = el.closest('details')?.querySelector('summary i');
+            if (sum) sum.textContent = sum.textContent.replace(/质量词 [开关]/, '质量词 ' + (pv2.aqt ? '开' : '关'));
+        } catch (e) { console.warn('[智库]', e); }
+        return;
+    }`);
 s=applyShareEditCompatibility(s);
 s=applySampleWeightCompatibility(s);
 s=applyWardrobeDisplayCompatibility(s);
 s=applyCharacterAlbumCompatibility(s);
+s=applyStorageRecoveryCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
