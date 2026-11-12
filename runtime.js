@@ -1673,7 +1673,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.42（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.43（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1722,7 +1722,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.42';
+globalThis.__PC_VERSION = '0.8.43';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -4310,6 +4310,7 @@ async function askLLMOnce(system, user, { maxTokens = 800, fn = '' } = {}) {
     if (!res.ok) throw aiRequestError(`AI 请求失败（${res.status}）：${raw.slice(0, 160)}`, res.status, raw);
     let json;
     try { json = JSON.parse(raw); } catch { throw new Error(/^\s*<(?:!doctype|html)/i.test(raw) ? 'AI 请求拿回来的是一张网页，不是 AI 的回复：多半是请求没到后端（客户端或别的插件拦了），或者 AI 地址填成了网页地址（OpenAI 兼容的地址一般以 /v1 结尾）' : 'AI 返回的不是正常格式：' + raw.slice(0, 120)); }
+    if (blockedResponse(json)) throw blockedError();
     if (json.error) throw new Error('AI 报错：' + (json.error.message || JSON.stringify(json.error)).slice(0, 160));
     const ch = json.choices?.[0] || {};
     const content = String(ch.message?.content ?? ch.text ?? '');
@@ -4327,9 +4328,19 @@ async function translateToTags(text, { expand = false } = {}) {
 }
 
 /** 从 AI 的回复里挖出 JSON */
+const BLOCKED = /PROHIBITED_CONTENT|(?:finishReason|blockReason)["'\s:]+SAFETY|content_filter|内容被拦/i;
+function blockedResponse(j) {
+    return /^(?:SAFETY|PROHIBITED_CONTENT|BLOCKLIST|IMAGE_SAFETY)$/i.test(String(j?.promptFeedback?.blockReason || ''))
+        || (Array.isArray(j?.candidates) && j.candidates.some(c => /^(?:SAFETY|PROHIBITED_CONTENT)$/i.test(String(c?.finishReason || ''))))
+        || (Array.isArray(j?.choices) && j.choices.some(c => c?.finish_reason === 'content_filter'));
+}
+const blockedError = () => new Error('模型拦截了这次内容（PROHIBITED_CONTENT）：请检查模型的内容限制。');
 function pickJson(raw) {
     const t = String(raw || '').replace(/<think>[\s\S]*?<\/think>/g, '').replace(/```(?:json)?/g, '');
     const a = t.indexOf('{'), b = t.lastIndexOf('}');
+    let payload; try { payload = JSON.parse(t); } catch {}
+    if (blockedResponse(payload)) throw blockedError();
+    if (a < 0 && BLOCKED.test(t)) throw blockedError();
     if (!t.trim()) throw new Error('AI 回复是空的。带思考的模型可能把长度都用在思考上了：换不带思考的模型，或者在模型设置里关掉思考（推理）再试');
     if (a < 0) throw new Error('AI 没按格式回答，可能拒绝了或没看懂，换个模型再试：' + t.slice(0, 100));
     try { if (b > a) return JSON.parse(t.slice(a, b + 1)); } catch { /* 下面试着修 */ }
@@ -4387,6 +4398,64 @@ async function askRoomy(sys, user, opts) {
     if (answerOf(raw) || String(raw || '').includes('{')) return raw;
     throw new Error('AI 回复只有思考、没有正文。换不带思考的模型，或者在 AI 设置里把思考关掉');
 }
+/** 读人物：被模型拦了（Gemini 的 PROHIBITED_CONTENT）就去掉 NSFW 要求、把设定切成几段分开读，读到的同名合并 */
+// Retry only an explicit content rejection, with non-explicit appearance extraction.
+async function askCastSafe(sys, cardName, label, text, fromEnd) {
+    text = String(text || '');
+    const userFor = limit => `卡名：${cardName}\n${label}：\n${fromEnd ? text.slice(-limit) : text.slice(0, limit)}`;
+    try { return await askShrinking(sys, userFor, { maxTokens: 8000, fn: 'look' }); }
+    catch (e) {
+        if (!BLOCKED.test(String(e?.providerMessage || e?.message || e))) throw e;
+        const sys2 = sys.replace(/NSFW 身体单独放进 nsfw：[^\n]*/, 'nsfw 一律写 []。');
+        const parts = (fromEnd ? text.slice(-60000) : text.slice(0,60000)).split(/\n(?=【)/);
+        const chunks = []; let cur = '';
+        for (const part of parts) {
+            if (cur && cur.length + part.length > 6000) { chunks.push(cur); cur = ''; }
+            cur += (cur ? '\n' : '') + part;
+            while (cur.length > 9000) { chunks.push(cur.slice(0,6000)); cur = cur.slice(6000); }
+        }
+        if (cur.trim()) chunks.push(cur);
+        // Chat extraction keeps the most recent context when the number of chunks is capped.
+        const selected = fromEnd ? chunks.slice(-12) : chunks.slice(0,12);
+        const people = []; let blocked = 0, failed = 0, read = 0;
+        for (const ch of selected) {
+            let raw;
+            try { raw = await askRoomy(sys2, `卡名：${cardName}\n${label}（其中一段）：\n${ch}`, { maxTokens:8000, fn:'look' }); }
+            catch (error) {
+                if (!BLOCKED.test(String(error?.providerMessage || error?.message || error))) throw error;
+                blocked++; continue;
+            }
+            try {
+                const j = pickJson(raw);
+                const list = Array.isArray(j.people) ? j.people : Array.isArray(j.characters) ? j.characters : null;
+                if (!list) { failed++; continue; }
+                read++;
+                people.push(...list.filter(p => p && typeof p === 'object').map(p => ({...p,nsfw:[]})));
+            } catch (error) { if (BLOCKED.test(String(error?.message || error))) blocked++; else failed++; }
+        }
+        const summary = `分段读取 ${selected.length} 段：${read} 段成功、${blocked} 段被模型拦截、${failed} 段格式不正确${chunks.length > 12 ? `；仅处理${fromEnd ? '最近' : '前'} 12 段` : ''}。这次只提取普通外貌，NSFW 身体留空。`;
+        globalThis.__zkLog?.('读人物', summary);
+        if (!read && selected.length) throw new Error(summary + ' 请检查模型的内容限制或回复格式。');
+        if (blocked || failed || chunks.length > 12) toastr.warning(summary, '角色', {timeOut:9000});
+        else toastr.info(summary, '角色', {timeOut:6000});
+        const key = x => typeof x === 'string' ? x : x?.en;
+        const merged = [];
+        for (const p of people) {
+            const name = String(p.name || '').trim(); if (!name) continue;
+            const aliases = (Array.isArray(p.aliases) ? p.aliases : []).filter(x => typeof x === 'string' && x.trim());
+            const hit = merged.find(m => m.name === name || m.aliases.includes(name) || aliases.includes(m.name));
+            if (!hit) { merged.push({...p,name,aliases}); continue; }
+            for (const k of ['aliases','appearance','outfit']) {
+                const list = Array.isArray(hit[k]) ? hit[k] : (hit[k] = []), seen = new Set(list.map(key));
+                for (const x of k === 'aliases' ? [name,...aliases] : Array.isArray(p[k]) ? p[k] : []) {
+                    if (key(x) && !seen.has(key(x))) { list.push(x); seen.add(key(x)); }
+                }
+            }
+            if (!hit.canon && p.canon) hit.canon = p.canon;
+        }
+        return {people:merged};
+    }
+}
 async function askShrinking(sys, userFor, opts) {
     let last;
     for (const limit of [60000, 30000, 15000]) {
@@ -4411,7 +4480,7 @@ ${PAIRS}
 NSFW 身体单独放进 nsfw：只给明确是成年人的角色写（未成年、年龄不明、非人类幼体一律留空 []）。写脱了衣服才看得到的身体特征：乳头 / 乳晕颜色和大小、阴毛、私处、男性的阴茎等；设定写了就照写，没写的按这个人的身材和气质补 2～4 个常见的。不要写动作和姿势。
 每个人如果是现有动画、漫画、游戏、小说里的角色（同人），canon 写 danbooru 上的角色标签，英文小写、空格代替下划线，可以带作品标签，比如 "hatsune miku, vocaloid"；原创角色或拿不准写 ""。
 只输出 JSON：{"people": [{"name": "正文里的名字", "aliases": ["昵称、称呼、别的叫法"], "appearance": [...], "outfit": [...], "nsfw": [...], "canon": ""}]}`;
-    const j = await askShrinking(sys, limit => `卡名：${cardName}\n聊天正文（从旧到新）：\n${String(chatText || '').slice(-limit)}`, { maxTokens: 8000, fn: 'look' });
+    const j = await askCastSafe(sys, cardName, '聊天正文（从旧到新）', chatText, true);
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
     return (Array.isArray(j.people) ? j.people : []).map(p => ({
         name: String(p?.name || '').trim().slice(0, 30),
@@ -4427,14 +4496,17 @@ ${PAIRS}
 NSFW 身体单独放进 nsfw：只给明确是成年人的角色写（未成年、年龄不明、非人类幼体一律留空 []）。写脱了衣服才看得到的身体特征：乳头 / 乳晕颜色和大小、阴毛、私处、男性的阴茎等；设定写了就照写，没写的按这个人的身材和气质补 2～4 个常见的。不要写动作和姿势。
 每个人如果是现有动画、漫画、游戏、小说里的角色（同人），canon 写 danbooru 上的角色标签，英文小写、空格代替下划线，可以带作品标签，比如 "hatsune miku, vocaloid"；原创角色或拿不准写 ""。
 只输出 JSON：{"people": [{"name": "设定里的名字", "aliases": ["昵称、简称、别的叫法"], "appearance": [...], "outfit": [...], "nsfw": [...], "canon": ""}]}`;
-    const j = await askShrinking(sys, limit => `卡名：${cardName}\n设定：\n${String(description || '').slice(0, limit)}`, { maxTokens: 8000, fn: 'look' });
+    const j = await askCastSafe(sys, cardName, '设定', description, false);
     const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
-    return (Array.isArray(j.people) ? j.people : []).map(p => ({
+    const list = (Array.isArray(j.people) ? j.people : Array.isArray(j.characters) ? j.characters : []).map(p => ({
         name: String(p?.name || '').trim().slice(0, 30),
         aliases: (Array.isArray(p?.aliases) ? p.aliases : []).map(a => String(a || '').trim()).filter(Boolean).slice(0, 6),
         appearance: norm(p?.appearance), outfit: norm(p?.outfit), nsfw: norm(p?.nsfw),
         canon: typeof p?.canon === 'string' ? p.canon.replace(/_/g, ' ').trim().slice(0, 120) : '',
-    })).filter(p => p.name && !/^\{\{?user\}?\}$|^user$/i.test(p.name) && (p.appearance.length || p.canon));
+    }));
+    const out = list.filter(p => p.name && !/^\{\{?user\}?\}$|^user$/i.test(p.name) && (p.appearance.length || p.canon));
+    out.found = list.map(p => p.name).filter(Boolean);
+    return out;
 }
 
 /** 用户自己写的一句（中文也行）→ 一个或几个标签 */
@@ -4578,6 +4650,7 @@ async function readChat(r) {
     if (!r.ok) throw aiRequestError(`AI 请求失败（${r.status}）：${raw.slice(0, 160)}。如果这个模型不能看图，到设置 → 翻译和 AI 换一个`, r.status, raw);
     let json;
     try { json = JSON.parse(raw); } catch { throw new Error(/^\s*<(?:!doctype|html)/i.test(raw) ? 'AI 请求拿回来的是一张网页，不是 AI 的回复：多半是请求没到后端（客户端或别的插件拦了），或者 AI 地址填成了网页地址（OpenAI 兼容的地址一般以 /v1 结尾）' : 'AI 返回的不是正常格式：' + raw.slice(0, 120)); }
+    if (blockedResponse(json)) throw blockedError();
     if (json.error) throw new Error('AI 报错：' + (json.error.message || JSON.stringify(json.error)).slice(0, 160) + '。可能这个模型不能看图');
     const c = json.choices?.[0]?.message?.content ?? json.content?.[0]?.text ?? '';
     return String(Array.isArray(c) ? c.map(x => x.text || '').join('') : c);
@@ -4749,9 +4822,10 @@ function descOf(c) {
     return [...stCards(), ...stPersonas()].find(x => x.key === c.key)?.desc || '';
 }
 /** 读人设用：描述、性格、场景、卡里的世界书、绑定的世界书都拿来；配角只拿提到它名字的世界书条目 */
-async function descOfFull(c) {
+async function descOfFull(c, { all = false } = {}) {
     const cx = ctx();
     const parts = [];
+    const used = [];
     const add = (title, text) => { text = String(text || '').trim(); if (text) parts.push(`【${title}】\n${text}`); };
     const fromBook = (title, entries, name) => {
         const list = (Array.isArray(entries) ? entries : Object.values(entries || {}))
@@ -4759,7 +4833,15 @@ async function descOfFull(c) {
         const picked = name ? list.filter(e => [e.comment, e.content, ...(e.key || e.keys || [])].some(x => String(x || '').includes(name))) : list;
         for (const e of picked) add(`${title}：${e.comment || (e.key || e.keys || []).join('、') || '条目'}`, e.content);
     };
-    const loadBook = async name => { try { return name ? (await cx.loadWorldInfo?.(name))?.entries : null; } catch { return null; } };
+    const loadBook = async name => {
+        if (!name) return null;
+        try {
+            if (!cx.loadWorldInfo) throw new Error('酒馆未提供世界书读取接口');
+            const book = await cx.loadWorldInfo(name);
+            if (!book?.entries) throw new Error('未读到世界书条目');
+            return book.entries;
+        } catch (e) { used.push(`「${name}」读取失败：${e.message || e}`); return null; }
+    };
     const fullCard = async avatar => {
         let card = (cx.characters || []).find(x => x?.avatar === avatar) || null;
         if (card && !card.shallow && (card.description || card.data?.character_book || card.data?.extensions?.world)) return card;
@@ -4784,12 +4866,26 @@ async function descOfFull(c) {
             add('场景', card?.scenario || dd.scenario);
         }
         // 卡里已经写了设定：世界书只拿提到这个名字的条目；没写：整本都给 AI 挑
-        const only = side || parts.length ? c.name : '';
+        // all：读「这张卡里所有人」，世界书整本都给，还加上聊天绑定的和酒馆全局开着的世界书
+        const only = all ? '' : side || parts.length ? c.name : '';
+        const hadCard = parts.length;
         fromBook('卡里的世界书', dd.character_book?.entries, only);
-        fromBook('绑定的世界书', await loadBook(dd.extensions?.world), only);
-        if (!side && !parts.length) add('开场白', card?.first_mes || dd.first_mes);
+        if (dd.character_book?.entries) used.push('卡里的世界书');
+        const bound = dd.extensions?.world;
+        if (bound) { fromBook('绑定的世界书', await loadBook(bound), only); used.push(`绑定的世界书「${bound}」`); }
+        if (all) {
+            const names = new Set();
+            const chatBook = cx.chatMetadata?.world_info; if (chatBook) names.add(chatBook);
+            try { for (const o of document.querySelectorAll('#world_info option:checked')) if (o.textContent.trim()) names.add(o.textContent.trim()); } catch { /* 没有这个下拉框 */ }
+            names.delete(bound);
+            for (const n of names) { fromBook(`世界书「${n}」`, await loadBook(n), ''); used.push(`世界书「${n}」`); }
+        }
+        if (!side && !hadCard) add('开场白', card?.first_mes || dd.first_mes);
+        globalThis.__zkLog?.('读设定', `${c.name}：${all ? '整本' : '只要提到名字的'} · 共 ${parts.join('').length} 字`, `来源：卡的描述/性格/场景${hadCard ? '' : '（空的）'}；${used.join('，') || '没有世界书'}\n分段：${parts.map(x => x.split('\n')[0]).join('，').slice(0, 1500)}`);
     }
-    return parts.join('\n\n').slice(0, 60000);
+    const full = parts.join('\n\n');
+    if (full.length > 60000) { globalThis.__zkLog?.('读设定', '设定超出长度限制', `共 ${full.length} 字，仅发送前 60000 字`); toastr.warning('设定超过 60000 字，这次只发送前 60000 字，后面的角色可能读不到', '角色'); }
+    return full.slice(0,60000);
 }
 
 /** 卡里的配角 */
@@ -7830,11 +7926,11 @@ async function charAction(act, el) {
                     people = await T.extractCastFromChat(main.name, text);
                     if (!people.length) { toastr.warning('AI 没在最近的正文里找到写了外貌的人', '角色'); return true; }
                 } else {
-                const desc = await C.descOfFull(main);
+                const desc = await C.descOfFull(main, { all: true });
                 if (!desc.trim()) { toastr.warning('描述、性格、场景、世界书里都没找到设定', '角色'); return true; }
                 people = await T.extractCast(main.name, desc);
                 }
-                if (!people.length) { toastr.warning('AI 没在设定里找到写了外貌的人', '角色'); return true; }
+                if (!people.length) { toastr.warning(people.found?.length ? `AI 找到了 ${people.found.slice(0, 6).join('、')}，但没挑出英文外貌标签（可能设定里外貌写得少，或者模型没按格式给）。可以换个模型再试，或者点进角色用「从角色卡读」` : `AI 没在设定里找到写了外貌的人。发过去的设定可以在 设置 → 数据 → 问题记录 的「读设定」里看到：世界书没在里面的话，把它绑到这张卡上（角色卡的世界书按钮）`, '角色', { timeOut: 9000 }); return true; }
                 if (!stillCurrent()) return true;
                 const made = [], filled = [], kept = [], canonHits = [];
                 for (const p of people) {

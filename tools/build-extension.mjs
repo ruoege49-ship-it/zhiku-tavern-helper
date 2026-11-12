@@ -25,8 +25,8 @@ process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.42';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.42');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.43';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.43');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -4545,6 +4545,128 @@ patch("opts={...opts,src:opts.src || globalThis.__zkSrc || ''};", "opts={...opts
 patch('logSource = opts.src || globalThis.__zkSrc || "（没标）"', 'logSource = opts.src || "其他生图入口"');
 patch('noVibe = false }) {\n    return run({ positive, negative, chars, width, height, director, backend, i2i, noVibe });', 'noVibe = false, src }) {\n    return run({ positive, negative, chars, width, height, director, backend, i2i, noVibe, src });');
 patch('const image=await __mod_engine.generateFull({positive,negative,', 'const image=await __mod_engine.generateFull({src:where?.src,positive,negative,');
+// 0.8.39：读卡里所有人被 Gemini 拦（PROHIBITED_CONTENT）时，去掉 NSFW 要求分段读、同名合并；被拦的报错说人话
+patch(`function pickJson(raw) {
+    const t = String(raw || '').replace(/<think>[\\s\\S]*?<\\/think>/g, '').replace(/\`\`\`(?:json)?/g, '');
+    const a = t.indexOf('{'), b = t.lastIndexOf('}');`,`const BLOCKED = /PROHIBITED_CONTENT|blockReason|finishReason:\\s*SAFETY|content_filter|内容被拦/i;
+function pickJson(raw) {
+    const t = String(raw || '').replace(/<think>[\\s\\S]*?<\\/think>/g, '').replace(/\`\`\`(?:json)?/g, '');
+    const a = t.indexOf('{'), b = t.lastIndexOf('}');
+    if (a < 0 && BLOCKED.test(t)) throw new Error('模型拦掉了这次发的内容（PROHIBITED_CONTENT，Gemini 常见）：卡里或世界书有它不让发的东西，换 DeepSeek 这类不拦的模型再试');`);
+patch(`async function askShrinking(sys, userFor, opts) {`,`/** 读人物：被模型拦了（Gemini 的 PROHIBITED_CONTENT）就去掉 NSFW 要求、把设定切成几段分开读，读到的同名合并 */
+async function askCastSafe(sys, cardName, label, text, fromEnd) {
+    text = String(text || '');
+    const userFor = limit => \`卡名：\${cardName}\\n\${label}：\\n\${fromEnd ? text.slice(-limit) : text.slice(0, limit)}\`;
+    try { return await askShrinking(sys, userFor, { maxTokens: 8000, fn: 'look' }); }
+    catch (e) {
+        if (!BLOCKED.test(String(e?.message || e))) throw e;
+        console.warn('[智库] 读人物被模型拦了，改成不带 NSFW、分段再读', String(e?.message || e).slice(0, 120));
+        const sys2 = sys.replace(/NSFW 身体单独放进 nsfw：[^\\n]*/, 'nsfw 一律写 []。');
+        const parts = (fromEnd ? text.slice(-60000) : text.slice(0, 60000)).split(/\\n(?=【)/);
+        const chunks = []; let cur = '';
+        for (const part of parts) {
+            if (cur && cur.length + part.length > 6000) { chunks.push(cur); cur = ''; }
+            cur += (cur ? '\\n' : '') + part;
+            while (cur.length > 9000) { chunks.push(cur.slice(0, 6000)); cur = cur.slice(6000); }
+        }
+        if (cur.trim()) chunks.push(cur);
+        const people = []; let blocked = 0, failed = 0;
+        for (const ch of chunks.slice(0, 12)) {
+            try { const j = pickJson(await askRoomy(sys2, \`卡名：\${cardName}\\n\${label}（其中一段）：\\n\${ch}\`, { maxTokens: 8000, fn: 'look' })); people.push(...(Array.isArray(j.people) ? j.people : [])); }
+            catch (e2) { if (BLOCKED.test(String(e2?.message || e2))) blocked++; else failed++; }
+        }
+        if (!people.length) throw new Error(\`模型（多半是 Gemini）拦掉了卡里的内容（PROHIBITED_CONTENT），切成 \${chunks.length} 段分开读也\${blocked ? '都被拦了' : '没读出来'}：读人物请换成不拦的模型，比如 DeepSeek。\`);
+        if (blocked || failed || chunks.length > 12) toastr.warning(\`模型拦掉了 \${blocked} 段\${failed ? '、' + failed + ' 段没读出来' : ''}\${chunks.length > 12 ? '，设定太长只读了前 12 段' : ''}，那几段里的人没读到；这次没写 NSFW 身体。想读全就换 DeepSeek 这类不拦的模型。\`, '角色', { timeOut: 9000 });
+        else toastr.info('模型不让一次发整张卡，已经分段读完；这次没写 NSFW 身体。', '角色', { timeOut: 6000 });
+        const key = x => typeof x === 'string' ? x : x?.en;
+        const merged = [];
+        for (const p of people) {
+            const name = String(p?.name || '').trim(); if (!name) continue;
+            const al = Array.isArray(p.aliases) ? p.aliases : [];
+            const hit = merged.find(m => m.name === name || m.aliases.includes(name) || al.includes(m.name));
+            if (!hit) { merged.push({ ...p, name, aliases: [...al] }); continue; }
+            for (const k of ['aliases', 'appearance', 'outfit', 'nsfw']) {
+                const list = Array.isArray(hit[k]) ? hit[k] : (hit[k] = []);
+                const seen = new Set(list.map(key));
+                for (const x of Array.isArray(p[k]) ? p[k] : []) if (key(x) && !seen.has(key(x))) { list.push(x); seen.add(key(x)); }
+            }
+            if (!hit.canon && p.canon) hit.canon = p.canon;
+        }
+        return { people: merged };
+    }
+}
+async function askShrinking(sys, userFor, opts) {`);
+patch(`    const j = await askShrinking(sys, limit => \`卡名：\${cardName}\\n聊天正文（从旧到新）：\\n\${String(chatText || '').slice(-limit)}\`, { maxTokens: 8000, fn: 'look' });`,`    const j = await askCastSafe(sys, cardName, '聊天正文（从旧到新）', chatText, true);`);
+patch(`    const j = await askShrinking(sys, limit => \`卡名：\${cardName}\\n设定：\\n\${String(description || '').slice(0, limit)}\`, { maxTokens: 8000, fn: 'look' });`,`    const j = await askCastSafe(sys, cardName, '设定', description, false);`);
+// 0.8.39：读卡里所有人时整本世界书都给，还加上聊天和全局开着的世界书；读不到时说清楚，问题记录里能看到发了什么
+patch(`async function descOfFull(c) {
+    const cx = ctx();
+    const parts = [];`,`async function descOfFull(c, { all = false } = {}) {
+    const cx = ctx();
+    const parts = [];
+    const used = [];`);
+patch(`        const only = side || parts.length ? c.name : '';
+        fromBook('卡里的世界书', dd.character_book?.entries, only);
+        fromBook('绑定的世界书', await loadBook(dd.extensions?.world), only);
+        if (!side && !parts.length) add('开场白', card?.first_mes || dd.first_mes);`,`        // all：读「这张卡里所有人」，世界书整本都给，还加上聊天绑定的和酒馆全局开着的世界书
+        const only = all ? '' : side || parts.length ? c.name : '';
+        const hadCard = parts.length;
+        fromBook('卡里的世界书', dd.character_book?.entries, only);
+        if (dd.character_book?.entries) used.push('卡里的世界书');
+        const bound = dd.extensions?.world;
+        if (bound) { fromBook('绑定的世界书', await loadBook(bound), only); used.push(\`绑定的世界书「\${bound}」\`); }
+        if (all) {
+            const names = new Set();
+            const chatBook = cx.chatMetadata?.world_info; if (chatBook) names.add(chatBook);
+            try { for (const o of document.querySelectorAll('#world_info option:checked')) if (o.textContent.trim()) names.add(o.textContent.trim()); } catch { /* 没有这个下拉框 */ }
+            names.delete(bound);
+            for (const n of names) { fromBook(\`世界书「\${n}」\`, await loadBook(n), ''); used.push(\`世界书「\${n}」\`); }
+        }
+        if (!side && !hadCard) add('开场白', card?.first_mes || dd.first_mes);
+        globalThis.__zkLog?.('读设定', \`\${c.name}：\${all ? '整本' : '只要提到名字的'} · 共 \${parts.join('').length} 字\`, \`来源：卡的描述/性格/场景\${hadCard ? '' : '（空的）'}；\${used.join('，') || '没有世界书'}\\n分段：\${parts.map(x => x.split('\\n')[0]).join('，').slice(0, 1500)}\`);`);
+patch(`                const desc = await C.descOfFull(main);`,`                const desc = await C.descOfFull(main, { all: true });`);
+patch(`    })).filter(p => p.name && !/^\\{\\{?user\\}?\\}$|^user$/i.test(p.name) && (p.appearance.length || p.canon));
+}
+
+/** 用户自己写的一句`,`    }));
+    const out = list.filter(p => p.name && !/^\\{\\{?user\\}?\\}$|^user$/i.test(p.name) && (p.appearance.length || p.canon));
+    out.found = list.map(p => p.name).filter(Boolean);
+    return out;
+}
+
+/** 用户自己写的一句`);
+patch(`    const j = await askCastSafe(sys, cardName, '设定', description, false);
+    const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
+    return (Array.isArray(j.people) ? j.people : []).map(p => ({`,`    const j = await askCastSafe(sys, cardName, '设定', description, false);
+    const norm = arr => (Array.isArray(arr) ? arr : []).map(x => typeof x === 'string' ? { en: x, zh: '' } : { en: String(x?.en || '').trim(), zh: String(x?.zh || '').trim() }).filter(x => x.en && !hasChinese(x.en));
+    const list = (Array.isArray(j.people) ? j.people : Array.isArray(j.characters) ? j.characters : []).map(p => ({`);
+patch(`                if (!people.length) { toastr.warning('AI 没在设定里找到写了外貌的人', '角色'); return true; }`,`                if (!people.length) { toastr.warning(people.found?.length ? \`AI 找到了 \${people.found.slice(0, 6).join('、')}，但没挑出英文外貌标签（可能设定里外貌写得少，或者模型没按格式给）。可以换个模型再试，或者点进角色用「从角色卡读」\` : \`AI 没在设定里找到写了外貌的人。发过去的设定可以在 设置 → 数据 → 问题记录 的「读设定」里看到：世界书没在里面的话，把它绑到这张卡上（角色卡的世界书按钮）\`, '角色', { timeOut: 9000 }); return true; }`);
+// Preserve request-error semantics and recognize provider block payloads before JSON extraction.
+{
+    const a=s.indexOf('async function askCastSafe('),b=s.indexOf('async function askShrinking(',a); assert(a>=0&&b>a);
+    s=s.slice(0,a)+fs.readFileSync('src/cast-reading.js','utf8')+s.slice(b);
+}
+patch('const BLOCKED = /PROHIBITED_CONTENT|blockReason|finishReason:\\s*SAFETY|content_filter|内容被拦/i;', `const BLOCKED = /PROHIBITED_CONTENT|(?:finishReason|blockReason)["'\\s:]+SAFETY|content_filter|内容被拦/i;
+function blockedResponse(j) {
+    return /^(?:SAFETY|PROHIBITED_CONTENT|BLOCKLIST|IMAGE_SAFETY)$/i.test(String(j?.promptFeedback?.blockReason || ''))
+        || (Array.isArray(j?.candidates) && j.candidates.some(c => /^(?:SAFETY|PROHIBITED_CONTENT)$/i.test(String(c?.finishReason || ''))))
+        || (Array.isArray(j?.choices) && j.choices.some(c => c?.finish_reason === 'content_filter'));
+}
+const blockedError = () => new Error('模型拦截了这次内容（PROHIBITED_CONTENT）：请检查模型的内容限制。');`);
+s=s.replaceAll('    if (json.error) throw new Error(\'AI 报错：\'', '    if (blockedResponse(json)) throw blockedError();\n    if (json.error) throw new Error(\'AI 报错：\'');
+patch('    const a = t.indexOf(\'{\'), b = t.lastIndexOf(\'}\');\n    if (a < 0 && BLOCKED.test(t))', "    const a = t.indexOf('{'), b = t.lastIndexOf('}');\n    let payload; try { payload = JSON.parse(t); } catch {}\n    if (blockedResponse(payload)) throw blockedError();\n    if (a < 0 && BLOCKED.test(t))");
+patch("throw new Error('模型拦掉了这次发的内容（PROHIBITED_CONTENT，Gemini 常见）：卡里或世界书有它不让发的东西，换 DeepSeek 这类不拦的模型再试');", 'throw blockedError();');
+// Distinguish a failed lorebook load from an empty/disabled book in diagnostics.
+patch("const loadBook = async name => { try { return name ? (await cx.loadWorldInfo?.(name))?.entries : null; } catch { return null; } };", `const loadBook = async name => {
+        if (!name) return null;
+        try {
+            if (!cx.loadWorldInfo) throw new Error('酒馆未提供世界书读取接口');
+            const book = await cx.loadWorldInfo(name);
+            if (!book?.entries) throw new Error('未读到世界书条目');
+            return book.entries;
+        } catch (e) { used.push(\`「\${name}」读取失败：\${e.message || e}\`); return null; }
+    };`);
+patch("    return parts.join('\\n\\n').slice(0, 60000);", "    const full = parts.join('\\n\\n');\n    if (full.length > 60000) { globalThis.__zkLog?.('读设定', '设定超出长度限制', `共 ${full.length} 字，仅发送前 60000 字`); toastr.warning('设定超过 60000 字，这次只发送前 60000 字，后面的角色可能读不到', '角色'); }\n    return full.slice(0,60000);");
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
@@ -4558,9 +4680,9 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',(prefix+s+'\n}\n').replace(/\r\n/g, '\n'));
 fs.copyFileSync('src/index.js',dir+'/index.js');
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.42',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.42',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.43',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.43',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.8.42 built; storage keys and shared upload preserved.');
+console.log('Extension 0.8.43 built; storage keys and shared upload preserved.');
