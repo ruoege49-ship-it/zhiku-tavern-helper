@@ -25,8 +25,8 @@ process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.41';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.41');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.42';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.42');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -4359,6 +4359,192 @@ patch(`    // 一位画师都没有、也没有例图的画师串（批量时把
         delete d.groups[g.id];
         if (d.active?.type === 'group' && d.active.id === g.id) d.active = null;
     }`,`    // 打开时不自动删任何画师串：存了就留着，没用的让人自己删`);
+// 0.8.39：问题记录：生图请求和报错都记下来，设置 → 数据 → 问题记录 查看、复制
+patch(`const idbSet = (k, value) => (idbSaving = idbSaving.then(() => idbOperation(k, value, true)));`,`const idbSet = (k, value) => (idbSaving = idbSaving.then(() => idbOperation(k, value, true)));
+// ── 问题记录：生图请求、报错、警告都记一笔（最多 120 条，刷新后还在），在 设置 → 数据 → 问题记录 里看 ──
+const LOG_KEY = 'zhiku_log';
+let logBuf = null;
+function logs() { if (!logBuf) { try { logBuf = JSON.parse(localStorage.getItem(LOG_KEY) || '[]'); } catch { logBuf = []; } if (!Array.isArray(logBuf)) logBuf = []; } return logBuf; }
+let logTimer = null;
+function zkLog(kind, msg, detail = '') {
+    try {
+        const list = logs();
+        const text = String(msg ?? '').slice(0, 300), det = typeof detail === 'string' ? detail : Object.entries(detail || {}).map(([k, v]) => Array.isArray(v) ? \`\${k}：\${v.length ? '\\n  ' + v.join('\\n  ') : '无'}\` : \`\${k}：\${v === true ? '有' : v === false ? '无' : v === '' || v == null ? '（空）' : v}\`).join('\\n');
+        const last = list[list.length - 1];
+        // 一样的报错连着出现只记次数
+        if (last && last.k === kind && last.m === text && Date.now() - last.t < 60000) { last.n = (last.n || 1) + 1; last.t = Date.now(); }
+        else list.push({ t: Date.now(), k: kind, m: text, d: String(det || '').slice(0, 4000) });
+        if (list.length > 120) list.splice(0, list.length - 120);
+        clearTimeout(logTimer);
+        logTimer = setTimeout(() => { try { localStorage.setItem(LOG_KEY, JSON.stringify(list)); } catch { list.splice(0, 40); try { localStorage.setItem(LOG_KEY, JSON.stringify(list)); } catch { /* 存不下就算了 */ } } }, 300);
+    } catch { /* 记录本身不能出错 */ }
+}
+function clearLogs() { logBuf = []; try { localStorage.removeItem(LOG_KEY); } catch { /* 无所谓 */ } }
+globalThis.__zkLog = zkLog;`);
+patch(`return { diagnose, getData,`,`return { logs, zkLog, clearLogs, diagnose, getData,`);
+patch(`async function generateRequest(opts) {`,`async function generateRequest(opts) {
+    const t0 = Date.now(), s0 = settings();
+    const brief = () => ({
+        通道: opts.backend === 'comfy' ? 'ComfyUI' : { key: 'NovelAI 自己的 key', tavern: '酒馆里的 key', site: '第三方站点', gpt: 'OpenAI 兼容' }[s0.naiMode] || s0.naiMode,
+        模型: opts.comic ? 'nai-diffusion-5-full（漫画）' : s0.novelaimode, 尺寸: \`\${opts.width || s0.novelai_width}×\${opts.height || s0.novelai_height}\`,
+        正面: opts.positive, 负面: opts.negative,
+        分人物: (opts.chars || []).map((c, i) => \`\${i + 1}. \${c.prompt}\${c.center ? \` @\${c.center.x},\${c.center.y}\` : ''}\`),
+        角色参考: opts.director?.length || 0, 氛围: opts.refs?.images?.length || 0, 垫图: !!opts.i2i?.image,
+    });
+    try {
+        const r = await generateRequestInner(opts);
+        globalThis.__zkLog?.('生图', \`成功 · \${((Date.now() - t0) / 1000).toFixed(1)} 秒 · \${(opts.chars || []).length ? (opts.chars.length + ' 个人物') : '没分人物'}\${opts.director?.length ? ' · 带角色参考 ' + opts.director.length + ' 张' : ''}\`, brief());
+        return r;
+    } catch (e) {
+        globalThis.__zkLog?.('生图失败', e.message || String(e), brief());
+        throw e;
+    }
+}
+async function generateRequestInner(opts) {`);
+patch(`        <button class="pc-btn" data-act="diagstore">检查画师库存档</button>`,`        <button class="pc-btn" data-act="diagstore">检查画师库存档</button>
+        <button class="pc-btn" data-act="zklog">问题记录</button>`);
+patch(`            case 'diagstore': {`,`            case 'zklog': {
+                const S = __mod_store, s = N.settings(), o = d.options;
+                const head = [
+                    \`智库 \${globalThis.__PC_VERSION || ''} · \${new Date().toLocaleString()}\`,
+                    \`生图通道：\${{ key: 'NovelAI 自己的 key', tavern: '酒馆里的 key', site: '第三方站点', gpt: 'OpenAI 兼容' }[s.naiMode] || s.naiMode} · 模型 \${s.novelaimode} · 正文出图用 \${N.chatBackend?.() === 'comfy' ? 'ComfyUI' : 'NovelAI'}\`,
+                    \`正文插图：\${{ off: '关', inline: '正文自己写标记', after: '回复后让 AI 选画面' }[o.illustMode || 'off'] || o.illustMode} · 最多 \${o.illustMax ?? 1} 张 · 识别标记自动生成 \${o.markerAuto === false ? '关' : '开'}\`,
+                    \`正文画师串：\${d.active ? M.ticketName(d, d.active) : '没选'} · 角色参考能用 \${N.charRefSupported() ? '是' : '否'} · 画师库 画师 \${Object.keys(d.artists).length} / 串 \${Object.keys(d.groups).length}\`,
+                ].join('\\n');
+                const fmtT = t => new Date(t).toLocaleString();
+                const render = () => {
+                    const list = S.logs().slice().reverse();
+                    return list.length ? list.map(x => \`<details class="pc-logitem"><summary><span class="pc-dim small mono">\${esc(fmtT(x.t))}</span> <b class="\${/失败|错/.test(x.k) ? 'pc-logbad' : ''}">\${esc(x.k)}</b>\${x.n > 1 ? \` <span class="pc-dim small">×\${x.n}</span>\` : ''}<div class="small" style="margin-top:2px">\${esc(x.m)}</div></summary>\${x.d ? \`<pre class="mono">\${esc(x.d)}</pre>\` : ''}</details>\`).join('') : '<div class="pc-dim small">还没有记录。出问题以后再来看。</div>';
+                };
+                const allText = () => head + '\\n\\n' + S.logs().slice().reverse().map(x => \`[\${fmtT(x.t)}] \${x.k}\${x.n > 1 ? ' ×' + x.n : ''}：\${x.m}\${x.d ? '\\n' + x.d : ''}\`).join('\\n\\n');
+                const box = modal(\`<h3 class="pc-h3">问题记录</h3>
+                  <pre class="mono pc-loghead">\${esc(head)}</pre>
+                  <div class="pc-loglist">\${render()}</div>
+                  <div class="pc-hint">记的是最近的生图请求（发了什么提示词、几个人物、带没带参考图）、报错和警告，刷新后也在。点一条展开看细节。有问题点「复制全部」发给作者，或者截图。</div>
+                  <div class="pc-actions wrap"><button class="pc-btn" data-m="clear">清空</button><button class="pc-btn" data-m="copy">复制全部</button><button class="pc-btn dark" data-m="ok">好</button></div>\`);
+                box.addEventListener('click', async ev => {
+                    const m = ev.target.closest('[data-m]')?.dataset.m;
+                    if (m === 'copy') {
+                        let rep = ''; try { rep = await S.diagnose(); } catch { /* 没有也行 */ }
+                        const text = allText() + (rep ? '\\n\\n── 画师库存档 ──\\n' + rep : '');
+                        navigator.clipboard?.writeText(text).then(() => toastr.success('复制了，可以直接粘贴发出去', '智库'), () => toastr.warning('复制不了，截图吧', '智库'));
+                    }
+                    if (m === 'clear') { if (await confirmBox('清空问题记录？')) { S.clearLogs(); box.querySelector('.pc-loglist').innerHTML = render(); } }
+                    if (m === 'ok') box.closeModal();
+                });
+                break;
+            }
+            case 'diagstore': {`);
+patch(`    P.__piaoceCleanup?.();`,`    P.__piaoceCleanup?.();
+    try {
+        const SELF = (new Error().stack || '').match(/((?:https?|file):\\/\\/[^\\s)]+?\\.js)/)?.[1] || 'runtime.js';
+        const mine = st => String(st || '').includes(SELF);
+        if (!globalThis.__zkHooked) {
+            globalThis.__zkHooked = true;
+            for (const lv of ['error', 'warning']) {
+                const orig = toastr[lv].bind(toastr);
+                toastr[lv] = (msg, title, ...rest) => { try { if (mine(new Error().stack)) globalThis.__zkLog?.(lv === 'error' ? '报错' : '提醒', \`\${title ? title + '：' : ''}\${msg}\`); } catch { /* 不管 */ } return orig(msg, title, ...rest); };
+            }
+            for (const lv of ['warn', 'error']) {
+                const orig = console[lv].bind(console);
+                console[lv] = (...a) => { try { if (typeof a[0] === 'string' && /^\\[(?:智库|票册)\\]/.test(a[0])) globalThis.__zkLog?.('控制台', a.map(x => x instanceof Error ? x.message : typeof x === 'string' ? x : (() => { try { return JSON.stringify(x); } catch { return String(x); } })()).join(' ').slice(0, 300)); } catch { /* 不管 */ } return orig(...a); };
+            }
+            window.addEventListener('error', ev => { if (mine(ev.error?.stack) || mine(ev.filename)) globalThis.__zkLog?.('程序出错', ev.message, ev.error?.stack || ''); });
+            window.addEventListener('unhandledrejection', ev => { if (mine(ev.reason?.stack)) globalThis.__zkLog?.('程序出错', ev.reason?.message || String(ev.reason), ev.reason?.stack || ''); });
+        }
+    } catch { /* 记录装不上也不影响用 */ }`);
+patch(`style.textContent = "/*\\n * 画师票册`,`style.textContent = ".pc-loghead{white-space:pre-wrap;word-break:break-all;font-size:11.5px;line-height:1.6;margin:0 0 8px;opacity:.85}.pc-loglist{max-height:52vh;overflow:auto;scrollbar-width:none;display:grid;gap:6px}.pc-loglist::-webkit-scrollbar{display:none}.pc-logitem{background:rgba(120,105,85,.08);border-radius:12px;padding:7px 10px}.pc-logitem summary{cursor:pointer;list-style:none}.pc-logitem summary::-webkit-details-marker{display:none}.pc-logitem pre{white-space:pre-wrap;word-break:break-all;font-size:11px;line-height:1.55;margin:6px 0 0;max-height:40vh;overflow:auto;scrollbar-width:none}.pc-logbad{color:#a84a3e}" + "/*\\n * 画师票册`);
+// 0.8.39：日志改存 IndexedDB 并限量；生图记来源；正文图没放进去也记下；能下载日志
+patch(`const LOG_KEY = 'zhiku_log';
+let logBuf = null;
+function logs() { if (!logBuf) { try { logBuf = JSON.parse(localStorage.getItem(LOG_KEY) || '[]'); } catch { logBuf = []; } if (!Array.isArray(logBuf)) logBuf = []; } return logBuf; }
+let logTimer = null;`,`// 日志存在浏览器 IndexedDB（不占 localStorage，也不进酒馆文件）。最多 300 条、总共约 1MB，超了就删最早的
+const LOG_KEY = 'zhiku_log', LOG_MAX = 300, LOG_BYTES = 1000000, LOG_DETAIL = 3000;
+let logBuf = [];
+function logs() { return logBuf; }
+let logTimer = null;
+function trimLogs(list) {
+    if (list.length > LOG_MAX) list.splice(0, list.length - LOG_MAX);
+    let size = list.reduce((n, x) => n + (x.m?.length || 0) + (x.d?.length || 0) + 40, 0);
+    while (list.length > 1 && size * 2 > LOG_BYTES) { const x = list.shift(); size -= (x.m?.length || 0) + (x.d?.length || 0) + 40; }
+}
+function saveLogsSoon() {
+    clearTimeout(logTimer);
+    logTimer = setTimeout(() => { trimLogs(logBuf); void idbSet('log', JSON.stringify(logBuf)); }, 800);
+}
+// 打开时读回以前的日志；以前放在 localStorage 的挪过来并删掉
+(async () => {
+    try {
+        let old = [];
+        try { old = JSON.parse(localStorage.getItem(LOG_KEY) || '[]'); localStorage.removeItem(LOG_KEY); } catch { /* 没有 */ }
+        const raw = await idbGet('log');
+        const saved = raw ? JSON.parse(raw) : [];
+        logBuf = [...(Array.isArray(saved) ? saved : []), ...(Array.isArray(old) ? old : []), ...logBuf].sort((a, b) => a.t - b.t);
+        trimLogs(logBuf);
+        if (old.length) saveLogsSoon();
+    } catch { /* 读不到就从头记 */ }
+})();`);
+patch(`        else list.push({ t: Date.now(), k: kind, m: text, d: String(det || '').slice(0, 4000) });
+        if (list.length > 120) list.splice(0, list.length - 120);
+        clearTimeout(logTimer);
+        logTimer = setTimeout(() => { try { localStorage.setItem(LOG_KEY, JSON.stringify(list)); } catch { list.splice(0, 40); try { localStorage.setItem(LOG_KEY, JSON.stringify(list)); } catch { /* 存不下就算了 */ } } }, 300);`,`        else list.push({ t: Date.now(), k: kind, m: text, d: String(det || '').slice(0, LOG_DETAIL) });
+        if (list.length > LOG_MAX + 50) trimLogs(list);
+        saveLogsSoon();`);
+patch(`function clearLogs() { logBuf = []; try { localStorage.removeItem(LOG_KEY); } catch { /* 无所谓 */ } }`,`function clearLogs() { logBuf = []; clearTimeout(logTimer); void idbSet('log', '[]'); }`);
+patch(`        正面: opts.positive, 负面: opts.negative,`,`        来源: opts.src || globalThis.__zkSrc || '（没标）',
+        正面: opts.positive, 负面: opts.negative,`);
+patch(`                    const image=await generate(prompt,{story});if(!current())return 0;`,`                    globalThis.__zkSrc=\`正文第 \${id} 楼 · 第 \${all.indexOf(token)+1} 个标记\${manual?'（手动点）':'（自动）'}\`;
+                    let image;try{image=await generate(prompt,{story});}finally{globalThis.__zkSrc='';}
+                    if(!current()){globalThis.__zkLog?.('正文图没放进去',\`第 \${id} 楼：图生成完了，但这一楼已经变了（换了回复、重新生成、被编辑或被别的脚本改了标记前面的字），这张只留在历史生图里\`);return 0;}`);
+patch(`                    const {url}=await upload(image,'marker_'+Date.now());if(!current())return 0;`,`                    const {url}=await upload(image,'marker_'+Date.now());if(!current()){globalThis.__zkLog?.('正文图没放进去',\`第 \${id} 楼：图存好时这一楼已经变了，这张只留在历史生图里\`);return 0;}`);
+patch(`<div class="pc-actions wrap"><button class="pc-btn" data-m="clear">清空</button><button class="pc-btn" data-m="copy">复制全部</button><button class="pc-btn dark" data-m="ok">好</button></div>\`);`,`<div class="pc-actions wrap"><button class="pc-btn" data-m="clear">清空</button><button class="pc-btn" data-m="dl">下载成文件</button><button class="pc-btn" data-m="copy">复制全部</button><button class="pc-btn dark" data-m="ok">好</button></div>\`);`);
+patch(`                    if (m === 'clear') { if (await confirmBox('清空问题记录？')) {`,`                    if (m === 'dl') {
+                        let rep = ''; try { rep = await S.diagnose(); } catch { /* 没有也行 */ }
+                        const blob = new Blob([allText() + (rep ? '\\n\\n── 画师库存档 ──\\n' + rep : '')], { type: 'text/plain;charset=utf-8' });
+                        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = \`智库日志_\${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.txt\`;
+                        document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+                    }
+                    if (m === 'clear') { if (await confirmBox('清空问题记录？')) {`);
+patch(`<div class="pc-hint">记的是最近的生图请求（发了什么提示词、几个人物、带没带参考图）、报错和警告，刷新后也在。点一条展开看细节。有问题点「复制全部」发给作者，或者截图。</div>`,`<div class="pc-hint">记的是最近的生图请求（哪里发的、什么提示词、几个人物、带没带参考图）、报错和警告。只存在这台设备的浏览器里，最多 300 条、约 1MB，满了自动删最早的，不会占满存储。点一条展开看细节。有问题点「复制全部」或「下载成文件」发给作者。</div>`);
+// Integrate diagnostics with the existing IDB queue and runtime lifecycle.
+{
+    const a=s.indexOf('// ── 问题记录：'), b=s.indexOf('globalThis.__zkLog = zkLog;',a);
+    assert(a>=0&&b>a);
+    s=s.slice(0,a)+fs.readFileSync('src/problem-log.js','utf8')+s.slice(b+'globalThis.__zkLog = zkLog;'.length);
+}
+patch('return { logs, zkLog, clearLogs, diagnose,','return { logs, logsReady, flushLogs, zkLog, clearLogs, diagnose,');
+patch('const S = __mod_store, s = N.settings(), o = d.options;','const S = __mod_store, s = N.settings(), o = d.options;\n                await S.logsReady;');
+patch('S.clearLogs(); box.querySelector', 'await S.clearLogs(); box.querySelector');
+patch('navigator.clipboard?.writeText(text).then(', "Promise.resolve().then(() => { if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable'); return navigator.clipboard.writeText(text); }).then(");
+patch('await __mod_store.flush();', 'await __mod_store.flush();\n        await __mod_store.flushLogs();\n        if (globalThis.__zkLog === __mod_store.zkLog) delete globalThis.__zkLog;');
+patch('    const t0 = Date.now(), s0 = settings();','    const t0 = Date.now(), s0 = settings(), logSource = opts.src || globalThis.__zkSrc || "（没标）";');
+patch("来源: opts.src || globalThis.__zkSrc || '（没标）',",'来源: logSource,');
+patch('function generate(opts){return __naiGate.run(', "function generate(opts){opts={...opts,src:opts.src || globalThis.__zkSrc || ''};return __naiGate.run(");
+// Remove only our own global wrappers/listeners when the extension stops.
+patch("            globalThis.__zkHooked = true;", "            globalThis.__zkHooked = true;\n            const logCleanup = []; cleanups.push(() => { for (const fn of logCleanup.reverse()) fn(); globalThis.__zkHooked = false; });");
+patch("const orig = toastr[lv].bind(toastr);", "const previous = toastr[lv], orig = previous.bind(toastr);");
+patch("const orig = console[lv].bind(console);", "const previous = console[lv], orig = previous.bind(console);");
+patch('return orig(msg, title, ...rest); };', 'return orig(msg, title, ...rest); };\n                const wrapped = toastr[lv]; logCleanup.push(() => { if (toastr[lv] === wrapped) toastr[lv] = previous; });');
+patch('return orig(...a); };', 'return orig(...a); };\n                const wrapped = console[lv]; logCleanup.push(() => { if (console[lv] === wrapped) console[lv] = previous; });');
+for (const event of ['error','unhandledrejection']) {
+    const start=s.indexOf("            window.addEventListener('"+event+"', ev =>"), end=s.indexOf('\n',start);
+    assert(start>=0&&end>start);
+    const line=s.slice(start,end), fn=line.slice(line.indexOf('ev =>'),-2);
+    patch(line, `            { const handler = ${fn}; window.addEventListener('${event}',handler); logCleanup.push(() => window.removeEventListener('${event}',handler)); }`);
+}
+// A completed image from a changed floor still reaches the existing upload/history path.
+patch("                    if(!current()){globalThis.__zkLog?.('正文图没放进去',", "                    if(!current()){await upload(image,'marker_'+Date.now());globalThis.__zkLog?.('正文图没放进去',");
+// Carry marker provenance on this request, not in mutable cross-request global state.
+{
+    const a=s.indexOf('                    globalThis.__zkSrc=`正文第 '),b=s.indexOf('\n                    if(!current())',a);
+    assert(a>=0&&b>a);
+    const old=s.slice(a,b),label=old.slice(old.indexOf('`'),old.indexOf(';'));
+    patch(old,'                    const image=await generate(prompt,{story,src:'+label+'});');
+}
+patch("opts={...opts,src:opts.src || globalThis.__zkSrc || ''};", "opts={...opts,src:opts.src || '其他生图入口'};");
+patch('logSource = opts.src || globalThis.__zkSrc || "（没标）"', 'logSource = opts.src || "其他生图入口"');
+patch('noVibe = false }) {\n    return run({ positive, negative, chars, width, height, director, backend, i2i, noVibe });', 'noVibe = false, src }) {\n    return run({ positive, negative, chars, width, height, director, backend, i2i, noVibe, src });');
+patch('const image=await __mod_engine.generateFull({positive,negative,', 'const image=await __mod_engine.generateFull({src:where?.src,positive,negative,');
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
@@ -4372,9 +4558,9 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',(prefix+s+'\n}\n').replace(/\r\n/g, '\n'));
 fs.copyFileSync('src/index.js',dir+'/index.js');
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.41',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.41',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.42',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.42',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.8.41 built; storage keys and shared upload preserved.');
+console.log('Extension 0.8.42 built; storage keys and shared upload preserved.');
