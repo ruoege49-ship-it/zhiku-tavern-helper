@@ -25,8 +25,8 @@ process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.39';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.39');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.40';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.40');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -4336,6 +4336,16 @@ s=applySampleWeightCompatibility(s);
 s=applyWardrobeDisplayCompatibility(s);
 s=applyCharacterAlbumCompatibility(s);
 s=applyStorageRecoveryCompatibility(s);
+// 0.8.38：正文自己写生图标记时，自动只画前 N 张
+patch(`        setTimeout(() => { void __mod_marker.process(Number(id)); }, 0);
+        setTimeout(() => { void illustAfter`,`        // 正文模型自己写标记（inline）时可能多写：只自动画前「每条回复最多几张」个，多的留着手动点
+        setTimeout(() => { const o = getData().options, n = o.illustMode === 'inline' ? Math.max(1, Number(o.illustMax) || 1) : 0; void __mod_marker.process(Number(id), n ? { tokenIndices: [...Array(n).keys()] } : {}); }, 0);
+        setTimeout(() => { void illustAfter`);
+// 0.8.39：没有 artist: 画师、只有普通词的画师串刷新后不再被当成空串删掉
+patch(`    for (const g of Object.values(d.groups)) {
+        if (g.members.length || g.images.length) continue;`,`    for (const g of Object.values(d.groups)) {
+        // 只写了普通词、没带 artist: 的串也是用户自己存的，不能删（以前刷新就没了）
+        if (g.members.length || g.images.length || String(g.extra || '').trim() || String(g.raw || '').trim()) continue;`);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
@@ -4349,9 +4359,9 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',(prefix+s+'\n}\n').replace(/\r\n/g, '\n'));
 fs.copyFileSync('src/index.js',dir+'/index.js');
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.39',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.39',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.40',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.40',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.8.39 built; storage keys and shared upload preserved.');
+console.log('Extension 0.8.40 built; storage keys and shared upload preserved.');
