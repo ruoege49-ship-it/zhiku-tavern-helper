@@ -7,7 +7,7 @@ const M = vm.runInNewContext(part('const __mod_model =', '// ───── sto
 const raw = (tag, at = 0) => { const d = M.emptyData(); M.ensureArtist(d, 'artist:' + tag); d.options.savedAt = at; return JSON.parse(JSON.stringify(d)); };
 const tick = () => new Promise(r => setImmediate(r));
 function harness({ file = raw('file'), ext, idb, local, hangIdb = false } = {}) {
-    const state = { file: JSON.stringify(file), ext: ext ? { zhiku_data_backup: ext } : {}, idb, local, mode: 'ok', uploads: [], closes: 0, errors: [], events: new Map() };
+    const state = { file: JSON.stringify(file), ext: ext ? { zhiku_data_backup: ext } : {}, idb, local, mode: 'ok', uploads: [], probes: {}, closes: 0, errors: [], events: new Map() };
     const events = { addEventListener: (name, fn) => state.events.set(name, fn), removeEventListener: (name, fn) => { if (state.events.get(name) === fn) state.events.delete(name); } };
     const localStorage = { getItem: () => state.local ?? null, setItem: (k, v) => { state.local = v; } };
     const indexedDB = { open() {
@@ -23,18 +23,23 @@ function harness({ file = raw('file'), ext, idb, local, hangIdb = false } = {}) 
     const response = (status, text) => ({ ok: status >= 200 && status < 300, status, text: async () => text });
     const fetch = async (url, options = {}) => {
         if (state.hangNetwork) return new Promise((ok, no) => options.signal.addEventListener('abort', () => no(Error('timeout'))));
+        if (url === '/api/files/delete') { delete state.probes[JSON.parse(options.body).path.split('/').at(-1)]; return response(200, '{}'); }
         if (options.method === 'POST') {
+            const request = JSON.parse(options.body);
+            if (request.name !== 'piaoce_data.json') { state.probes[request.name] = Buffer.from(request.data, 'base64').toString('utf8'); return response(200, '{}'); }
             const text = Buffer.from(JSON.parse(options.body).data, 'base64').toString('utf8'); state.uploads.push(JSON.parse(text));
             if (state.hold) { const hold = state.hold; state.hold = null; await hold; }
             if (state.mode === 'fail') return response(500, 'failed');
             if (state.mode === 'html') return response(200, '<html>fallback</html>');
             state.file = text; return response(200, '{}');
         }
-        return response(state.file == null ? 404 : 200, state.file ?? '');
+        const name = url.split('/').at(-1).split('?')[0];
+        const file = name === 'piaoce_data.json' ? state.file : state.probes[name];
+        return response(file == null ? 404 : 200, file ?? '');
     };
     const context = { extensionSettings: state.ext, saveSettingsDebounced() {} };
     const sandbox = { __shim: { getRequestHeaders: () => ({}) }, __mod_model: M, SillyTavern: { getContext: () => context }, localStorage, indexedDB, fetch, structuredClone, TextEncoder, AbortController,
-        btoa: v => Buffer.from(v, 'binary').toString('base64'), console: { warn() {}, error() {} }, toastr: { warning() {}, error: m => state.errors.push(m) },
+        btoa: v => Buffer.from(v, 'binary').toString('base64'), console: { warn() {}, error() {} }, toastr: { warning() {}, info() {}, error: m => state.errors.push(m) },
         document: { ...events, visibilityState: 'hidden' }, window: { ...events, setTimeout: (f, ms) => setTimeout(f, Math.min(ms, 30)), clearTimeout },
         setTimeout: fn => { state.delayed = fn; return 1; }, clearTimeout: () => { state.delayed = null; } };
     state.store = vm.runInNewContext(part('const __mod_store =', '// ───── nai.js') + '\n__mod_store', sandbox);
@@ -59,7 +64,7 @@ for (const bad of ['bad json', '[]', '{"options":{"savedAt":99999}}', JSON.strin
     await h.store.loadData(); await h.store.flush(); assert.equal(tagOf(h.store), 'artist:recovered'); assert.equal(backup.options.savedAt, 5);
     M.ensureArtist(h.store.getData(), 'artist:new'); await h.store.commit({ immediate: true }); assert.equal(Object.keys(h.ext.zhiku_data_backup.artists).length, 2);
     assert.equal(h.uploads.length, 0); // Never overwrite a server file that still cannot be read.
-    h.mode = 'ok'; h.file = null; await h.store.commit({ immediate: true }); assert(!h.ext.zhiku_data_backup); assert.equal(Object.keys(JSON.parse(h.file).artists).length, 2);
+    h.mode = 'ok'; h.file = null; await h.store.commit({ immediate: true }); assert.equal(h.uploads.length, 0); await h.store.loadData(); await h.store.flush(); assert(!h.ext.zhiku_data_backup); assert.equal(Object.keys(JSON.parse(h.file).artists).length, 2);
 }
 // IDB deadlines do not block uploads. Successful HTTP responses must still read back the same data.
 {
@@ -78,3 +83,18 @@ for (const bad of ['bad json', '[]', '{"options":{"savedAt":99999}}', JSON.strin
     assert.equal(JSON.parse(h.idb).options.savedAt, revision); h.store.detach(); assert.equal(h.events.size, 0);
 }
 console.log('PASS: backup recency/priority, corrupt-candidate rejection, settings fallback/recovery, bounded IDB/network, verified file writes, synchronous background snapshot, queued versions and listener cleanup.');
+// No blank write before load; merge new entries across clients and retain explicit deletions.
+{
+    const a = harness(), b = harness(); await a.store.commit({ immediate: true }); assert.equal(a.uploads.length, 0); assert.equal(a.local, undefined);
+    b.file = a.file; await a.store.loadData(); await b.store.loadData();
+    const added = M.ensureArtist(a.store.getData(), 'artist:from-a'); await a.store.commit({ immediate: true });
+    b.file = a.file; M.ensureArtist(b.store.getData(), 'artist:from-b'); await b.store.commit({ immediate: true });
+    assert.equal(Object.keys(JSON.parse(b.file).artists).length, 3);
+    a.file = b.file; delete a.store.getData().artists[added.id]; await a.store.commit({ immediate: true });
+    assert(!JSON.parse(a.file).artists[added.id]);
+    b.file = a.file; M.ensureArtist(b.store.getData(), 'artist:later'); await b.store.commit({ immediate: true });
+    assert(!JSON.parse(b.file).artists[added.id]); assert.equal(Object.keys(JSON.parse(b.file).artists).length, 3);
+    const file = b.file, report = await b.store.diagnose(); assert.match(report, /读写检查正常/);
+    assert.equal(Object.keys(b.probes).length, 0); assert.equal(b.file, file);
+}
+console.log('PASS: no pre-load writes, cross-client additions, deletion propagation, diagnosis read/write/cleanup without changing the library.');

@@ -7,7 +7,7 @@ export function applyCharacterAlbumCompatibility(s) {
         assert(i >= 0 && j > i, start);
         s = s.slice(0, i) + body + s.slice(j);
     };
-    patch("case 'openchar': ui.charKey =", "case 'openchar': ui.charTestRun = null; ui.charTestResult = null; if (ui.charBusy === 'test') ui.charBusy = ''; ui.charKey =");
+    patch("case 'openchar': ui.charKey =", "case 'openchar': ui.charTestRun = null; ui.charBgRun = null; ui.charTestResult = null; ui.charTestOrig = null; ui.charTestCut = null; if (['test', 'bg'].includes(ui.charBusy)) ui.charBusy = ''; ui.charKey =");
     // Keep images bound to their owner even when entering a character through another route.
     patch('function viewCharEdit(d) {', `function charTestResult(c) {
     const r = ui.charTestResult;
@@ -60,17 +60,55 @@ function viewCharEdit(d) {`);
             const current = () => !stopped && getData() === d && d.characters[c.key] === registered && C.getChar(c.key) && ui.charKey === c.key && C.chatId() === chat && ui.charTestRun === run;
             ui.charTestRun = run; ui.charBusy = 'test'; render();`);
     patch("const nsfw = ui.charTestRating === 'nsfw', shot = ui.charTestShot || 'upper';", "const nsfw = ui.charTestRating === 'nsfw', shot = ['portrait', 'upper', 'full'].includes(ui.charTestShot) ? ui.charTestShot : 'upper';");
+    patch(".filter(x => !CUT.test(x.text.trim()))", ".filter(x => x.isArtist || !CUT.test(x.text.trim()))");
     patch(`                ui.charTestImg = await E.generateFull({ positive, negative, width: W[0], height: W[1], director: c.charRef ? await E.charRefs([c.charRef]) : undefined });
                 ui.charTestNsfw = nsfw;
+                ui.charTestOrig = white ? ui.charTestImg : null; ui.charTestCut = null;
+                if (white) { try { ui.charTestCut = await cutWhiteBg(ui.charTestImg); ui.charTestImg = ui.charTestCut; } catch (e) { console.warn('[智库] 抠图', e); } }
             } catch (e) { toastr.error(e.message, '生成失败'); }
             ui.charBusy = ''; render();`, `                const director = c.charRef ? await E.charRefs([c.charRef]) : undefined;
                 if (!current()) return true;
                 const image = await E.generateFull({ positive, negative, width: W[0], height: W[1], director });
                 if (!current()) return true;
-                ui.charTestImg = image; ui.charTestNsfw = nsfw;
-                ui.charTestResult = { key: c.key, data: d, image, nsfw };
+                let cutout = null;
+                if (white) { try { cutout = await cutWhiteBg(image); } catch (e) { console.warn('[智库] 抠图', e); } }
+                if (!current()) return true;
+                ui.charTestOrig = white ? image : null; ui.charTestCut = cutout;
+                ui.charTestImg = cutout || image; ui.charTestNsfw = nsfw;
+                ui.charTestResult = { key: c.key, data: d, image: ui.charTestImg, nsfw };
             } catch (e) { if (current()) toastr.error(e.message, '生成失败'); }
             finally { if (ui.charTestRun === run) { ui.charTestRun = null; ui.charBusy = ''; } if (!stopped) render(); }`);
+    replaceBlock("        case 'charbg': {", "        case 'charkeep': {", "        case 'charbg': await changeCharBackground(el.dataset.w); return true;\n");
+    replaceBlock("    if (el.dataset?.charbgfile !== undefined) {", "    if (el.dataset?.actChange", `    if (el.dataset?.charbgfile !== undefined) {
+        const f = el.files?.[0]; el.value = ''; if (f) await changeCharBackground('file', f); return;
+    }
+`);
+    patch('function zkLoadImg(src) {', `async function changeCharBackground(mode, file) {
+    const c = C.getChar(ui.charKey), d = getData(), result = charTestResult(c), cut = ui.charTestCut;
+    if (!result || ui.charBusy || ui.charKeepBusy) return;
+    const setImage = image => { ui.charTestImg = image; ui.charTestResult = { ...result, image }; };
+    if (mode === 'orig' || mode === 'cut') { const image = mode === 'orig' ? ui.charTestOrig : cut; if (image) { setImage(image); render(); } return; }
+    if (!cut || !['gen', 'file'].includes(mode)) return;
+    if (mode === 'gen' && !N.isReady()) { toastr.warning('先到设置里填生图接口', '角色'); return; }
+    const registered = d.characters[c.key], run = {}, prompt = String(ui.charBgQ || '').trim() || 'indoors';
+    const artist = d.active ? M.ticketString(d, d.active) : '';
+    const current = () => !stopped && getData() === d && d.characters[c.key] === registered && ui.charKey === c.key && charTestResult(c) === result && ui.charBgRun === run;
+    ui.charBgRun = run; ui.charBusy = 'bg'; render();
+    try {
+        let bg;
+        if (mode === 'file') bg = await shrinkDataUrl(await fileToDataUrl(file), 2048, 0.92);
+        else {
+            const im = await zkLoadImg(cut); if (!current()) return;
+            const { positive, negative } = E.composeStudio({ pos: M.mergeTags(artist, 'no humans, scenery', prompt) });
+            bg = await E.generateFull({ positive, negative, width: im.naturalWidth, height: im.naturalHeight, director: null, noVibe: true });
+        }
+        if (!current()) return;
+        const image = await putOnBg(cut, bg); if (current()) setImage(image);
+    } catch (e) { if (current()) toastr.error(e.message, '换背景失败'); }
+    finally { if (ui.charBgRun === run) { ui.charBgRun = null; ui.charBusy = ''; } if (!stopped) render(); }
+}
+function zkLoadImg(src) {`);
+    patch('async function generateFull({ positive, negative, chars = [], width, height, director, backend, i2i }) {\n    return run({ positive, negative, chars, width, height, director, backend, i2i });', 'async function generateFull({ positive, negative, chars = [], width, height, director, backend, i2i, noVibe = false }) {\n    return run({ positive, negative, chars, width, height, director, backend, i2i, noVibe });');
     // A selected source may have been edited. Only an exact saved prompt can be activated.
     patch('function viewStudio(d) {', `function studioSavedRef(d) {
     const st = ui.studio, norm = v => M.tokenize(String(v || '')).map(t => t.text.toLowerCase() + '@' + t.weight).sort().join('|');

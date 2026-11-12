@@ -2355,6 +2355,37 @@ function utf8ToBase64(str) {
 const EXT_KEY = 'zhiku_data_backup';
 const savedAt = raw => { const n = Number(raw?.options?.savedAt); return Number.isFinite(n) && n > 0 ? n : 0; };
 let fileOk = false;
+let lastSave = null, loadInfo = null, observed = null;
+// Merge newly added library entries while keeping explicit deletions across clients.
+const LIBRARY_MAPS = ['artists', 'groups', 'collections', 'characters', 'outfits', 'vibeGroups', 'charRefGroups', 'blacklist', 'bindings', 'chatCast'];
+function recordLibraryDeletes(data, before) {
+    const deleted = (data.options.libraryDeleted ||= {});
+    for (const key of LIBRARY_MAPS) {
+        for (const id of Object.keys(before?.[key] || {})) if (!Object.hasOwn(data[key] || {}, id)) (deleted[key] ||= {})[id] = data.options.savedAt;
+        for (const id of Object.keys(data[key] || {})) if (deleted[key]?.[id]) delete deleted[key][id];
+    }
+}
+function mergeLibraryAdditions(data, other) {
+    if (!other) return 0;
+    const deleted = (data.options.libraryDeleted ||= {});
+    let added = 0;
+    for (const key of LIBRARY_MAPS) {
+        const target = data[key] ||= {};
+        for (const [id, at] of Object.entries(other.options?.libraryDeleted?.[key] || {})) {
+            if (!Number.isFinite(Number(at)) || Number(at) <= 0) continue;
+            (deleted[key] ||= {})[id] = Math.max(Number(deleted[key]?.[id]) || 0, Number(at));
+        }
+        for (const id of Object.keys(deleted[key] || {})) delete target[id];
+        for (const [id, item] of Object.entries(other[key] || {})) {
+            if (['__proto__', 'prototype', 'constructor'].includes(id) || deleted[key]?.[id] || Object.hasOwn(target, id)) continue;
+            target[id] = structuredClone(item); added++;
+        }
+    }
+    // A newly merged group must never resurrect an explicitly deleted artist.
+    for (const group of Object.values(data.groups || {})) if (Array.isArray(group.members)) group.members = group.members.filter(m => data.artists[m.artistId]);
+    return added;
+}
+
 let idbSaving = Promise.resolve();
 // Reject error payloads, arrays and broken libraries before they can outrank a good backup.
 function backupData(value) {
@@ -2422,7 +2453,10 @@ async function loadData() {
     let best = null;
     for (const candidate of found) if (!best || savedAt(candidate[1]) > savedAt(best[1])) best = candidate;
     data = normalizeData(best ? structuredClone(best[1]) : null);
+    if (server && best?.[0] !== 'file') mergeLibraryAdditions(data, server);
     loadedFromServer = true; fileOk = serverOk;
+    observed = structuredClone(data);
+    loadInfo = { at: Date.now(), from: best ? best[0] : 'empty', found: found.map(f => [f[0], savedAt(f[1])]) };
     if (!serverOk) toastr.warning('这个酒馆读不到智库的数据文件，画师库改存在酒馆设置和浏览器里。', '智库', { timeOut: 5000 });
     emit();
     if (best && best[0] !== 'file' && (!server || savedAt(best[1]) > savedAt(server))) commit({ immediate: true, silent: true });
@@ -2438,17 +2472,29 @@ function snapshotData() {
     return json;
 }
 async function writeNow(json) {
-    const quiet = !fileOk;
-    try { await tryFile(json); }
-    catch (e) { fileOk = false; saveExt(JSON.parse(json)); if (!quiet) throw e; }
+    if (!loadedFromServer) return;
+    if (!fileOk) { saveExt(JSON.parse(snapshotData())); lastSave = { at: Date.now(), ok: true, backup: true }; return; }
+    let body = json;
+    try {
+        const save = async () => {
+            const res = await fileRequest(`/user/files/${DATA_FILE}?t=${Date.now()}`, { cache: 'no-store' });
+            const remote = res.ok && backupData(res.text);
+            if (res.status !== 404 && !remote) throw new Error('保存前读不到数据文件，已保留备份，未覆盖文件');
+            const target = JSON.parse(json), added = mergeLibraryAdditions(target, remote);
+            target.options.savedAt = Math.max(savedAt(target), savedAt(remote) + 1);
+            body = JSON.stringify(target);
+            const before = JSON.stringify(data), visibleAdded = mergeLibraryAdditions(data, remote);
+            if (savedAt(data) <= savedAt(JSON.parse(json))) data.options.savedAt = target.options.savedAt;
+            observed = structuredClone(data); snapshotData();
+            if (visibleAdded) toastr.info(`已并入其它设备或页面新增的 ${visibleAdded} 项`, '智库');
+            if (JSON.stringify(data) !== before) emit();
+            await tryFile(body);
+        };
+        if (globalThis.navigator?.locks?.request) await navigator.locks.request('zhiku-library-save', save); else await save();
+        lastSave = { at: Date.now(), ok: true };
+    } catch (e) { fileOk = false; saveExt(JSON.parse(snapshotData())); lastSave = { at: Date.now(), ok: false, err: e.message }; throw e; }
 }
 async function tryFile(json) {
-    if (!fileOk) {
-        const probe = await fileRequest(`/user/files/${DATA_FILE}?t=${Date.now()}`, { cache: 'no-store' });
-        const existing = probe.ok && backupData(probe.text);
-        if (probe.status !== 404 && !existing) throw new Error('数据文件仍不可读，保留备份，暂不覆盖服务器文件');
-        if (existing && savedAt(existing) > savedAt(JSON.parse(json))) throw new Error('服务器已有更新的画师库，保留本地备份，请重新打开智库读取');
-    }
     const res = await fileRequest('/api/files/upload', { method: 'POST', headers: headers(), body: JSON.stringify({ name: DATA_FILE, data: utf8ToBase64(json) }) });
     if (!res.ok) throw new Error(`保存失败 HTTP ${res.status}`);
     // A mobile bridge may return HTTP 200 with an HTML page: verify the saved contents.
@@ -2461,7 +2507,9 @@ async function tryFile(json) {
 
 /** 改完数据调用：立刻通知界面，稍后写到服务器 */
 function commit({ immediate = false, silent = false } = {}) {
+    if (!loadedFromServer) return saving;
     data.options = { ...(data.options || {}), savedAt: Math.max(Date.now(), savedAt(data) + 1) };
+    recordLibraryDeletes(data, observed); observed = structuredClone(data);
     if (!silent) emit();
     clearTimeout(saveTimer);
     const run = () => {
@@ -2551,7 +2599,44 @@ async function shrinkDataUrl(dataUrl, maxSide = 1024, quality = 0.88) {
     return c.toDataURL('image/jpeg', quality);
 }
 
-return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, detach, flush: async () => { if (saveTimer !== null) commit({ immediate: true, silent: true }); await saving; await idbSaving; } };
+/** 「检查画师库存档」：读一遍每份存档，试写一个小文件，报告给用户截图 */
+let diagnosis = null;
+function diagnose() { if (!diagnosis) diagnosis = diagnoseStorage().finally(() => { diagnosis = null; }); return diagnosis; }
+async function diagnoseStorage() {
+    const fmt = t => t ? new Date(t).toLocaleString() : '没有时间';
+    const cnt = value => { const r = backupData(value); return r ? `画师 ${Object.keys(r.artists).length} · 画师串 ${Object.keys(r.groups).length} · 存于 ${fmt(savedAt(r))}` : '没有有效数据'; };
+    const L = [`智库 ${globalThis.__PC_VERSION || ''}`, `【现在用的】${cnt(data)}`, `打开时来源：${{ file: '数据文件', ext: '酒馆设置', idb: 'IndexedDB', local: 'localStorage', empty: '空的' }[loadInfo?.from] || '尚未读取'}`], bad = [];
+    L.push(`文件可写：${fileOk ? '是' : '否（本次只存备份）'} · 上次保存：${lastSave ? lastSave.backup ? '仅备份' : lastSave.ok ? '成功' : '失败：' + lastSave.err : '还没保存'}${saveTimer !== null ? ' · 有改动待保存' : ''}`);
+    if (!loadedFromServer) bad.push('存档尚未读取完成');
+    try {
+        const r = await fileRequest(`/user/files/${DATA_FILE}?t=${Date.now()}`, { cache: 'no-store' });
+        const file = r.ok && backupData(r.text); L.push(`【数据文件】HTTP ${r.status} · ${cnt(file)}`);
+        if (!file) bad.push(r.status === 404 ? '数据文件不存在' : '数据文件不可读');
+        else if (savedAt(file) < savedAt(data)) bad.push('数据文件比当前数据旧');
+    } catch (e) { L.push('【数据文件】' + e.message); bad.push('读取失败'); }
+    const token = Math.random().toString(36).slice(2), probe = `zhiku_probe_${Date.now()}_${token}.json`;
+    let attempted = false;
+    try {
+        attempted = true;
+        const up = await fileRequest('/api/files/upload', { method: 'POST', headers: headers(), body: JSON.stringify({ name: probe, data: utf8ToBase64(JSON.stringify({ token })) }) });
+        if (!up.ok) throw new Error(`上传 HTTP ${up.status}`);
+        const read = await fileRequest(`/user/files/${probe}?t=${Date.now()}`, { cache: 'no-store' });
+        if (!read.ok || JSON.parse(read.text)?.token !== token) throw new Error('读回内容不一致');
+        L.push('【试写小文件】上传并读回一致');
+    } catch (e) { L.push('【试写小文件】' + e.message); bad.push('试写失败'); }
+    finally {
+        if (attempted) try {
+            const del = await fileRequest('/api/files/delete', { method: 'POST', headers: headers(), body: JSON.stringify({ path: `user/files/${probe}` }) });
+            if (!del.ok && del.status !== 404) throw new Error('清理失败');
+        } catch { L.push(`测试文件未清理：user/files/${probe}`); bad.push('测试文件清理失败'); }
+    }
+    L.push(`【酒馆设置备份】${cnt(extSettings()?.[EXT_KEY])}`);
+    L.push(`【IndexedDB】${cnt(await idbGet('data'))}`);
+    try { L.push(`【localStorage】${cnt(localStorage.getItem(LOCAL_BACKUP))}`); } catch { L.push('【localStorage】不可用'); }
+    L.push(`【结论】${bad.length ? bad.join('；') : '读写检查正常'}`);
+    return L.join('\n');
+}
+return { diagnose, getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, detach, flush: async () => { if (saveTimer !== null) commit({ immediate: true, silent: true }); await saving; await idbSaving; } };
 })();
 
 // ───── lobby.js ─────
@@ -3605,8 +3690,8 @@ async function generate({ pos, neg, scene = '', width, height, i2i }) {
 }
 
 /** 已经拼好的提示词（聊天生图用，可带分角色） */
-async function generateFull({ positive, negative, chars = [], width, height, director, backend, i2i }) {
-    return run({ positive, negative, chars, width, height, director, backend, i2i });
+async function generateFull({ positive, negative, chars = [], width, height, director, backend, i2i, noVibe = false }) {
+    return run({ positive, negative, chars, width, height, director, backend, i2i, noVibe });
 }
 
 /** 生成一张例图：画师串 + 例图模板（不带氛围和角色） */
@@ -7492,11 +7577,18 @@ function viewCharEdit(d) {
       <b>生成这个角色的图</b>
       <div class="pc-chips wrap pc-mt-s">${[['sfw', 'SFW'], ['nsfw', 'NSFW']].map(([k, t]) => `<button class="pc-pill tiny ${(ui.charTestRating || 'sfw') === k ? 'on' : 'dashed'} ${k === 'nsfw' ? 'nsfw' : ''}" data-act="chartestopt" data-k="rating" data-v="${k}">${t}</button>`).join('')}
         ${[['portrait', '头像'], ['upper', '半身'], ['full', '全身']].map(([k, t]) => `<button class="pc-pill tiny ${(ui.charTestShot || 'upper') === k ? 'on' : 'dashed'}" data-act="chartestopt" data-k="shot" data-v="${k}">${t}</button>`).join('')}</div>
-      <input class="pc-input pc-mt-s mono" data-chartestextra value="${esc(ui.charTestExtra || '')}" placeholder="想加的动作、表情、场景（可不填）">
+      <div class="pc-chips wrap pc-mt-s"><span class="pc-dim small" style="align-self:center">背景</span>${[['white', '白底（自动抠图，再换背景）'], ['scene', '直接画背景']].map(([k, t]) => `<button class="pc-pill tiny ${(ui.charTestBg || 'white') === k ? 'on' : 'dashed'}" data-act="chartestopt" data-k="bg" data-v="${k}">${t}</button>`).join('')}</div>
+      <input class="pc-input pc-mt-s mono" data-chartestextra value="${esc(ui.charTestExtra || '')}" placeholder="${(ui.charTestBg || 'white') === 'white' ? '动作、表情（可不填）' : '动作、表情、场景，比如 classroom, sitting on desk'}">
       <div class="pc-center pc-mt-s"><button class="pc-btn dark" data-act="chartest" ${busy ? 'disabled' : ''}>${busy === 'test' ? '<span class="pc-busy">生成中</span>' : `用${esc(c.name)}生成一张`}</button></div>
       ${(c.photos || []).length ? `<div class="pc-dim small pc-mt-s">${esc(c.name)}的相册 · 点图看大图</div><div class="pc-hscroll pc-mt-s">${c.photos.map((ph, i) => `<div style="position:relative;flex:none"><img src="${esc(imgUrl({ path: ph.path }))}" style="width:86px;height:116px;object-fit:cover;object-position:50% 10%;border-radius:12px;cursor:zoom-in" data-act="viewimg" data-src="${esc(imgUrl({ path: ph.path }))}" alt=""><div class="pc-chips" style="margin:4px 0 0;gap:4px"><button class="pc-pill tiny dashed" data-act="charphotoavatar" data-i="${i}">头像</button><button class="pc-pill tiny dashed" data-act="charphotodel" data-i="${i}">×</button></div>${ph.nsfw ? '<span style="position:absolute;top:5px;left:5px;padding:0 6px;border-radius:999px;background:rgba(168,74,62,.9);color:#fff;font-size:10px;line-height:16px">NSFW</span>' : ''}</div>`).join('')}</div>` : ''}
     </section>
-    ${charTestResult(c) ? `<section class="pc-card pc-mt pc-result"><img src="${esc(ui.charTestImg)}" alt="" data-act="viewimg" data-src="${esc(ui.charTestImg)}">
+    ${charTestResult(c) ? `<section class="pc-card pc-mt pc-result"><img src="${esc(ui.charTestImg)}" alt="" data-act="viewimg" data-src="${esc(ui.charTestImg)}" ${ui.charTestCut && ui.charTestImg === ui.charTestCut ? 'style="background:repeating-conic-gradient(rgba(120,110,95,.16) 0 25%,transparent 0 50%) 0 0/18px 18px"' : ''}>
+      ${ui.charTestOrig ? `<div class="pc-pad" style="padding-bottom:0">
+        <div class="pc-row-between"><b>换背景</b><span class="pc-chips" style="margin:0">${ui.charTestImg !== ui.charTestCut && ui.charTestCut ? '<button class="pc-pill tiny dashed" data-act="charbg" data-w="cut">去掉背景</button>' : ''}${ui.charTestImg !== ui.charTestOrig ? '<button class="pc-pill tiny dashed" data-act="charbg" data-w="orig">还原白底</button>' : ''}</span></div>
+        <div class="pc-dim small pc-mt-s">${ui.charTestCut ? '白底已经自动抠掉了。抠得不干净（白衣服贴着边被吃掉）就点「还原白底」。' : '抠图失败，用的是原图'}</div>
+        <input class="pc-input pc-mt-s mono" data-charbgq value="${esc(ui.charBgQ || '')}" placeholder="背景写什么，比如 classroom, window, sunset">
+        <div class="pc-actions wrap pc-mt-s"><button class="pc-btn dark" data-act="charbg" data-w="gen" ${busy || !ui.charTestCut ? 'disabled' : ''}>${busy === 'bg' ? '<span class="pc-busy">画背景中</span>' : '用正文画师串画背景'}</button><label class="pc-btn" style="cursor:pointer;${ui.charTestCut ? '' : 'opacity:.5;pointer-events:none'}">从手机选背景图<input type="file" accept="image/*" data-charbgfile hidden></label></div>
+      </div>` : ''}
       <div class="pc-actions wrap" style="padding:10px"><button class="pc-btn" data-act="charkeep" data-w="photo" ${busy ? 'disabled' : ''}>存进相册</button><button class="pc-btn" data-act="charkeep" data-w="avatar" ${busy ? 'disabled' : ''}>设为头像</button><button class="pc-btn" data-act="charkeep" data-w="ref" ${busy ? 'disabled' : ''}>加进角色参考图</button></div></section>` : ''}
     <div class="pc-center pc-mt"><button class="pc-pill dashed" data-act="sharechar">分享这个角色</button></div>
     ${c.kind === 'side' || c.kind === 'free' ? `<div class="pc-center pc-mt"><button class="pc-pill dashed danger" data-act="delside">删除这个角色</button></div>` : ''}
@@ -7507,7 +7599,7 @@ async function charAction(act, el) {
     const c = C.getChar(ui.charKey);
     const d = getData();
     switch (act) {
-        case 'openchar': ui.charTestRun = null; ui.charTestResult = null; if (ui.charBusy === 'test') ui.charBusy = ''; ui.charKey = el.dataset.key; ui.view = 'charedit'; ui.charTestImg = ''; ui.outTestImg = ''; render(); root.querySelector('.pc-body')?.scrollTo(0, 0); return true;
+        case 'openchar': ui.charTestRun = null; ui.charBgRun = null; ui.charTestResult = null; ui.charTestOrig = null; ui.charTestCut = null; if (['test', 'bg'].includes(ui.charBusy)) ui.charBusy = ''; ui.charKey = el.dataset.key; ui.view = 'charedit'; ui.charTestImg = ''; ui.outTestImg = ''; render(); root.querySelector('.pc-body')?.scrollTo(0, 0); return true;
         case 'casttab': ui.castTab = el.dataset.tab; render(); return true;
         case 'castpreview': ui.castPreview = !ui.castPreview; render(); return true;
         case 'outdesign': openOutfitDesigner(); return true;
@@ -7869,7 +7961,8 @@ async function charAction(act, el) {
             C.deleteChar(c.key); ui.view = 'cast'; render();
             return true;
         }
-        case 'chartestopt': ui[el.dataset.k === 'rating' ? 'charTestRating' : 'charTestShot'] = el.dataset.v; render(); return true;
+        case 'chartestopt': ui[{ rating: 'charTestRating', shot: 'charTestShot', bg: 'charTestBg' }[el.dataset.k]] = el.dataset.v; render(); return true;
+        case 'charbg': await changeCharBackground(el.dataset.w); return true;
         case 'charkeep': {
             const result = charTestResult(c), mode = el.dataset.w;
             if (!result || ui.charKeepBusy || ui.charBusy || !['photo', 'avatar', 'ref'].includes(mode)) return true;
@@ -7912,17 +8005,27 @@ async function charAction(act, el) {
             ui.charTestRun = run; ui.charBusy = 'test'; render();
             try {
                 const nsfw = ui.charTestRating === 'nsfw', shot = ['portrait', 'upper', 'full'].includes(ui.charTestShot) ? ui.charTestShot : 'upper';
-                const SHOT = { portrait: 'portrait, upper body, close-up, looking at viewer', upper: 'upper body, looking at viewer', full: 'full body, looking at viewer' + (ui.charTestExtra ? '' : ', standing') };
-                // NSFW 正面加 adult；负面不动
-                const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', nsfw ? 'nsfw, adult' : '', C.fixedTags(c, { nsfw }), 'solo', SHOT[shot], ui.charTestExtra || '', 'simple background');
+                const extra = String(ui.charTestExtra || '').trim();
+                const SHOT = { portrait: '1.4::portrait::, close-up, upper body, looking at viewer', upper: '1.4::upper body::, looking at viewer', full: '1.2::full body::, looking at viewer' + (extra ? '' : ', standing') };
+                // 半身 / 头像：去掉会把人拉成全身的词（鞋袜腿、全身、站着）；全身：去掉半身特写的词
+                const CUT = shot === 'full' ? /^(upper body|portrait|close-up|cowboy shot|bust)$/i
+                    : /^(full body|standing|feet|barefoot|wide shot|very wide shot)$|\b(shoes|boots|loafers|sneakers|heels|sandals|slippers|socks|kneehighs|thighhighs|pantyhose|legwear|footwear|leggings)\b/i;
+                const cut = t => M.tokenize(t || '').filter(x => x.isArtist || !CUT.test(x.text.trim())).map(x => x.raw || (Math.abs(x.weight - 1) < 0.001 ? x.text : `${M.fmtWeight(x.weight)}::${x.text}::`)).join(', ');
+                // NSFW 正面加 adult；负面不动。填了动作 / 场景 / 背景就不加白底
+                const white = (ui.charTestBg || 'white') === 'white';
+                const pos = M.mergeTags(cut(d.active ? M.ticketString(d, d.active) : ''), nsfw ? 'nsfw, adult' : '', cut(C.fixedTags(c, { nsfw })), 'solo', SHOT[shot], extra, white ? 'simple background, white background' : '');
                 const { positive, negative } = E.composeStudio({ pos, neg: c.negative });
-                const W = { portrait: [1024, 1024], upper: [832, 1216], full: [768, 1344] }[shot];
+                const W = { portrait: [1024, 1024], upper: [896, 1152], full: [768, 1344] }[shot];
                 const director = c.charRef ? await E.charRefs([c.charRef]) : undefined;
                 if (!current()) return true;
                 const image = await E.generateFull({ positive, negative, width: W[0], height: W[1], director });
                 if (!current()) return true;
-                ui.charTestImg = image; ui.charTestNsfw = nsfw;
-                ui.charTestResult = { key: c.key, data: d, image, nsfw };
+                let cutout = null;
+                if (white) { try { cutout = await cutWhiteBg(image); } catch (e) { console.warn('[智库] 抠图', e); } }
+                if (!current()) return true;
+                ui.charTestOrig = white ? image : null; ui.charTestCut = cutout;
+                ui.charTestImg = cutout || image; ui.charTestNsfw = nsfw;
+                ui.charTestResult = { key: c.key, data: d, image: ui.charTestImg, nsfw };
             } catch (e) { if (current()) toastr.error(e.message, '生成失败'); }
             finally { if (ui.charTestRun === run) { ui.charTestRun = null; ui.charBusy = ''; } if (!stopped) render(); }
             return true;
@@ -8073,6 +8176,78 @@ async function crMenu(id) {
 }
 
 /** 角色参考图要缩放到 NovelAI 认的三种尺寸之一 */
+async function changeCharBackground(mode, file) {
+    const c = C.getChar(ui.charKey), d = getData(), result = charTestResult(c), cut = ui.charTestCut;
+    if (!result || ui.charBusy || ui.charKeepBusy) return;
+    const setImage = image => { ui.charTestImg = image; ui.charTestResult = { ...result, image }; };
+    if (mode === 'orig' || mode === 'cut') { const image = mode === 'orig' ? ui.charTestOrig : cut; if (image) { setImage(image); render(); } return; }
+    if (!cut || !['gen', 'file'].includes(mode)) return;
+    if (mode === 'gen' && !N.isReady()) { toastr.warning('先到设置里填生图接口', '角色'); return; }
+    const registered = d.characters[c.key], run = {}, prompt = String(ui.charBgQ || '').trim() || 'indoors';
+    const artist = d.active ? M.ticketString(d, d.active) : '';
+    const current = () => !stopped && getData() === d && d.characters[c.key] === registered && ui.charKey === c.key && charTestResult(c) === result && ui.charBgRun === run;
+    ui.charBgRun = run; ui.charBusy = 'bg'; render();
+    try {
+        let bg;
+        if (mode === 'file') bg = await shrinkDataUrl(await fileToDataUrl(file), 2048, 0.92);
+        else {
+            const im = await zkLoadImg(cut); if (!current()) return;
+            const { positive, negative } = E.composeStudio({ pos: M.mergeTags(artist, 'no humans, scenery', prompt) });
+            bg = await E.generateFull({ positive, negative, width: im.naturalWidth, height: im.naturalHeight, director: null, noVibe: true });
+        }
+        if (!current()) return;
+        const image = await putOnBg(cut, bg); if (current()) setImage(image);
+    } catch (e) { if (current()) toastr.error(e.message, '换背景失败'); }
+    finally { if (ui.charBgRun === run) { ui.charBgRun = null; ui.charBusy = ''; } if (!stopped) render(); }
+}
+function zkLoadImg(src) { return new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => bad(new Error('图片打不开')); i.src = src; }); }
+/** 白底图本地抠图：从四边把连着的背景色去掉，边缘按和背景的差别做半透明并去掉白边。不花点数 */
+async function cutWhiteBg(src, tol = 26) {
+    const img = await zkLoadImg(src);
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const cv = DOC.createElement('canvas'); cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d', { willReadFrequently: true }); ctx.drawImage(img, 0, 0);
+    const id = ctx.getImageData(0, 0, w, h), p = id.data;
+    const border = [];
+    for (let x = 0; x < w; x += 3) border.push(x * 4, ((h - 1) * w + x) * 4);
+    for (let y = 0; y < h; y += 3) border.push(y * w * 4, (y * w + w - 1) * 4);
+    const med = k => { const a = border.map(i => p[i + k]).sort((m, n) => m - n); return a[a.length >> 1]; };
+    const bg = [med(0), med(1), med(2)];
+    if (Math.min(...bg) < 200) throw new Error('四边不是白底');
+    const dist = i => Math.max(Math.abs(p[i] - bg[0]), Math.abs(p[i + 1] - bg[1]), Math.abs(p[i + 2] - bg[2]));
+    const mask = new Uint8Array(w * h), stack = [];
+    const push = j => { if (mask[j] || dist(j * 4) > tol) return; mask[j] = 1; stack.push(j); };
+    for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+    for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+    while (stack.length) { const j = stack.pop(), x = j % w; if (x > 0) push(j - 1); if (x < w - 1) push(j + 1); if (j >= w) push(j - w); if (j < w * (h - 1)) push(j + w); }
+    let kept = 0;
+    for (let j = 0; j < w * h; j++) {
+        const i = j * 4;
+        if (mask[j]) { p[i + 3] = 0; continue; }
+        kept++;
+        const x = j % w;
+        const edge = (x > 0 && mask[j - 1]) || (x < w - 1 && mask[j + 1]) || (j >= w && mask[j - w]) || (j < w * (h - 1) && mask[j + w]);
+        if (!edge) continue;
+        const a = Math.min(1, dist(i) / (tol * 3));
+        if (a <= 0.02) { p[i + 3] = 0; continue; }
+        for (let k = 0; k < 3; k++) p[i + k] = Math.max(0, Math.min(255, Math.round((p[i + k] - bg[k] * (1 - a)) / a)));
+        p[i + 3] = Math.round(a * 255);
+    }
+    if (kept < w * h * 0.02) throw new Error('抠完几乎没剩东西');
+    ctx.putImageData(id, 0, 0);
+    return cv.toDataURL('image/png');
+}
+/** 抠好的人（透明 PNG）贴到背景上：背景铺满，尺寸跟人那张一样 */
+async function putOnBg(cutSrc, bgSrc) {
+    const fg = await zkLoadImg(cutSrc), bg = await zkLoadImg(bgSrc);
+    const w = fg.naturalWidth, h = fg.naturalHeight;
+    const cv = DOC.createElement('canvas'); cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d'); ctx.imageSmoothingQuality = 'high';
+    const k = Math.max(w / bg.naturalWidth, h / bg.naturalHeight), bw = bg.naturalWidth * k, bh = bg.naturalHeight * k;
+    ctx.drawImage(bg, (w - bw) / 2, (h - bh) / 2, bw, bh);
+    ctx.drawImage(fg, 0, 0);
+    return cv.toDataURL('image/png');
+}
 async function fitCharRef(dataUrl) {
     const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => bad(new Error('图片打不开')); i.src = dataUrl; });
     const r = img.width / img.height;
@@ -8617,6 +8792,7 @@ function viewSettings(d) {
         <button class="pc-btn" data-act="exportdata">导出</button>
         <label class="pc-btn">导入<input type="file" accept=".json,application/json" data-importdata hidden></label>
         <label class="pc-btn">导入画师串包<input type="file" accept=".json,application/json" multiple data-importpack hidden></label>
+        <button class="pc-btn" data-act="diagstore">检查画师库存档</button>
       </div>
       <div class="pc-hint">「导入画师串包」用来导入场外脚本 zhiku-artist-pack 生成的画师串和例图，只往画师库里加，不会替换现有的；可以一次选多个文件。</div>`);
 
@@ -9156,6 +9332,19 @@ async function onClick(ev, outside = false) {
                 break;
             }
             case 'exportdata': exportData(); break;
+            case 'diagstore': {
+                if (ui.diagBusy) break; ui.diagBusy = true;
+                toastr.info('正在检查…', '智库', { timeOut: 1500 });
+                let rep; try { rep = await __mod_store.diagnose(); } catch (e) { rep = '检查出错：' + e.message; } finally { ui.diagBusy = false; }
+                if (stopped) break;
+                const box = modal(`<h3 class="pc-h3">画师库存档</h3><pre class="mono" style="white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.6;max-height:60vh;overflow:auto;scrollbar-width:none;margin:0">${esc(rep)}</pre><div class="pc-hint">有问题就把这一页截图发给作者。</div><div class="pc-actions"><button class="pc-btn" data-m="copy">复制</button><button class="pc-btn dark" data-m="ok">好</button></div>`);
+                box.addEventListener('click', ev => {
+                    const m = ev.target.closest('[data-m]')?.dataset.m;
+                    if (m === 'copy') { Promise.resolve().then(() => { if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable'); return navigator.clipboard.writeText(rep); }).then(() => toastr.success('复制了', '智库'), () => toastr.warning('复制不了，截图吧', '智库')); }
+                    if (m === 'ok') box.closeModal();
+                });
+                break;
+            }
             case 'dlmarkpreview': {
                 const o = { ...dlOpts(), on: true };
                 if (!o.text) o.text = '水印示例';
@@ -9540,6 +9729,7 @@ function onInput(ev) {
     const el = ev.target;
     const d = getData();
     if (el.dataset.chartestextra !== undefined) { ui.charTestExtra = el.value; return; }
+    if (el.dataset.charbgq !== undefined) { ui.charBgQ = el.value; return; }
     if (el.dataset.outmodel !== undefined) { getData().options.outfitModel = el.value; commit({ silent: true }); return; }
     if (el.dataset.bsneg !== undefined) { d.options.batchSceneNeg = el.value; clearTimeout(onInput.bn); onInput.bn = setTimeout(() => commit({ silent: true }), 500); return; }
     if (el.dataset.ucpCustom !== undefined) { N.settings().UCP_custom = el.value; N.save(); updateStudioPreview(); return; }
@@ -9621,6 +9811,12 @@ async function importWardrobeImages(files) {
 async function onChangeEv(ev) {
     const el = ev.target;
     const d = getData();
+    // 角色生图的补充词：打完直接点生成时不重画，免得这一下点空
+    if (el.dataset?.chartestextra !== undefined) { ui.charTestExtra = el.value; return; }
+    if (el.dataset?.charbgq !== undefined) { ui.charBgQ = el.value; return; }
+    if (el.dataset?.charbgfile !== undefined) {
+        const f = el.files?.[0]; el.value = ''; if (f) await changeCharBackground('file', f); return;
+    }
     if (el.dataset?.actChange === 'cfywf') {
         const v = el.value;
         if (v.startsWith('file:')) return;

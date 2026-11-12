@@ -4037,7 +4037,7 @@ async function writeNow() {
     const json = JSON.stringify(data);
     try { localStorage.setItem(LOCAL_BACKUP, json); } catch { /* 太大就算了 */ }
     await idbSet('data', json);
-    if (!fileOk) { saveExt(JSON.parse(json)); await tryFile(json, true); return; }
+    if (!fileOk) { saveExt(JSON.parse(json)); return; }
     try { await tryFile(json, false); }
     catch (e) { saveExt(JSON.parse(json)); throw e; }
 }
@@ -4088,6 +4088,249 @@ patch(`    if (el.dataset.aqt !== undefined) {
         } catch (e) { console.warn('[智库]', e); }
         return;
     }`);
+// 0.8.38：存之前看数据文件有没有被别处改过（另一台设备、另一个页面），有就先把那边新加的并进来，不互相覆盖
+patch(`        if (res.status === 404) serverOk = true;
+        else if (res.ok) {`,`        if (res.status === 404) serverOk = true;
+        else if (res.ok) {
+            fileStamp = res.headers.get('etag') || res.headers.get('last-modified') || null;`);
+patch(`let fileOk = false;`,`let fileOk = false;
+let fileStamp = null; // 上次读 / 写数据文件时它的 ETag，用来发现别的设备或页面改过
+async function headStamp() {
+    try { const r = await fetch(\`/user/files/\${DATA_FILE}?t=\${Date.now()}\`, { method: 'HEAD', cache: 'no-store' }); if (!r.ok) return null; return r.headers.get('etag') || r.headers.get('last-modified') || null; }
+    catch { return null; }
+}
+const MERGE_SKIP = new Set(['options', 'lobby', 'templates', 'active', 'previousActive', 'beforeBinding', 'vibeActive', 'charRefActive']);
+const isMap = v => v && typeof v === 'object' && !Array.isArray(v);
+/** 数据文件被别处（另一台设备、另一个页面、旧版本）改过：把那边新加的画师、画师串、角色等并进来，再存，免得互相覆盖 */
+async function mergeFromFile() {
+    let other;
+    try { const r = await fetch(\`/user/files/\${DATA_FILE}?t=\${Date.now()}\`, { cache: 'no-store' }); if (!r.ok) return 0; other = JSON.parse(await r.text()); }
+    catch { return 0; }
+    let added = 0;
+    for (const [k, v] of Object.entries(other || {})) {
+        if (MERGE_SKIP.has(k) || !isMap(v) || !isMap(data[k])) continue;
+        for (const [id, item] of Object.entries(v)) if (!(id in data[k])) { data[k][id] = item; added++; }
+    }
+    // 画师串里的画师也要在
+    for (const g of Object.values(data.groups || {})) for (const m of g.members || []) if (m.artistId && !data.artists[m.artistId] && other.artists?.[m.artistId]) data.artists[m.artistId] = other.artists[m.artistId];
+    if (added) { toastr.info(\`别的设备或页面也改过画师库，已把那边新加的 \${added} 项并进来\`, '智库', { timeOut: 5000 }); emit(); }
+    return added;
+}`);
+patch(`    try { await tryFile(json, false); }
+    catch (e) { saveExt(JSON.parse(json)); throw e; }
+}`,`    let body = json;
+    if (fileStamp) {
+        const now = await headStamp();
+        if (now && now !== fileStamp && await mergeFromFile()) {
+            data.options = { ...(data.options || {}), savedAt: Date.now() };
+            body = JSON.stringify(data);
+            try { localStorage.setItem(LOCAL_BACKUP, body); } catch { /* 太大就算了 */ }
+            await idbSet('data', body);
+        }
+    }
+    try { await tryFile(body, false); fileStamp = await headStamp(); }
+    catch (e) { saveExt(JSON.parse(body)); throw e; }
+}`);
+// 0.8.38：角色生图半身 / 头像不再出全身（去掉鞋袜腿这类词、加重构图词）；填了场景就不加白底
+patch(`                const SHOT = { portrait: 'portrait, upper body, close-up, looking at viewer', upper: 'upper body, looking at viewer', full: 'full body, looking at viewer' + (ui.charTestExtra ? '' : ', standing') };
+                // NSFW 正面加 adult；负面不动
+                const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', nsfw ? 'nsfw, adult' : '', C.fixedTags(c, { nsfw }), 'solo', SHOT[shot], ui.charTestExtra || '', 'simple background');
+                const { positive, negative } = E.composeStudio({ pos, neg: c.negative });
+                const W = { portrait: [1024, 1024], upper: [832, 1216], full: [768, 1344] }[shot];`,`                const extra = String(ui.charTestExtra || '').trim();
+                const SHOT = { portrait: '1.4::portrait::, close-up, upper body, looking at viewer', upper: '1.4::upper body::, looking at viewer', full: '1.2::full body::, looking at viewer' + (extra ? '' : ', standing') };
+                // 半身 / 头像：去掉会把人拉成全身的词（鞋袜腿、全身、站着）；全身：去掉半身特写的词
+                const CUT = shot === 'full' ? /^(upper body|portrait|close-up|cowboy shot|bust)$/i
+                    : /^(full body|standing|feet|barefoot|wide shot|very wide shot)$|\\b(shoes|boots|loafers|sneakers|heels|sandals|slippers|socks|kneehighs|thighhighs|pantyhose|legwear|footwear|leggings)\\b/i;
+                const cut = t => M.tokenize(t || '').filter(x => !CUT.test(x.text.trim())).map(x => x.raw || (Math.abs(x.weight - 1) < 0.001 ? x.text : \`\${M.fmtWeight(x.weight)}::\${x.text}::\`)).join(', ');
+                // NSFW 正面加 adult；负面不动。填了动作 / 场景 / 背景就不加白底
+                const pos = M.mergeTags(cut(d.active ? M.ticketString(d, d.active) : ''), nsfw ? 'nsfw, adult' : '', cut(C.fixedTags(c, { nsfw })), 'solo', SHOT[shot], extra, extra ? '' : 'simple background');
+                const { positive, negative } = E.composeStudio({ pos, neg: c.negative });
+                const W = { portrait: [1024, 1024], upper: [896, 1152], full: [768, 1344] }[shot];`);
+patch(`placeholder="想加的动作、表情、场景（可不填）">`,`placeholder="动作、表情、场景、背景（可不填；填了就不用白底）">`);
+// 0.8.38：角色生图补充词输入框失焦时不重画
+patch(`async function onChangeEv(ev) {
+    const el = ev.target;
+    const d = getData();`,`async function onChangeEv(ev) {
+    const el = ev.target;
+    const d = getData();
+    // 角色生图的补充词：打完直接点生成时不重画，免得这一下点空
+    if (el.dataset?.chartestextra !== undefined) { ui.charTestExtra = el.value; return; }`);
+// 0.8.38：设置 → 数据 里加「检查画师库存档」；还没读到存档时不写
+patch(`async function writeNow() {
+    data.options = { ...(data.options || {}), savedAt: Date.now() };`,`let lastSave = null; // { at, ok, err } 给「检查画师库存档」看
+let loadInfo = null;
+async function writeNow() {
+    if (!loadedFromServer) return; // 还没读到存档，不写，免得空数据盖掉
+    try { await writeNowInner(); lastSave = { at: Date.now(), ok: true }; }
+    catch (e) { lastSave = { at: Date.now(), ok: false, err: e.message }; throw e; }
+}
+async function writeNowInner() {
+    data.options = { ...(data.options || {}), savedAt: Date.now() };`);
+patch(`    data = normalizeData(best ? best[1] : null);
+    loadedFromServer = true;
+    fileOk = serverOk;`,`    data = normalizeData(best ? best[1] : null);
+    loadedFromServer = true;
+    fileOk = serverOk;
+    loadInfo = { at: Date.now(), from: best ? best[0] : 'empty', found: found.map(f => [f[0], savedAt(f[1])]) };`);
+patch(`return { getData, onChange, loadData, commit, replaceData,`,`/** 「检查画师库存档」：读一遍每份存档，试写一个小文件，报告给用户截图 */
+async function diagnose() {
+    const fmt = t => t ? new Date(t).toLocaleString() : '没有时间';
+    const cnt = raw => raw && typeof raw === 'object' ? \`画师 \${Object.keys(raw.artists || {}).length} · 画师串 \${Object.keys(raw.groups || {}).length} · 存于 \${fmt(savedAt(raw))}\` : '';
+    const L = [], bad = [];
+    L.push(\`智库 \${globalThis.__PC_VERSION || ''} · \${navigator.userAgent.match(/\\((.*?)\\)/)?.[1] || ''}\`.slice(0, 160));
+    L.push(\`【现在用的】\${cnt(data)}\`);
+    L.push(\`  打开时用的是：\${{ file: '数据文件', ext: '酒馆设置备份', idb: '浏览器 IndexedDB', local: '浏览器 localStorage', empty: '空的（哪份都没读到）' }[loadInfo?.from] || '没记录'}\${loadInfo ? ' · ' + loadInfo.found.map(([k, t]) => \`\${k}=\${fmt(t)}\`).join('，') : ''}\`);
+    L.push(\`  文件能用：\${fileOk ? '是' : '否'} · 上次保存：\${lastSave ? \`\${fmt(lastSave.at)} \${lastSave.ok ? '成功' : '失败：' + lastSave.err}\` : '这次打开后还没存过'}\${saveTimer !== null ? ' · 有改动等着存' : ''}\`);
+    // 1 数据文件
+    try {
+        const r = await fetch(\`/user/files/\${DATA_FILE}?t=\${Date.now()}\`, { cache: 'no-store' });
+        const text = r.ok ? await r.text() : '';
+        let j = null; try { j = text ? JSON.parse(text) : null; } catch { /* 不是 json */ }
+        L.push(\`【数据文件】user/files/\${DATA_FILE}：HTTP \${r.status} · \${r.headers.get('content-type') || '?'} · \${(text.length / 1024).toFixed(0)}KB\${j ? ' · ' + cnt(j) : text ? ' · 读到的不是数据：' + text.slice(0, 40).replace(/\\s+/g, ' ') : ''}\`);
+        if (r.status === 404) bad.push('数据文件不存在（从没存成功过）');
+        else if (!j) bad.push('读不到数据文件');
+        else if (savedAt(j) < savedAt(data) - 5000) bad.push('数据文件比现在用的旧：保存没写进文件');
+    } catch (e) { L.push(\`【数据文件】读失败：\${e.message}\`); bad.push('读不到数据文件'); }
+    // 2 试写
+    const probe = \`zhiku_probe_\${Date.now()}.json\`, token = Math.random().toString(36).slice(2);
+    try {
+        const up = await fetch('/api/files/upload', { method: 'POST', headers: headers(), body: JSON.stringify({ name: probe, data: utf8ToBase64(JSON.stringify({ token })) }) });
+        const upText = await up.text().catch(() => '');
+        let back = '';
+        if (up.ok) { const r = await fetch(\`/user/files/\${probe}?t=\${Date.now()}\`, { cache: 'no-store' }); back = r.ok ? await r.text() : \`HTTP \${r.status}\`; }
+        const ok = up.ok && back.includes(token);
+        L.push(\`【试写小文件】上传 HTTP \${up.status}\${up.ok ? '' : ' ' + upText.slice(0, 80)} · 读回来\${ok ? '一致' : '不一致：' + String(back).slice(0, 60)}\`);
+        if (!ok) bad.push('写不进酒馆的 user/files');
+        if (up.ok) fetch('/api/files/delete', { method: 'POST', headers: headers(), body: JSON.stringify({ path: \`user/files/\${probe}\` }) }).catch(() => {});
+    } catch (e) { L.push(\`【试写小文件】失败：\${e.message}\`); bad.push('写不进酒馆的 user/files'); }
+    // 3 备份
+    const ext = extSettings()?.[EXT_KEY];
+    L.push(\`【酒馆设置备份】\${ext ? cnt(ext) : '没有'}\`);
+    const idb = await idbGet('data'); let ij = null; try { ij = idb ? (typeof idb === 'string' ? JSON.parse(idb) : idb) : null; } catch { /* 坏了 */ }
+    L.push(\`【IndexedDB】\${ij ? cnt(ij) : '没有'}\`);
+    let lj = null; try { const b = localStorage.getItem(LOCAL_BACKUP); lj = b ? JSON.parse(b) : null; } catch { /* 坏了 */ }
+    L.push(\`【localStorage】\${lj ? cnt(lj) : '没有（可能太大存不下）'}\`);
+    L.push(\`【结论】\${bad.length ? bad.join('；') : '读写都正常'}\`);
+    return L.join('\\n');
+}
+return { diagnose, getData, onChange, loadData, commit, replaceData,`);
+patch(`        <label class="pc-btn">导入画师串包<input type="file" accept=".json,application/json" multiple data-importpack hidden></label>
+      </div>`,`        <label class="pc-btn">导入画师串包<input type="file" accept=".json,application/json" multiple data-importpack hidden></label>
+        <button class="pc-btn" data-act="diagstore">检查画师库存档</button>
+      </div>`);
+patch(`            case 'exportdata': exportData(); break;`,`            case 'exportdata': exportData(); break;
+            case 'diagstore': {
+                toastr.info('正在检查…', '智库', { timeOut: 1500 });
+                let rep; try { rep = await __mod_store.diagnose(); } catch (e) { rep = '检查出错：' + e.message; }
+                const box = modal(\`<h3 class="pc-h3">画师库存档</h3><pre class="mono" style="white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.6;max-height:60vh;overflow:auto;scrollbar-width:none;margin:0">\${esc(rep)}</pre><div class="pc-hint">有问题就把这一页截图发给作者。</div><div class="pc-actions"><button class="pc-btn" data-m="copy">复制</button><button class="pc-btn dark" data-m="ok">好</button></div>\`);
+                box.addEventListener('click', ev => {
+                    const m = ev.target.closest('[data-m]')?.dataset.m;
+                    if (m === 'copy') { navigator.clipboard?.writeText(rep).then(() => toastr.success('复制了', '智库'), () => toastr.warning('复制不了，截图吧', '智库')); }
+                    if (m === 'ok') box.closeModal();
+                });
+                break;
+            }`);
+// 0.8.38：备份比文件新时先并入文件里多的再存，不拿备份整份盖文件
+patch(`    if (best && best[0] !== 'file' && (!server || savedAt(best[1]) > savedAt(server))) commit({ immediate: true, silent: true });`,`    if (best && best[0] !== 'file' && (!server || savedAt(best[1]) > savedAt(server))) {
+        // 备份比文件新，但文件里可能有备份没有的（别的设备加的、备份时没读到文件）：先把文件里多的并进来再存
+        if (server) for (const [k, v] of Object.entries(server)) {
+            if (MERGE_SKIP.has(k) || !isMap(v) || !isMap(data[k])) continue;
+            for (const [id, item] of Object.entries(v)) if (!(id in data[k])) data[k][id] = item;
+        }
+        commit({ immediate: true, silent: true });
+    }`);
+// 0.8.38：角色生图选白底时自动抠图，可以用正文画师串画一张纯背景或从手机选图贴上去
+patch(`data-k="shot" data-v="\${k}">\${t}</button>\`).join('')}</div>
+      <input class="pc-input pc-mt-s mono" data-chartestextra value="\${esc(ui.charTestExtra || '')}" placeholder="动作、表情、场景、背景（可不填；填了就不用白底）">`,`data-k="shot" data-v="\${k}">\${t}</button>\`).join('')}</div>
+      <div class="pc-chips wrap pc-mt-s"><span class="pc-dim small" style="align-self:center">背景</span>\${[['white', '白底（自动抠图，再换背景）'], ['scene', '直接画背景']].map(([k, t]) => \`<button class="pc-pill tiny \${(ui.charTestBg || 'white') === k ? 'on' : 'dashed'}" data-act="chartestopt" data-k="bg" data-v="\${k}">\${t}</button>\`).join('')}</div>
+      <input class="pc-input pc-mt-s mono" data-chartestextra value="\${esc(ui.charTestExtra || '')}" placeholder="\${(ui.charTestBg || 'white') === 'white' ? '动作、表情（可不填）' : '动作、表情、场景，比如 classroom, sitting on desk'}">`);
+patch(`    \${ui.charTestImg ? \`<section class="pc-card pc-mt pc-result"><img src="\${esc(ui.charTestImg)}" alt="" data-act="viewimg" data-src="\${esc(ui.charTestImg)}">`,`    \${ui.charTestImg ? \`<section class="pc-card pc-mt pc-result"><img src="\${esc(ui.charTestImg)}" alt="" data-act="viewimg" data-src="\${esc(ui.charTestImg)}" \${ui.charTestCut && ui.charTestImg === ui.charTestCut ? 'style="background:repeating-conic-gradient(rgba(120,110,95,.16) 0 25%,transparent 0 50%) 0 0/18px 18px"' : ''}>
+      \${ui.charTestOrig ? \`<div class="pc-pad" style="padding-bottom:0">
+        <div class="pc-row-between"><b>换背景</b><span class="pc-chips" style="margin:0">\${ui.charTestImg !== ui.charTestCut && ui.charTestCut ? '<button class="pc-pill tiny dashed" data-act="charbg" data-w="cut">去掉背景</button>' : ''}\${ui.charTestImg !== ui.charTestOrig ? '<button class="pc-pill tiny dashed" data-act="charbg" data-w="orig">还原白底</button>' : ''}</span></div>
+        <div class="pc-dim small pc-mt-s">\${ui.charTestCut ? '白底已经自动抠掉了。抠得不干净（白衣服贴着边被吃掉）就点「还原白底」。' : '抠图失败，用的是原图'}</div>
+        <input class="pc-input pc-mt-s mono" data-charbgq value="\${esc(ui.charBgQ || '')}" placeholder="背景写什么，比如 classroom, window, sunset">
+        <div class="pc-actions wrap pc-mt-s"><button class="pc-btn dark" data-act="charbg" data-w="gen" \${busy || !ui.charTestCut ? 'disabled' : ''}>\${busy === 'bg' ? '<span class="pc-busy">画背景中</span>' : '用正文画师串画背景'}</button><label class="pc-btn" style="cursor:pointer;\${ui.charTestCut ? '' : 'opacity:.5;pointer-events:none'}">从手机选背景图<input type="file" accept="image/*" data-charbgfile hidden></label></div>
+      </div>\` : ''}`);
+patch(`const pos = M.mergeTags(cut(d.active ? M.ticketString(d, d.active) : ''), nsfw ? 'nsfw, adult' : '', cut(C.fixedTags(c, { nsfw })), 'solo', SHOT[shot], extra, extra ? '' : 'simple background');`,`const white = (ui.charTestBg || 'white') === 'white';
+                const pos = M.mergeTags(cut(d.active ? M.ticketString(d, d.active) : ''), nsfw ? 'nsfw, adult' : '', cut(C.fixedTags(c, { nsfw })), 'solo', SHOT[shot], extra, white ? 'simple background, white background' : '');`);
+patch(`                ui.charTestNsfw = nsfw;`,`                ui.charTestNsfw = nsfw;
+                ui.charTestOrig = white ? ui.charTestImg : null; ui.charTestCut = null;
+                if (white) { try { ui.charTestCut = await cutWhiteBg(ui.charTestImg); ui.charTestImg = ui.charTestCut; } catch (e) { console.warn('[智库] 抠图', e); } }`);
+patch(`        case 'chartestopt': ui[el.dataset.k === 'rating' ? 'charTestRating' : 'charTestShot'] = el.dataset.v; render(); return true;`,`        case 'chartestopt': ui[{ rating: 'charTestRating', shot: 'charTestShot', bg: 'charTestBg' }[el.dataset.k]] = el.dataset.v; render(); return true;
+        case 'charbg': {
+            const w = el.dataset.w;
+            if (w === 'orig') { ui.charTestImg = ui.charTestOrig; render(); return true; }
+            if (w === 'cut') { ui.charTestImg = ui.charTestCut; render(); return true; }
+            if (!ui.charTestCut || !N.isReady()) { if (!N.isReady()) toastr.warning('先到设置里填 NovelAI key', '角色'); return true; }
+            ui.charBusy = 'bg'; render();
+            try {
+                const im = await zkLoadImg(ui.charTestCut);
+                const pos = M.mergeTags(d.active ? M.ticketString(d, d.active) : '', 'no humans, scenery', String(ui.charBgQ || '').trim() || 'indoors');
+                const { positive, negative } = E.composeStudio({ pos });
+                const bg = await E.generateFull({ positive, negative, width: im.naturalWidth, height: im.naturalHeight });
+                ui.charTestImg = await putOnBg(ui.charTestCut, bg);
+            } catch (e) { toastr.error(e.message, '画背景失败'); }
+            ui.charBusy = ''; render(); return true;
+        }`);
+patch(`    if (el.dataset?.chartestextra !== undefined) { ui.charTestExtra = el.value; return; }`,`    if (el.dataset?.chartestextra !== undefined) { ui.charTestExtra = el.value; return; }
+    if (el.dataset?.charbgq !== undefined) { ui.charBgQ = el.value; return; }
+    if (el.dataset?.charbgfile !== undefined) {
+        const f = el.files?.[0]; el.value = ''; if (!f || !ui.charTestCut) return;
+        try { ui.charTestImg = await putOnBg(ui.charTestCut, await shrinkDataUrl(await fileToDataUrl(f), 2048, 0.92)); render(); }
+        catch (e) { toastr.error(e.message, '换背景失败'); }
+        return;
+    }`);
+patch(`    if (el.dataset.chartestextra !== undefined) { ui.charTestExtra = el.value; return; }`,`    if (el.dataset.chartestextra !== undefined) { ui.charTestExtra = el.value; return; }
+    if (el.dataset.charbgq !== undefined) { ui.charBgQ = el.value; return; }`);
+patch(`async function fitCharRef(dataUrl) {`,`function zkLoadImg(src) { return new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => bad(new Error('图片打不开')); i.src = src; }); }
+/** 白底图本地抠图：从四边把连着的背景色去掉，边缘按和背景的差别做半透明并去掉白边。不花点数 */
+async function cutWhiteBg(src, tol = 26) {
+    const img = await zkLoadImg(src);
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const cv = DOC.createElement('canvas'); cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d', { willReadFrequently: true }); ctx.drawImage(img, 0, 0);
+    const id = ctx.getImageData(0, 0, w, h), p = id.data;
+    const border = [];
+    for (let x = 0; x < w; x += 3) border.push(x * 4, ((h - 1) * w + x) * 4);
+    for (let y = 0; y < h; y += 3) border.push(y * w * 4, (y * w + w - 1) * 4);
+    const med = k => { const a = border.map(i => p[i + k]).sort((m, n) => m - n); return a[a.length >> 1]; };
+    const bg = [med(0), med(1), med(2)];
+    if (Math.min(...bg) < 200) throw new Error('四边不是白底');
+    const dist = i => Math.max(Math.abs(p[i] - bg[0]), Math.abs(p[i + 1] - bg[1]), Math.abs(p[i + 2] - bg[2]));
+    const mask = new Uint8Array(w * h), stack = [];
+    const push = j => { if (mask[j] || dist(j * 4) > tol) return; mask[j] = 1; stack.push(j); };
+    for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+    for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+    while (stack.length) { const j = stack.pop(), x = j % w; if (x > 0) push(j - 1); if (x < w - 1) push(j + 1); if (j >= w) push(j - w); if (j < w * (h - 1)) push(j + w); }
+    let kept = 0;
+    for (let j = 0; j < w * h; j++) {
+        const i = j * 4;
+        if (mask[j]) { p[i + 3] = 0; continue; }
+        kept++;
+        const x = j % w;
+        const edge = (x > 0 && mask[j - 1]) || (x < w - 1 && mask[j + 1]) || (j >= w && mask[j - w]) || (j < w * (h - 1) && mask[j + w]);
+        if (!edge) continue;
+        const a = Math.min(1, dist(i) / (tol * 3));
+        if (a <= 0.02) { p[i + 3] = 0; continue; }
+        for (let k = 0; k < 3; k++) p[i + k] = Math.max(0, Math.min(255, Math.round((p[i + k] - bg[k] * (1 - a)) / a)));
+        p[i + 3] = Math.round(a * 255);
+    }
+    if (kept < w * h * 0.02) throw new Error('抠完几乎没剩东西');
+    ctx.putImageData(id, 0, 0);
+    return cv.toDataURL('image/png');
+}
+/** 抠好的人（透明 PNG）贴到背景上：背景铺满，尺寸跟人那张一样 */
+async function putOnBg(cutSrc, bgSrc) {
+    const fg = await zkLoadImg(cutSrc), bg = await zkLoadImg(bgSrc);
+    const w = fg.naturalWidth, h = fg.naturalHeight;
+    const cv = DOC.createElement('canvas'); cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d'); ctx.imageSmoothingQuality = 'high';
+    const k = Math.max(w / bg.naturalWidth, h / bg.naturalHeight), bw = bg.naturalWidth * k, bh = bg.naturalHeight * k;
+    ctx.drawImage(bg, (w - bw) / 2, (h - bh) / 2, bw, bh);
+    ctx.drawImage(fg, 0, 0);
+    return cv.toDataURL('image/png');
+}
+async function fitCharRef(dataUrl) {`);
 s=applyShareEditCompatibility(s);
 s=applySampleWeightCompatibility(s);
 s=applyWardrobeDisplayCompatibility(s);

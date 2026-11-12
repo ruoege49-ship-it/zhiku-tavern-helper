@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 
 export function applyStorageRecoveryCompatibility(s) {
     const patch = (a, b) => { assert.equal(s.split(a).length, 2, a.slice(0, 100)); s = s.replace(a, () => b); };
@@ -8,6 +9,8 @@ export function applyStorageRecoveryCompatibility(s) {
     };
     block("const savedAt = raw =>", 'const extSettings =', `const savedAt = raw => { const n = Number(raw?.options?.savedAt); return Number.isFinite(n) && n > 0 ? n : 0; };
 let fileOk = false;
+let lastSave = null, loadInfo = null, observed = null;
+${fs.readFileSync(new URL('../src/library-merge.js', import.meta.url), 'utf8').replace(/^export /gm, '')}
 let idbSaving = Promise.resolve();
 // Reject error payloads, arrays and broken libraries before they can outrank a good backup.
 function backupData(value) {
@@ -68,7 +71,10 @@ async function fileRequest(url, options = {}) {
     let best = null;
     for (const candidate of found) if (!best || savedAt(candidate[1]) > savedAt(best[1])) best = candidate;
     data = normalizeData(best ? structuredClone(best[1]) : null);
+    if (server && best?.[0] !== 'file') mergeLibraryAdditions(data, server);
     loadedFromServer = true; fileOk = serverOk;
+    observed = structuredClone(data);
+    loadInfo = { at: Date.now(), from: best ? best[0] : 'empty', found: found.map(f => [f[0], savedAt(f[1])]) };
     if (!serverOk) toastr.warning('这个酒馆读不到智库的数据文件，画师库改存在酒馆设置和浏览器里。', '智库', { timeOut: 5000 });
     emit();
     if (best && best[0] !== 'file' && (!server || savedAt(best[1]) > savedAt(server))) commit({ immediate: true, silent: true });
@@ -84,17 +90,29 @@ function snapshotData() {
     return json;
 }
 async function writeNow(json) {
-    const quiet = !fileOk;
-    try { await tryFile(json); }
-    catch (e) { fileOk = false; saveExt(JSON.parse(json)); if (!quiet) throw e; }
+    if (!loadedFromServer) return;
+    if (!fileOk) { saveExt(JSON.parse(snapshotData())); lastSave = { at: Date.now(), ok: true, backup: true }; return; }
+    let body = json;
+    try {
+        const save = async () => {
+            const res = await fileRequest(\`/user/files/\${DATA_FILE}?t=\${Date.now()}\`, { cache: 'no-store' });
+            const remote = res.ok && backupData(res.text);
+            if (res.status !== 404 && !remote) throw new Error('保存前读不到数据文件，已保留备份，未覆盖文件');
+            const target = JSON.parse(json), added = mergeLibraryAdditions(target, remote);
+            target.options.savedAt = Math.max(savedAt(target), savedAt(remote) + 1);
+            body = JSON.stringify(target);
+            const before = JSON.stringify(data), visibleAdded = mergeLibraryAdditions(data, remote);
+            if (savedAt(data) <= savedAt(JSON.parse(json))) data.options.savedAt = target.options.savedAt;
+            observed = structuredClone(data); snapshotData();
+            if (visibleAdded) toastr.info(\`已并入其它设备或页面新增的 \${visibleAdded} 项\`, '智库');
+            if (JSON.stringify(data) !== before) emit();
+            await tryFile(body);
+        };
+        if (globalThis.navigator?.locks?.request) await navigator.locks.request('zhiku-library-save', save); else await save();
+        lastSave = { at: Date.now(), ok: true };
+    } catch (e) { fileOk = false; saveExt(JSON.parse(snapshotData())); lastSave = { at: Date.now(), ok: false, err: e.message }; throw e; }
 }
 async function tryFile(json) {
-    if (!fileOk) {
-        const probe = await fileRequest(\`/user/files/\${DATA_FILE}?t=\${Date.now()}\`, { cache: 'no-store' });
-        const existing = probe.ok && backupData(probe.text);
-        if (probe.status !== 404 && !existing) throw new Error('数据文件仍不可读，保留备份，暂不覆盖服务器文件');
-        if (existing && savedAt(existing) > savedAt(JSON.parse(json))) throw new Error('服务器已有更新的画师库，保留本地备份，请重新打开智库读取');
-    }
     const res = await fileRequest('/api/files/upload', { method: 'POST', headers: headers(), body: JSON.stringify({ name: DATA_FILE, data: utf8ToBase64(json) }) });
     if (!res.ok) throw new Error(\`保存失败 HTTP \${res.status}\`);
     // A mobile bridge may return HTTP 200 with an HTML page: verify the saved contents.
@@ -106,7 +124,7 @@ async function tryFile(json) {
 }
 
 `);
-    patch("function commit({ immediate = false, silent = false } = {}) {\n    if (!silent)", "function commit({ immediate = false, silent = false } = {}) {\n    data.options = { ...(data.options || {}), savedAt: Math.max(Date.now(), savedAt(data) + 1) };\n    if (!silent)");
+    patch("function commit({ immediate = false, silent = false } = {}) {\n    if (!silent)", "function commit({ immediate = false, silent = false } = {}) {\n    if (!loadedFromServer) return saving;\n    data.options = { ...(data.options || {}), savedAt: Math.max(Date.now(), savedAt(data) + 1) };\n    recordLibraryDeletes(data, observed); observed = structuredClone(data);\n    if (!silent)");
     patch('        saving = saving.then(writeNow).catch(e => {', '        const json = snapshotData();\n        saving = saving.then(() => writeNow(json)).catch(e => {');
     block('// 切到后台 / 关掉页面时，还没存的马上存', '// ───────────── 例图', `// Snapshot synchronously on backgrounding; detach listeners when this runtime stops.
 const flushNow = () => { if (saveTimer !== null) commit({ immediate: true, silent: true }); };
@@ -117,6 +135,46 @@ function detach() { try { document.removeEventListener('visibilitychange', onHid
 `);
     patch('flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving', 'detach, flush: async () => { if (saveTimer !== null) commit({ immediate: true, silent: true }); await saving; await idbSaving; }');
     patch('        await __mod_store.flush();', '        __mod_store.detach();\n        await __mod_store.flush();');
+    block('async function diagnose() {', 'return { diagnose, getData,', `let diagnosis = null;
+function diagnose() { if (!diagnosis) diagnosis = diagnoseStorage().finally(() => { diagnosis = null; }); return diagnosis; }
+async function diagnoseStorage() {
+    const fmt = t => t ? new Date(t).toLocaleString() : '没有时间';
+    const cnt = value => { const r = backupData(value); return r ? \`画师 \${Object.keys(r.artists).length} · 画师串 \${Object.keys(r.groups).length} · 存于 \${fmt(savedAt(r))}\` : '没有有效数据'; };
+    const L = [\`智库 \${globalThis.__PC_VERSION || ''}\`, \`【现在用的】\${cnt(data)}\`, \`打开时来源：\${{ file: '数据文件', ext: '酒馆设置', idb: 'IndexedDB', local: 'localStorage', empty: '空的' }[loadInfo?.from] || '尚未读取'}\`], bad = [];
+    L.push(\`文件可写：\${fileOk ? '是' : '否（本次只存备份）'} · 上次保存：\${lastSave ? lastSave.backup ? '仅备份' : lastSave.ok ? '成功' : '失败：' + lastSave.err : '还没保存'}\${saveTimer !== null ? ' · 有改动待保存' : ''}\`);
+    if (!loadedFromServer) bad.push('存档尚未读取完成');
+    try {
+        const r = await fileRequest(\`/user/files/\${DATA_FILE}?t=\${Date.now()}\`, { cache: 'no-store' });
+        const file = r.ok && backupData(r.text); L.push(\`【数据文件】HTTP \${r.status} · \${cnt(file)}\`);
+        if (!file) bad.push(r.status === 404 ? '数据文件不存在' : '数据文件不可读');
+        else if (savedAt(file) < savedAt(data)) bad.push('数据文件比当前数据旧');
+    } catch (e) { L.push('【数据文件】' + e.message); bad.push('读取失败'); }
+    const token = Math.random().toString(36).slice(2), probe = \`zhiku_probe_\${Date.now()}_\${token}.json\`;
+    let attempted = false;
+    try {
+        attempted = true;
+        const up = await fileRequest('/api/files/upload', { method: 'POST', headers: headers(), body: JSON.stringify({ name: probe, data: utf8ToBase64(JSON.stringify({ token })) }) });
+        if (!up.ok) throw new Error(\`上传 HTTP \${up.status}\`);
+        const read = await fileRequest(\`/user/files/\${probe}?t=\${Date.now()}\`, { cache: 'no-store' });
+        if (!read.ok || JSON.parse(read.text)?.token !== token) throw new Error('读回内容不一致');
+        L.push('【试写小文件】上传并读回一致');
+    } catch (e) { L.push('【试写小文件】' + e.message); bad.push('试写失败'); }
+    finally {
+        if (attempted) try {
+            const del = await fileRequest('/api/files/delete', { method: 'POST', headers: headers(), body: JSON.stringify({ path: \`user/files/\${probe}\` }) });
+            if (!del.ok && del.status !== 404) throw new Error('清理失败');
+        } catch { L.push(\`测试文件未清理：user/files/\${probe}\`); bad.push('测试文件清理失败'); }
+    }
+    L.push(\`【酒馆设置备份】\${cnt(extSettings()?.[EXT_KEY])}\`);
+    L.push(\`【IndexedDB】\${cnt(await idbGet('data'))}\`);
+    try { L.push(\`【localStorage】\${cnt(localStorage.getItem(LOCAL_BACKUP))}\`); } catch { L.push('【localStorage】不可用'); }
+    L.push(\`【结论】\${bad.length ? bad.join('；') : '读写检查正常'}\`);
+    return L.join('\\n');
+}
+`);
+    patch("            case 'diagstore': {\n                toastr.info", "            case 'diagstore': {\n                if (ui.diagBusy) break; ui.diagBusy = true;\n                toastr.info");
+    patch("let rep; try { rep = await __mod_store.diagnose(); } catch (e) { rep = '检查出错：' + e.message; }", "let rep; try { rep = await __mod_store.diagnose(); } catch (e) { rep = '检查出错：' + e.message; } finally { ui.diagBusy = false; }\n                if (stopped) break;");
+    patch("navigator.clipboard?.writeText(rep).then(", "Promise.resolve().then(() => { if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable'); return navigator.clipboard.writeText(rep); }).then(");
     // Update the actual request preview too, without replacing the focused checkbox or panel.
     patch("        } catch (e) { console.warn('[智库]', e); }\n        return;", "        } catch (e) { console.warn('[智库]', e); }\n        updateStudioPreview();\n        return;");
     return s;

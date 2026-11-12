@@ -14,7 +14,7 @@ const ui = {};
 const E = { composeStudio: ({ pos, neg }) => ({ positive: pos, negative: neg }), generateFull: async req => { sent = req; return 'image-' + ++serial; }, charRefs: async ids => ids, setActive: ref => { data.active = ref; commit(); } };
 const sandbox = { M, C, E, ui, stopped: false, getData: () => data, commit, render() {}, root: { querySelector: () => null },
     N: { isReady: () => true }, toastr: { success() {}, info() {}, warning() {}, error: assert.fail }, confirmBox: async () => true,
-    fitCharRef: async img => 'fit:' + img, uploadImage: async () => { uploads++; return { path: 'user/images/' + ++serial + '.png' }; } };
+    cutWhiteBg: async img => img + '-cut', fitCharRef: async img => 'fit:' + img, uploadImage: async () => { uploads++; return { path: 'user/images/' + ++serial + '.png' }; } };
 const action = vm.runInNewContext(part('function charTestResult(', 'function viewCharEdit(') + part('async function charAction(', 'function viewBatch(') + '\ncharAction', sandbox);
 const el = dataset => ({ dataset });
 const char = key => ({ key, kind: 'free', name: key, appearance: [{ en: 'black hair' }], nsfwBody: [{ en: 'test body tag' }], outfits: [], outfitMode: 'story', negative: 'blur', charRef: '' });
@@ -23,7 +23,7 @@ const reset = () => {
     for (const k of Object.keys(ui)) delete ui[k]; Object.assign(ui, { charKey: 'a', charBusy: '', view: 'charedit', studio: {} });
 };
 reset();
-for (const rating of ['sfw', 'nsfw']) for (const [shot, size] of [['portrait', [1024, 1024]], ['upper', [832, 1216]], ['full', [768, 1344]]]) {
+for (const rating of ['sfw', 'nsfw']) for (const [shot, size] of [['portrait', [1024, 1024]], ['upper', [896, 1152]], ['full', [768, 1344]]]) {
     ui.charTestRating = rating; ui.charTestShot = shot; ui.charTestExtra = 'smiling';
     await action('chartest', el({}));
     assert.deepEqual([sent.width, sent.height], size); assert.match(sent.positive, /smiling/);
@@ -90,3 +90,31 @@ for (const field of ['pos', 'neg']) {
     assert.match(studio.studioActiveHint(data), /未保存/); studio.useStudioForChat(); assert.equal(data.active, null); ui.studio[field] = original;
 }
 console.log('PASS: character image options, all album destinations and reload, unsaved host characters, stale/duplicate generation and upload guards, identity-safe deletion, saved artist activation.');
+// Composition cleanup preserves artist tags and honors the chosen background mode.
+reset();
+data.active = M.createFromString(data, { name: 'Shoe artist', text: '1.2::artist:boots::, full body, boots, standing' });
+ui.charTestShot = 'upper'; ui.charTestBg = 'scene'; ui.charTestExtra = 'classroom';
+await action('chartest', el({}));
+assert.match(sent.positive, /1\.2::artist:boots::/); assert(!sent.positive.includes('full body')); assert(!sent.positive.includes('white background'));
+assert.deepEqual([sent.width, sent.height], [896, 1152]); assert.equal(ui.charTestOrig, null);
+// Updated result metadata follows compositing, restore and removal, so album saves use the visible image.
+reset(); sandbox.zkLoadImg = async () => ({ naturalWidth: 1024, naturalHeight: 1024 });
+sandbox.putOnBg = async (fg, bg) => 'composite:' + fg + ':' + bg;
+sandbox.fileToDataUrl = async () => 'file-background'; sandbox.shrinkDataUrl = async v => v;
+const background = vm.runInNewContext(part('async function changeCharBackground(', 'function zkLoadImg(') + '\nchangeCharBackground', sandbox);
+ui.charTestRating = 'nsfw'; await action('chartest', el({})); const original = ui.charTestOrig, cutout = ui.charTestCut;
+await background('gen'); assert.equal(sent.director, null); assert.equal(sent.noVibe, true); assert.match(ui.charTestResult.image, /^composite:/);
+await action('charkeep', el({ w: 'photo' })); assert.equal(data.characters.a.photos.length, 1); assert(data.characters.a.photos[0].nsfw);
+await background('orig'); assert.equal(ui.charTestResult.image, original);
+await background('cut'); assert.equal(ui.charTestResult.image, cutout);
+await background('file', {}); assert.match(ui.charTestResult.image, /file-background/);
+// A second start is ignored; switching character while generating cannot paste into the next character.
+reset(); await action('chartest', el({})); let finish, calls = 0;
+E.generateFull = () => { calls++; return new Promise(r => finish = r); };
+const pendingBg = background('gen'); await tick(); await background('gen'); assert.equal(calls, 1);
+await action('openchar', el({ key: 'b' })); finish('late-background'); await pendingBg;
+assert.equal(ui.charTestImg, ''); assert.equal(ui.charTestResult, null); assert.equal(ui.charBusy, ''); E.generateFull = generate;
+reset(); sandbox.cutWhiteBg = () => new Promise(r => finish = r);
+const pendingCut = action('chartest', el({})); await tick(); await action('openchar', el({ key: 'b' })); finish('late-cut'); await pendingCut;
+assert.equal(ui.charTestImg, ''); assert.equal(ui.charTestCut, null);
+console.log('PASS: composition dimensions/tag filtering, artist weight preservation, scene mode, background generation/file/restore/album flow and stale background/cutout guards.');
