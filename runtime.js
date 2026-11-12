@@ -2353,28 +2353,56 @@ function utf8ToBase64(str) {
 // 数据存四份：酒馆里的 json 文件（主）、酒馆设置（文件存不了时）、浏览器 IndexedDB、localStorage。
 // 读的时候挑 options.savedAt 最新的一份。有些手机酒馆客户端不支持 /user/files，或退出时会清掉 localStorage。
 const EXT_KEY = 'zhiku_data_backup';
-const savedAt = raw => Number(raw?.options?.savedAt) || 0;
+const savedAt = raw => { const n = Number(raw?.options?.savedAt); return Number.isFinite(n) && n > 0 ? n : 0; };
 let fileOk = false;
-function idbOpen() {
-    return new Promise((ok, no) => {
-        const r = indexedDB.open('zhiku_store', 1);
-        r.onupgradeneeded = () => r.result.createObjectStore('kv');
-        r.onsuccess = () => ok(r.result); r.onerror = () => no(r.error);
+let idbSaving = Promise.resolve();
+// Reject error payloads, arrays and broken libraries before they can outrank a good backup.
+function backupData(value) {
+    try {
+        const raw = typeof value === 'string' ? JSON.parse(value) : value;
+        const record = v => v && typeof v === 'object' && !Array.isArray(v);
+        if (!record(raw) || !record(raw.artists) || !record(raw.groups)) return null;
+        for (const k of ['collections', 'templates', 'characters', 'options', 'outfits']) if (raw[k] != null && !record(raw[k])) return null;
+        normalizeData(structuredClone(raw));
+        return raw;
+    } catch { return null; }
+}
+// Each operation owns its connection and deadline; blocked/unavailable IDB must not block file saves.
+function idbOperation(k, value, writing = false) {
+    return new Promise(resolve => {
+        let db, tx, ended = false, result = null;
+        const finish = v => { if (ended) return; ended = true; window.clearTimeout(timer); try { db?.close(); } catch {} resolve(v); };
+        const timer = window.setTimeout(() => { try { tx?.abort(); } catch {} finish(null); }, 1500);
+        try {
+            const open = indexedDB.open('zhiku_store', 1);
+            open.onupgradeneeded = () => { if (!open.result.objectStoreNames.contains('kv')) open.result.createObjectStore('kv'); };
+            open.onerror = open.onblocked = () => finish(null);
+            open.onsuccess = () => {
+                db = open.result; if (ended) { db.close(); return; }
+                try {
+                    tx = db.transaction('kv', writing ? 'readwrite' : 'readonly');
+                    const store = tx.objectStore('kv'), request = writing ? store.put(value, k) : store.get(k);
+                    request.onsuccess = () => { result = writing ? true : request.result ?? null; };
+                    request.onerror = () => finish(null);
+                    tx.oncomplete = () => finish(result); tx.onerror = tx.onabort = () => finish(null);
+                } catch { finish(null); }
+            };
+        } catch { finish(null); }
     });
 }
-async function idbGet(k) {
-    try { const db = await idbOpen(); return await new Promise(ok => { const q = db.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => ok(q.result ?? null); q.onerror = () => ok(null); }); }
-    catch { return null; }
-}
-async function idbSet(k, v) {
-    try { const db = await idbOpen(); await new Promise(ok => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = ok; t.onerror = ok; t.onabort = ok; }); }
-    catch { /* 不支持就算了 */ }
+const idbGet = k => idbOperation(k);
+const idbSet = (k, value) => (idbSaving = idbSaving.then(() => idbOperation(k, value, true)));
+async function fileRequest(url, options = {}) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 10000);
+    try { const response = await fetch(url, { ...options, signal: controller.signal }); return { ok: response.ok, status: response.status, text: await response.text() }; }
+    finally { window.clearTimeout(timer); }
 }
 const extSettings = () => { try { return SillyTavern.getContext().extensionSettings || null; } catch { return null; } };
 function saveExt(raw) {
     try {
         const es = extSettings(); if (!es) return;
-        if (raw) es[EXT_KEY] = raw; else if (es[EXT_KEY]) delete es[EXT_KEY]; else return;
+        if (raw) { if (savedAt(es[EXT_KEY]) > savedAt(raw)) return; es[EXT_KEY] = raw; } else if (es[EXT_KEY]) delete es[EXT_KEY]; else return;
         SillyTavern.getContext().saveSettingsDebounced();
     } catch { /* 存不了就算了 */ }
 }
@@ -2382,66 +2410,64 @@ function saveExt(raw) {
 async function loadData() {
     let server = null, serverOk = false;
     try {
-        const res = await fetch(`/user/files/${DATA_FILE}?t=${Date.now()}`, { cache: 'no-store' });
+        const res = await fileRequest(`/user/files/${DATA_FILE}?t=${Date.now()}`, { cache: 'no-store' });
         if (res.status === 404) serverOk = true;
-        else if (res.ok) {
-            const text = await res.text();
-            try { server = JSON.parse(text); serverOk = !!server && typeof server === 'object'; }
-            catch { throw new Error('读到的不是数据（这个酒馆可能不支持 /user/files）'); }
-        } else throw new Error(`HTTP ${res.status}`);
+        else if (res.ok && (server = backupData(res.text))) serverOk = true;
+        else throw new Error(`数据文件不可读（HTTP ${res.status}）`);
     } catch (e) { console.warn('[智库] 从酒馆文件读数据失败，用其它备份', e); }
     const found = [];
-    if (server) found.push(['file', server]);
-    const ext = extSettings()?.[EXT_KEY];
-    if (ext && typeof ext === 'object') found.push(['ext', ext]);
-    const idb = await idbGet('data');
-    if (idb) { try { found.push(['idb', typeof idb === 'string' ? JSON.parse(idb) : idb]); } catch { /* 坏了 */ } }
-    try { const b = localStorage.getItem(LOCAL_BACKUP); if (b) found.push(['local', JSON.parse(b)]); } catch { /* 坏了 */ }
-    // 挑最新的；一样新（老数据都没有时间）就按 文件 → 酒馆设置 → IndexedDB → localStorage
+    const add = (kind, raw) => { const value = backupData(raw); if (value) found.push([kind, value]); };
+    add('file', server); add('ext', extSettings()?.[EXT_KEY]); add('idb', await idbGet('data'));
+    try { add('local', localStorage.getItem(LOCAL_BACKUP)); } catch {}
     let best = null;
-    for (const f of found) if (!best || savedAt(f[1]) > savedAt(best[1])) best = f;
-    data = normalizeData(best ? best[1] : null);
-    loadedFromServer = true;
-    fileOk = serverOk;
+    for (const candidate of found) if (!best || savedAt(candidate[1]) > savedAt(best[1])) best = candidate;
+    data = normalizeData(best ? structuredClone(best[1]) : null);
+    loadedFromServer = true; fileOk = serverOk;
     if (!serverOk) toastr.warning('这个酒馆读不到智库的数据文件，画师库改存在酒馆设置和浏览器里。', '智库', { timeOut: 5000 });
     emit();
-    // 备份比文件新（上次没来得及存到文件 / 文件存不了）：马上再存一遍
     if (best && best[0] !== 'file' && (!server || savedAt(best[1]) > savedAt(server))) commit({ immediate: true, silent: true });
     return data;
 }
 
-async function writeNow() {
-    data.options = { ...(data.options || {}), savedAt: Date.now() };
+function snapshotData() {
     const json = JSON.stringify(data);
-    try { localStorage.setItem(LOCAL_BACKUP, json); } catch { /* 太大就算了 */ }
-    await idbSet('data', json);
-    if (!fileOk) { saveExt(JSON.parse(json)); await tryFile(json, true); return; }
-    try { await tryFile(json, false); }
-    catch (e) { saveExt(JSON.parse(json)); throw e; }
+    // Synchronous local backup happens before waiting for any older network request.
+    try { localStorage.setItem(LOCAL_BACKUP, json); } catch {}
+    void idbSet('data', json);
+    if (!fileOk) saveExt(JSON.parse(json));
+    return json;
 }
-/** 写进酒馆里的 json 文件；quiet：文件本来就存不了，只是试试，成功了就换回用文件 */
-async function tryFile(json, quiet) {
-    let res;
-    try {
-        res = await fetch('/api/files/upload', { method: 'POST', headers: headers(), body: JSON.stringify({ name: DATA_FILE, data: utf8ToBase64(json) }) });
-    } catch (e) { if (quiet) return; throw e; }
-    if (!res.ok) { if (quiet) return; throw new Error(`保存失败 HTTP ${res.status}`); }
-    if (quiet) {
-        // 上传成功也要读得回来才算数
-        try { const r = await fetch(`/user/files/${DATA_FILE}?t=${Date.now()}`, { cache: 'no-store' }); const back = JSON.parse(await r.text()); if (savedAt(back) !== savedAt(JSON.parse(json))) return; }
-        catch { return; }
-        fileOk = true;
+async function writeNow(json) {
+    const quiet = !fileOk;
+    try { await tryFile(json); }
+    catch (e) { fileOk = false; saveExt(JSON.parse(json)); if (!quiet) throw e; }
+}
+async function tryFile(json) {
+    if (!fileOk) {
+        const probe = await fileRequest(`/user/files/${DATA_FILE}?t=${Date.now()}`, { cache: 'no-store' });
+        const existing = probe.ok && backupData(probe.text);
+        if (probe.status !== 404 && !existing) throw new Error('数据文件仍不可读，保留备份，暂不覆盖服务器文件');
+        if (existing && savedAt(existing) > savedAt(JSON.parse(json))) throw new Error('服务器已有更新的画师库，保留本地备份，请重新打开智库读取');
     }
-    if (extSettings()?.[EXT_KEY]) saveExt(null);
+    const res = await fileRequest('/api/files/upload', { method: 'POST', headers: headers(), body: JSON.stringify({ name: DATA_FILE, data: utf8ToBase64(json) }) });
+    if (!res.ok) throw new Error(`保存失败 HTTP ${res.status}`);
+    // A mobile bridge may return HTTP 200 with an HTML page: verify the saved contents.
+    const check = await fileRequest(`/user/files/${DATA_FILE}?t=${Date.now()}`, { cache: 'no-store' });
+    const back = check.ok && backupData(check.text);
+    if (!back || JSON.stringify(back) !== json) throw new Error('上传后未读回同一份画师库，已保留其它备份');
+    fileOk = true;
+    if (extSettings()?.[EXT_KEY] && savedAt(extSettings()[EXT_KEY]) <= savedAt(back)) saveExt(null);
 }
 
 /** 改完数据调用：立刻通知界面，稍后写到服务器 */
 function commit({ immediate = false, silent = false } = {}) {
+    data.options = { ...(data.options || {}), savedAt: Math.max(Date.now(), savedAt(data) + 1) };
     if (!silent) emit();
     clearTimeout(saveTimer);
     const run = () => {
         saveTimer = null;
-        saving = saving.then(writeNow).catch(e => {
+        const json = snapshotData();
+        saving = saving.then(() => writeNow(json)).catch(e => {
             console.error('[票册] 保存失败', e);
             toastr.error('票册保存到酒馆失败：' + e.message, '画师票册');
         });
@@ -2457,12 +2483,11 @@ function replaceData(next) {
     loadedFromServer = true;
     return commit({ immediate: true });
 }
-// 切到后台 / 关掉页面时，还没存的马上存（手机上切走 App 可能直接被杀掉）
-try {
-    const flushNow = () => { if (saveTimer !== null) commit({ immediate: true, silent: true }); };
-    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushNow(); });
-    window.addEventListener('pagehide', flushNow);
-} catch { /* 没有 document 的环境 */ }
+// Snapshot synchronously on backgrounding; detach listeners when this runtime stops.
+const flushNow = () => { if (saveTimer !== null) commit({ immediate: true, silent: true }); };
+const onHidden = () => { if (document.visibilityState === 'hidden') flushNow(); };
+try { document.addEventListener('visibilitychange', onHidden); window.addEventListener('pagehide', flushNow); } catch {}
+function detach() { try { document.removeEventListener('visibilitychange', onHidden); window.removeEventListener('pagehide', flushNow); } catch {} }
 
 // ───────────── 例图 ─────────────
 
@@ -2526,7 +2551,7 @@ async function shrinkDataUrl(dataUrl, maxSide = 1024, quality = 0.88) {
     return c.toDataURL('image/jpeg', quality);
 }
 
-return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };
+return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, detach, flush: async () => { if (saveTimer !== null) commit({ immediate: true, silent: true }); await saving; await idbSaving; } };
 })();
 
 // ───── lobby.js ─────
@@ -9767,6 +9792,7 @@ async function onChangeEv(ev) {
             const sum = el.closest('details')?.querySelector('summary i');
             if (sum) sum.textContent = sum.textContent.replace(/质量词 [开关]/, '质量词 ' + (pv2.aqt ? '开' : '关'));
         } catch (e) { console.warn('[智库]', e); }
+        updateStudioPreview();
         return;
     }
     if (el.dataset.st === 'UCP_novelai' && el.value === 'custom' && !String(N.settings().UCP_custom || '').trim()) {
@@ -11245,6 +11271,7 @@ return {
     start,
     async stop() {
         if (globalThis.__zhikuDl) { DOC.removeEventListener('click', globalThis.__zhikuDl, true); delete globalThis.__zhikuDl; }
+        __mod_store.detach();
         await __mod_store.flush();
         ownCleanup?.();
         while (cleanups.length) { try { cleanups.pop()?.(); } catch {} }
