@@ -27,8 +27,8 @@ start();assert.equal(jobs.length,1);assert.equal(jobs[0].ref.type,'group');asser
 const groupId=jobs[0].ref.id;assert.match(M.ticketString(data,jobs[0].ref),/detailed background/);
 data=M.normalizeData(JSON.parse(saved));data.groups[groupId].images.push({template:'sfw_head',path:'keep.png'});start();
 assert.equal(Object.keys(data.groups).length,1);assert.equal(jobs[0].skip,true);assert.equal(jobs[0].ref.id,groupId);
-// Cleanup removes fake tag entries without deleting examples or unrelated library data.
+// 打开时不删用户存过的画师（就算名字像标签），例图和别的数据也都在。
 const bad=M.ensureArtist(data,'<artist>'),kept=M.ensureArtist(data,'</style>');kept.images=[{path:'old.png'}];data.active={type:'artist',id:bad.id};
-data=M.normalizeData(JSON.parse(JSON.stringify(data)));assert.equal(data.artists[bad.id],undefined);assert.equal(data.active,null);
+data=M.normalizeData(JSON.parse(JSON.stringify(data)));assert.ok(data.artists[bad.id]);assert.equal(data.active?.id,bad.id);
 assert.equal(data.artists[kept.id].images[0].path,'old.png');assert.equal(data.groups[groupId].images[0].path,'keep.png');
 console.log('PASS: tagged/mixed artist strings, weights, style preservation, plain-name splitting, deduplication, real batch queue, saved-library reload, skip-existing and legacy cleanup.');

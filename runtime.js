@@ -1673,7 +1673,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.40（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.41（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1722,7 +1722,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.40';
+globalThis.__PC_VERSION = '0.8.41';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -1887,23 +1887,13 @@ function normalizeData(raw) {
         g.members = g.members.filter(m => !bad.includes(m));
         g.extra = [g.extra, ...bad.map(m => d.artists[m.artistId].tag.replace(/^artist:/i, '').trim())].filter(Boolean).join(', ');
     }
-    for (const a of Object.values(d.artists)) {
-        if (!fake(a)) continue;
-        if (d.active?.type === 'artist' && d.active.id === a.id) d.active = null;
-        if (!a.images.length) delete d.artists[a.id];
-    }
+    // 单独存的画师就算名字像画风词也不删：用户存了的东西一律留着，让人自己删
     d.recent = Array.isArray(d.recent) ? d.recent : [];
     d.history = Array.isArray(d.history) ? d.history : [];
     if (!d.aiPresets || typeof d.aiPresets !== 'object') d.aiPresets = { active: 'tavern:', list: {}, fn: {}, markOn: {} };
     d.aiPresets.list ||= {}; d.aiPresets.fn ||= {}; d.aiPresets.markOn ||= {};
     if (typeof d.aiPresets.active !== 'string') d.aiPresets.active = 'tavern:';
-    // 一位画师都没有、也没有例图的画师串（批量时把画风词误当成一串）删掉
-    for (const g of Object.values(d.groups)) {
-        // 只写了普通词、没带 artist: 的串也是用户自己存的，不能删（以前刷新就没了）
-        if (g.members.length || g.images.length || String(g.extra || '').trim() || String(g.raw || '').trim()) continue;
-        delete d.groups[g.id];
-        if (d.active?.type === 'group' && d.active.id === g.id) d.active = null;
-    }
+    // 打开时不自动删任何画师串：存了就留着，没用的让人自己删
     d.recent = d.recent.filter(r => r.type !== 'group' || d.groups[r.id]);
     return d;
 }

@@ -33,6 +33,6 @@ try{
  await E.generateFull({positive:'comic',negative:'',chars:[{prompt:'boy',uc:'hat'}],director:[{data:'reference',key:'r'}]});assert.equal(requests.at(-1).parameters.v4_prompt.caption.char_captions.length,0);assert.equal(E.runtime.lastSent.director,0);
  await N.generate({comic:true,positive:'comic',negative:'',chars:[{prompt:'boy',uc:''}]});assert.equal(requests.at(-1).model,'nai-diffusion-5-full');assert.equal(requests.at(-1).parameters.v4_prompt.caption.char_captions.length,1);
  // Clean only legacy entries without examples, preserving unrelated artists and image records.
- const dirty=M.emptyData();const bad=M.ensureArtist(dirty,'detailed'),keep=M.ensureArtist(dirty,'ultra-detailed');keep.images=[{path:'keep.png'}];const clean=M.normalizeData(dirty);assert(!clean.artists[bad.id]);assert.equal(clean.artists[keep.id].images[0].path,'keep.png');assert.equal(M.parseBatchLines('year 2025, detailed background').length,0);
+ const dirty=M.emptyData();const bad=M.ensureArtist(dirty,'detailed'),keep=M.ensureArtist(dirty,'ultra-detailed');keep.images=[{path:'keep.png'}];const clean=M.normalizeData(dirty);assert(clean.artists[bad.id]);assert.equal(clean.artists[keep.id].images[0].path,'keep.png');assert.equal(M.parseBatchLines('year 2025, detailed background').length,0);
 }finally{N.stopQueue();}
 console.log('PASS: actual cast payload/outfits/positions/references, per-chat restore, fixed scene library/history, compatibility preview/request parity, comic exemption and legacy cleanup.');

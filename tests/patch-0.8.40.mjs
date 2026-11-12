@@ -18,7 +18,7 @@ for(const text of ['some_artist, watercolor','soft lighting, watercolor','artist
 let empty=M.emptyData();
 empty.groups={empty:{id:'empty',members:[],images:[],extra:' ',raw:''},raw:{id:'raw',members:[],images:[],raw:'unprefixed_artist'}};
 empty=M.normalizeData(empty);
-assert(!empty.groups.empty);
+assert(empty.groups.empty,'0.8.41 preserves empty saved groups');
 assert.equal(empty.groups.raw.raw,'unprefixed_artist');
 
 for(const [mode,limit,expected] of [['inline',2,2],['inline',1,1],['inline',5,3],['after',1,3]]){
