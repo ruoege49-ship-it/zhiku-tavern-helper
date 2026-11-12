@@ -98,3 +98,24 @@ console.log('PASS: backup recency/priority, corrupt-candidate rejection, setting
     assert.equal(Object.keys(b.probes).length, 0); assert.equal(b.file, file);
 }
 console.log('PASS: no pre-load writes, cross-client additions, deletion propagation, diagnosis read/write/cleanup without changing the library.');
+// Saved empty groups and style-like artists survive file/backup recovery, until explicitly deleted.
+{
+    const data = M.emptyData(), artist = M.ensureArtist(data, 'artist:detailed');
+    data.groups.empty = { id: 'empty', name: '保留的空串', members: [], images: [], extra: '', raw: '', note: '备注保留', neg: 'blur' };
+    const ref = { type: 'group', id: 'empty' };
+    data.active = ref; data.recent = [ref, { type: 'artist', id: artist.id }]; data.bindings.card = ref;
+    const a = harness({ file: data }); await a.store.loadData(); await a.store.commit({ immediate: true });
+    const saved = JSON.parse(a.file);
+    assert(saved.artists[artist.id]); assert.equal(saved.groups.empty.note, '备注保留'); assert.equal(saved.active.id, 'empty');
+    const b = harness({ file: saved }); await b.store.loadData();
+    assert.equal(b.store.getData().groups.empty.neg, 'blur'); assert.equal(b.store.getData().bindings.card.id, 'empty');
+    const recovered = harness({ file: null, ext: saved }); await recovered.store.loadData();
+    assert(recovered.store.getData().groups.empty); assert(recovered.store.getData().artists[artist.id]);
+    M.deleteGroup(b.store.getData(), 'empty'); M.deleteArtist(b.store.getData(), artist.id);
+    await b.store.commit({ immediate: true });
+    const c = harness({ file: JSON.parse(b.file) }); await c.store.loadData();
+    assert(!c.store.getData().groups.empty); assert(!c.store.getData().artists[artist.id]);
+    assert.equal(c.store.getData().active, null); assert.equal(c.store.getData().recent.length, 0); assert(!c.store.getData().bindings.card);
+    for (const h of [a,b,c,recovered]) h.store.detach();
+}
+console.log('PASS: saved empty groups and style-like artists survive reload/recovery; manual deletion persists and clears references.');
