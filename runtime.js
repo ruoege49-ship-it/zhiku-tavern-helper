@@ -1673,7 +1673,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.39（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.40（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1722,7 +1722,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.39';
+globalThis.__PC_VERSION = '0.8.40';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -1899,7 +1899,8 @@ function normalizeData(raw) {
     if (typeof d.aiPresets.active !== 'string') d.aiPresets.active = 'tavern:';
     // 一位画师都没有、也没有例图的画师串（批量时把画风词误当成一串）删掉
     for (const g of Object.values(d.groups)) {
-        if (g.members.length || g.images.length) continue;
+        // 只写了普通词、没带 artist: 的串也是用户自己存的，不能删（以前刷新就没了）
+        if (g.members.length || g.images.length || String(g.extra || '').trim() || String(g.raw || '').trim()) continue;
         delete d.groups[g.id];
         if (d.active?.type === 'group' && d.active.id === g.id) d.active = null;
     }
@@ -11414,7 +11415,8 @@ async function start() {
     const onCharMsg = id => {
         setTimeout(() => { comic.render(Number(id)); void comic.process(Number(id)); }, 0);
         setTimeout(addMesButtons, 50);
-        setTimeout(() => { void __mod_marker.process(Number(id)); }, 0);
+        // 正文模型自己写标记（inline）时可能多写：只自动画前「每条回复最多几张」个，多的留着手动点
+        setTimeout(() => { const o = getData().options, n = o.illustMode === 'inline' ? Math.max(1, Number(o.illustMax) || 1) : 0; void __mod_marker.process(Number(id), n ? { tokenIndices: [...Array(n).keys()] } : {}); }, 0);
         setTimeout(() => { void illustAfter(Number(id)).catch(e => console.warn('[智库] 自动插图', e)); }, 0);
     };
     for (const [ev, fn] of [[event_types.USER_MESSAGE_RENDERED, onUserRendered], [event_types.CHARACTER_MESSAGE_RENDERED, onCharMsg], [event_types.MORE_MESSAGES_LOADED, onRendered], [event_types.MESSAGE_UPDATED, onEdited]]) {
