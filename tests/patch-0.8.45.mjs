@@ -47,4 +47,3 @@ now+=1000;down();timer();context();assert.equal(events.length,2);
 now+=1000;down();LP.cancelLongPress({type:'pointermove',clientX:30,clientY:0});context();assert.equal(events.length,2,'scrolling does not open a menu');
 for(const kind of ['ticket','col','vibe','crgroup']){now+=1000;t=target(kind);down();context();assert.equal(events.at(-1),kind);}
 console.log('PASS: bounded text/vision blocking retry, error exclusions, request diagnostics, default-only count migration and long-press event ordering');
-
