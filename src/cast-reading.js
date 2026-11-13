@@ -2,7 +2,8 @@
 async function askCastSafe(sys, cardName, label, text, fromEnd) {
     text = String(text || '');
     const userFor = limit => `卡名：${cardName}\n${label}：\n${fromEnd ? text.slice(-limit) : text.slice(0, limit)}`;
-    try { return await askShrinking(sys, userFor, { maxTokens: 8000, fn: 'look' }); }
+    // This path already has its own bounded, ordinary-appearance-only fallback.
+    try { return await askShrinking(sys, userFor, { maxTokens: 8000, fn: 'look', skipBlockedRetry: true }); }
     catch (e) {
         if (!BLOCKED.test(String(e?.providerMessage || e?.message || e))) throw e;
         const sys2 = sys.replace(/NSFW 身体单独放进 nsfw：[^\n]*/, 'nsfw 一律写 []。');
@@ -19,7 +20,7 @@ async function askCastSafe(sys, cardName, label, text, fromEnd) {
         const people = []; let blocked = 0, failed = 0, read = 0;
         for (const ch of selected) {
             let raw;
-            try { raw = await askRoomy(sys2, `卡名：${cardName}\n${label}（其中一段）：\n${ch}`, { maxTokens:8000, fn:'look' }); }
+            try { raw = await askRoomy(sys2, `卡名：${cardName}\n${label}（其中一段）：\n${ch}`, { maxTokens:8000, fn:'look', skipBlockedRetry: true }); }
             catch (error) {
                 if (!BLOCKED.test(String(error?.providerMessage || error?.message || error))) throw error;
                 blocked++; continue;
