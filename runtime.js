@@ -1097,7 +1097,7 @@ function createComicController(deps) {
 const DEFAULT_ILLUSTRATION_PROMPT = `你负责根据小说正文选择插图瞬间，并整理画面信息。
 
 【图片数量】
-遵循输入 imageLimit（玩家设置的最多张数），不自行固定张数。
+按输入 imageLimit 写满张数：正文够长就写满 imageLimit 张，分散在正文前中后不同位置；只有正文太短、实在找不出这么多不同瞬间时才少写。
 每张图描绘一个独立瞬间，不把连续发生的动作塞进同一张图。
 
 【正文范围】
@@ -1150,7 +1150,11 @@ name（名字）、registered（是否调用候选角色，布尔值）、gender
 characters 只列实际可见的人；人数标签由插件根据名单生成，scene 和各人物标签不另写人数。`;
 
 function illustrationPrompt(options = {}) {
-    return typeof options.illustPrompt === 'string' && options.illustPrompt.trim() ? options.illustPrompt : DEFAULT_ILLUSTRATION_PROMPT;
+    const p = typeof options.illustPrompt === 'string' ? options.illustPrompt : '';
+    if (!p.trim()) return DEFAULT_ILLUSTRATION_PROMPT;
+    // 存下来的是旧版默认提示词（玩家没改过）：换成新的「写满张数」
+    if (p.includes('遵循输入 imageLimit（玩家设置的最多张数），不自行固定张数。') && p.replace('遵循输入 imageLimit（玩家设置的最多张数），不自行固定张数。', '按输入 imageLimit 写满张数：正文够长就写满 imageLimit 张，分散在正文前中后不同位置；只有正文太短、实在找不出这么多不同瞬间时才少写。') === DEFAULT_ILLUSTRATION_PROMPT) return DEFAULT_ILLUSTRATION_PROMPT;
+    return p;
 }
 
 function saveIllustrationPrompt(options, value) {
@@ -1412,21 +1416,21 @@ function selectedImageStory(source, {start='image###',end='###'}={}) {
     return imageStoryText(text);
 }
 
-function createSelectedImageController({document:doc,getContext,settings,generate,notify}) {
+function createSelectedImageController({document:doc,getContext,settings,generate,notify,modal}) {
     const win=doc.defaultView;
     let stopped=false,snapshot=null,panel=null,busy=false,timer;
     const key=c=>String(c.getCurrentChatId?.()??c.chatId??'')+'|'+String(c.characterId??'')+'|'+String(c.groupId??'');
     const mount=el=>(doc.documentElement||doc.body).appendChild(el);
     const style=doc.createElement('style');style.textContent=`
-      .pc-selection-image{position:fixed;right:16px;bottom:100px;z-index:2147480100;padding:12px 18px;border:1px solid #aebbc6;border-radius:24px;background:#202a36;color:#fff;font-size:15px;box-shadow:0 4px 16px #0005;cursor:pointer}
+      .pc-selection-image{position:fixed;right:16px;bottom:100px;z-index:2147480100;padding:11px 18px;border:1.5px solid #3a2a22;border-radius:999px;background:#f4efe4;color:#3a2a22;font-size:15px;box-shadow:0 3px 0 #3a2a2233,0 6px 18px #0003;cursor:pointer}
       .pc-selection-image[hidden]{display:none}
       .pc-selection-backdrop{position:fixed;inset:0;z-index:2147480200;display:flex;align-items:center;justify-content:center;background:#0009;padding:14px;box-sizing:border-box}
-      .pc-selection-dialog{width:min(100%,560px);max-height:90dvh;overflow:auto;box-sizing:border-box;border-radius:18px;padding:20px;background:#20242b;color:#f3f4f6;font:15px/1.6 sans-serif;scrollbar-width:none}
+      .pc-selection-dialog{width:min(100%,560px);max-height:90dvh;overflow:auto;box-sizing:border-box;border-radius:18px;padding:20px;background:#f4efe4;color:#3a2a22;border:1.5px solid #3a2a22;font:15px/1.6 serif;scrollbar-width:none}
       .pc-selection-dialog *{box-sizing:border-box;scrollbar-width:none}.pc-selection-dialog::-webkit-scrollbar,.pc-selection-dialog *::-webkit-scrollbar{display:none}
       .pc-selection-dialog h3{margin:0 0 14px}.pc-selection-dialog label{display:block;margin:12px 0 6px}
-      .pc-selection-dialog textarea{display:block;width:100%;height:160px;resize:vertical;overflow:auto;border:1px solid #627082;border-radius:10px;padding:10px;background:#15191f;color:inherit;font:inherit}
-      .pc-selection-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}.pc-selection-actions button{min-height:42px;padding:8px 18px;border-radius:10px;border:1px solid #627082;background:#303e50;color:#fff;font:inherit;cursor:pointer}.pc-selection-actions button:disabled{opacity:.6}
-      .pc-selection-dialog p{font-size:13px;color:#bdc6d0;margin:10px 0}.pc-selection-status{white-space:pre-wrap;overflow-wrap:anywhere}
+      .pc-selection-dialog textarea{display:block;width:100%;height:160px;resize:vertical;overflow:auto;border:0;border-radius:12px;padding:10px;background:#ebe3d3;color:inherit;font:inherit}
+      .pc-selection-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}.pc-selection-actions button{min-height:42px;padding:8px 18px;border-radius:999px;border:1.5px solid #3a2a22;background:#f4efe4;color:#3a2a22;font:inherit;cursor:pointer}.pc-selection-actions button[data-generate]{background:#3a2a22;color:#f4efe4}.pc-selection-actions button:disabled{opacity:.6}
+      .pc-selection-dialog p{font-size:13px;color:#7a6a5c;margin:10px 0}.pc-selection-status{white-space:pre-wrap;overflow-wrap:anywhere}
     `;mount(style);
     const button=doc.createElement('button');button.type='button';button.className='pc-selection-image';button.textContent='为这段生图';button.hidden=true;mount(button);
     const current=s=>{const c=getContext();return !stopped&&key(c)===s.chatKey&&c.chat?.[s.id]===s.msg&&s.msg.mes===s.source&&s.msg.swipe_id===s.swipe;};
@@ -1474,14 +1478,25 @@ function createSelectedImageController({document:doc,getContext,settings,generat
     button.addEventListener('pointerdown',preserve);button.addEventListener('mousedown',preserve);
     function dismiss(){panel?.remove();panel=null;snapshot=null;button.hidden=true;}
     function openDialog(){
-        if(!snapshot||busy)return;
+        if(!snapshot||busy||panel)return;
         const shot=snapshot;
         if(!current(shot)){notify('聊天或原文已变化，请重新选择文字');dismiss();return;}
         if(!Number.isInteger(shot.insertAt)){notify('所选文字无法对应聊天原文，请在正文里重新选择一段');return;}
         button.hidden=true;
+        let box;
+        if(modal){
+            // 用智库自己的弹窗：样子统一，也不会被主题的缩放 / 变形挤到屏幕外
+            box=modal('<h3 class="pc-h3">为这段生成图片？</h3><textarea class="pc-textarea" readonly aria-label="选中段落" style="height:140px"></textarea><div class="pc-hint">结合整篇正文，为这段生成一张图片，插在这段之后。</div><div class="pc-selection-status pc-dim small" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere"></div><div class="pc-actions"><button type="button" class="pc-btn" data-close>取消</button><button type="button" class="pc-btn dark" data-generate>生成图片</button></div>');
+            box.setAttribute('aria-modal','true');box.setAttribute('aria-label','为这段生成图片？');
+            // The shared modal can also close through its backdrop, outside this controller.
+            const observer=new win.MutationObserver(()=>{if(!box.isConnected&&panel===handle)dismiss();});
+            const handle={remove:()=>{observer.disconnect();box.closeModal?.();}};
+            panel=handle;observer.observe(box.parentNode.parentNode,{childList:true});
+        }else{
         panel=doc.createElement('div');panel.className='pc-selection-backdrop';
-        const box=doc.createElement('div');box.className='pc-selection-dialog';box.setAttribute('role','dialog');box.setAttribute('aria-modal','true');box.setAttribute('aria-label','为这段生成图片？');
+        box=doc.createElement('div');box.className='pc-selection-dialog';box.setAttribute('role','dialog');box.setAttribute('aria-modal','true');box.setAttribute('aria-label','为这段生成图片？');
         box.innerHTML='<h3>为这段生成图片？</h3><textarea readonly aria-label="选中段落"></textarea><p>结合整篇正文，为这段生成一张图片，插在这段之后。</p><div class="pc-selection-status" role="status"></div><div class="pc-selection-actions"><button type="button" data-generate>生成图片</button><button type="button" data-close>取消</button></div>';
+        }
         box.querySelector('textarea').value=shot.text;
         const submit=box.querySelector('[data-generate]'),status=box.querySelector('[role="status"]');
         box.querySelector('[data-close]').onclick=dismiss;
@@ -1493,7 +1508,7 @@ function createSelectedImageController({document:doc,getContext,settings,generat
             catch(e){status.textContent=e.message||String(e);submit.disabled=false;}
             finally{busy=false;}
         };
-        panel.append(box);mount(panel);submit.focus();
+        if(!modal){panel.append(box);mount(panel);}try{submit.focus({preventScroll:true});}catch{submit.focus();}
     }
     button.addEventListener('click',openDialog);
     doc.addEventListener('click',clickParagraph);
@@ -1673,7 +1688,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.44（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.45（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1722,7 +1737,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.44';
+globalThis.__PC_VERSION = '0.8.45';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -2493,7 +2508,7 @@ function zkLog(kind, msg, detail = '') {
         const text = String(msg ?? '').slice(0,300);
         const det = (typeof detail === 'string' ? detail : Object.entries(detail || {}).map(([k,v]) => Array.isArray(v) ? `${k}：${v.length ? '\n  '+v.join('\n  ') : '无'}` : `${k}：${v === true ? '有' : v === false ? '无' : v === '' || v == null ? '（空）' : v}`).join('\n')).slice(0,LOG_DETAIL);
         const last = logBuf.at(-1);
-        if (kind !== '生图' && kind !== '生图失败' && last && last.k === kind && last.m === text && last.d === det && Date.now()-last.t < 60000) { last.n = (last.n || 1)+1; last.t = Date.now(); }
+        if (!['生图','生图失败','AI 请求'].includes(kind) && last && last.k === kind && last.m === text && last.d === det && Date.now()-last.t < 60000) { last.n = (last.n || 1)+1; last.t = Date.now(); }
         else logBuf.push({t:Date.now(),k:String(kind),m:text,d:det});
         trimLogs(logBuf); saveLogsSoon();
     } catch {}
@@ -4302,16 +4317,61 @@ async function withTokenFallback(once, opts) {
     }
     throw Object.assign(new Error(String(last?.message || last) + '。到设置 → 翻译和 AI 把「回复长度上限」改小一点'), { diag: last?.diag });
 }
+// One content-block retry with reduced system requirements. Transport failures never retry here.
+const EXPLICIT_LINE = /NSFW|乳头|乳晕|阴毛|阴茎|私处|性行为|体液|裸露|露出的部位|体位|pussy|penis|nipple|\bcum\b|\bsex\b|vaginal|\banal\b|fellatio|cunnilingus|creampie|ahegao|paizuri|handjob|footjob|masturbation|testicles|clitoris|areolae|\bnude\b|naked/i;
+const softenSystem = sys => String(sys || '').split('\n').filter(l => /^只输出 JSON/.test(l.trim()) || !EXPLICIT_LINE.test(l)).join('\n');
+function isBlockedReply(out) {
+    const t = String(out || '');
+    let json; try { json = JSON.parse(t); } catch {}
+    const error = json?.error;
+    const reason = typeof error === 'string' ? error : [error?.code, error?.message].filter(Boolean).join(' ');
+    return blockedResponse(json) || BLOCKED.test(reason) || (t.indexOf('{') < 0 && BLOCKED.test(t));
+}
+function isBlockedFailure(error) {
+    if (error?.name === 'AbortError' || error?.name === 'TypeError' || error?.emptyLength) return false;
+    if (error?.status && ![400,403,422].includes(error.status)) return false;
+    return isBlockedReply(error?.providerMessage || error?.message || error);
+}
+async function retryIfBlocked(system, run, opts = {}) {
+    const once = async sys => {
+        const out = await run(sys);
+        if (isBlockedReply(out)) throw blockedError();
+        return out;
+    };
+    try { return await once(system); }
+    catch (error) {
+        if (!isBlockedFailure(error) || opts.skipBlockedRetry) throw error;
+        const soft = softenSystem(system);
+        globalThis.__zkLog?.('模型拦截', `${opts.fn || 'AI'}：${String(error.message || error).slice(0,160)}`, soft !== system ? '去掉提示词中的相关要求，重试一次' : '没有可精简的相关要求；模型未提供更具体的拦截原因');
+        if (soft === system) throw error;
+        toastr.info('模型拦截了这次内容，精简相关提示要求后重试一次', '智库', {timeOut:3500});
+        try { return await once(soft); }
+        catch (next) {
+            if (isBlockedFailure(next)) globalThis.__zkLog?.('模型拦截', `${opts.fn || 'AI'}：精简提示要求后仍被拦截，具体原因未确定`);
+            throw next;
+        }
+    }
+}
+
 async function askLLM(system, user, opts = {}) {
-    try { return await withTokenFallback(o => askLLMOnce(system, user, o), opts); }
+    try { return await retryIfBlocked(system, s => withTokenFallback(o => askLLMOnce(s, user, o), opts), opts); }
     catch (e) {
         if (e.emptyLength) throw Object.assign(new Error(`AI 回复是空的（${e.diag || '没有更多信息'}）。带思考的模型会先把长度用在思考上：到设置 → 翻译和 AI 把「回复长度上限」调大，或者换不带思考的模型`), { emptyLength: true, diag: e.diag });
         throw e;
     }
 }
+function logAiSend(fn, api, messages, maxTokens) {
+    try {
+        const act = aiCfg().active ?? 'tavern:';
+        const preset = act === 'plain' ? '不套预设' : act.startsWith('tavern:') ? `酒馆预设「${act.slice(7) || currentTavernPreset() || '当前'}」` : `智库预设「${aiCfg().list?.[act]?.name || act}」`;
+        const lines = messages.map((m, i) => `${i + 1}. ${m.role}：${typeof m.content === 'string' ? m.content.replace(/\s+/g, ' ').slice(0, 90) : '[文字＋图片]'}`);
+        globalThis.__zkLog?.('AI 请求', `${(AI_FNS.find(f => f[0] === fn) || [0, fn || '其它'])[1]} · ${api.from || '独立接口'} / ${api.model || '?'} · ${preset} · ${messages.length} 条 · 上限 ${maxTokens}`, lines.join('\n'));
+    } catch { /* 记不了就算了 */ }
+}
 async function askLLMOnce(system, user, { maxTokens = 800, fn = '' } = {}) {
     const api = apiFor(fn);
     const messages = await aiMessages(fn, system, user);
+    logAiSend(fn, api, messages, maxTokens);
     let res;
     if (api.st) {
         const ctx = SillyTavern.getContext();
@@ -4439,7 +4499,8 @@ async function askRoomy(sys, user, opts) {
 async function askCastSafe(sys, cardName, label, text, fromEnd) {
     text = String(text || '');
     const userFor = limit => `卡名：${cardName}\n${label}：\n${fromEnd ? text.slice(-limit) : text.slice(0, limit)}`;
-    try { return await askShrinking(sys, userFor, { maxTokens: 8000, fn: 'look' }); }
+    // This path already has its own bounded, ordinary-appearance-only fallback.
+    try { return await askShrinking(sys, userFor, { maxTokens: 8000, fn: 'look', skipBlockedRetry: true }); }
     catch (e) {
         if (!BLOCKED.test(String(e?.providerMessage || e?.message || e))) throw e;
         const sys2 = sys.replace(/NSFW 身体单独放进 nsfw：[^\n]*/, 'nsfw 一律写 []。');
@@ -4456,7 +4517,7 @@ async function askCastSafe(sys, cardName, label, text, fromEnd) {
         const people = []; let blocked = 0, failed = 0, read = 0;
         for (const ch of selected) {
             let raw;
-            try { raw = await askRoomy(sys2, `卡名：${cardName}\n${label}（其中一段）：\n${ch}`, { maxTokens:8000, fn:'look' }); }
+            try { raw = await askRoomy(sys2, `卡名：${cardName}\n${label}（其中一段）：\n${ch}`, { maxTokens:8000, fn:'look', skipBlockedRetry: true }); }
             catch (error) {
                 if (!BLOCKED.test(String(error?.providerMessage || error?.message || error))) throw error;
                 blocked++; continue;
@@ -4646,11 +4707,12 @@ ${PAIRS}
 /** 让 AI 看一张图（要能看图的模型）。imageDataUrl 是 data:image/... */
 /** 看图同理：一开始就给够长度 */
 async function askVision(system, text, imageDataUrl, opts = {}) {
-    return withTokenFallback(o => askVisionOnce(system, text, imageDataUrl, o), opts);
+    return retryIfBlocked(system, s => withTokenFallback(o => askVisionOnce(s, text, imageDataUrl, o), opts), opts);
 }
 async function askVisionOnce(system, text, imageDataUrl, { maxTokens = 800, fn = '' } = {}) {
     const api = apiFor(fn);
     const messages = await aiMessages(fn, system, [{ type: 'text', text }, { type: 'image_url', image_url: { url: imageDataUrl } }]);
+    logAiSend(fn, api, messages, maxTokens);
     let body;
     if (api.st) {
         const ctx = SillyTavern.getContext();
@@ -5878,7 +5940,8 @@ function openWindow(view) {
             if (m) { ev.preventDefault(); charAction('addpair', { dataset: { where: m[1] } }); }
         });
         for (const t of ['pointerup', 'pointercancel', 'pointermove', 'scroll']) root.addEventListener(t, cancelLongPress, true);
-        root.addEventListener('contextmenu', ev => { if (ev.target.closest?.('[data-lp]')) ev.preventDefault(); });
+        // 手机上长按时浏览器先发 contextmenu（还会 pointercancel 把计时器取消）：直接在这里触发长按；电脑上右键也一样
+        root.addEventListener('contextmenu', ev => { const t = ev.target.closest?.('[data-lp]'); if (!t) return; ev.preventDefault(); if (!(ui.selecting && t.dataset.lp === 'ticket')) lpFire(t); });
         root.addEventListener('toggle', ev => {
             const f = ev.target.closest?.('[data-fold]'); if (f) ui.studio.open[f.dataset.fold] = f.open;
             const g = ev.target.closest?.('[data-sfold]'); if (g) ui.setOpen[g.dataset.sfold] = g.open;
@@ -8986,7 +9049,7 @@ function viewSettings(d) {
       <div class="pc-row-between pc-mt-s"><b>正文自动插图</b><span class="pc-dim small">点击正文段落即可确认生图</span></div>
       <div class="pc-seg three">${[['off', '关'], ['inline', '跟正文一起写'], ['after', '写完再请求']].map(([v, t]) => `<button class="${(d.options.illustMode || 'off') === v ? 'on' : ''}" data-act="illmode" data-mode="${v}">${t}</button>`).join('')}</div>
       <div class="pc-hint">${d.options.illustMode === 'inline' ? '每次发消息时告诉聊天 AI：在有画面感的地方顺手写一行生图标记。不多花请求，但要模型听话；破限或预设管得很死的话可能不写。' : d.options.illustMode === 'after' ? '回复写完后，用「AI」设置里选的 API 另外请求一次，先整理瞬间、人物姿势和镜头构图，再转成标签插回正文。多一次请求，但不改聊天 AI 的输出，跟智绘姬的「自动 LLM 请求生图」一样。' : '打开后不用自己写标记，回复里会自动出现生图标记，再按上面的开关自动出图。'}</div>
-      ${d.options.illustMode && d.options.illustMode !== 'off' ? `<label class="pc-field"><span>每条回复最多几张 · 自行填写</span><input type="number" min="1" step="1" inputmode="numeric" data-illmax value="${esc(d.options.illustMax ?? 1)}"></label>` : ''}`);
+      ${d.options.illustMode && d.options.illustMode !== 'off' ? `<label class="pc-field"><span>每条回复画几张（正文够长就画满）</span><input type="number" min="1" step="1" inputmode="numeric" data-illmax value="${esc(d.options.illustMax ?? 1)}"></label>` : ''}`);
 
     const illustEditor = renderIllustrationEditor(d.options, ui.illustPromptDraft, !!illustrationLastRequest, esc);
     const nightMode = d.options.nightMode || 'day';
@@ -9074,17 +9137,22 @@ function onPointerDown(ev) {
     if (!t || (ui.selecting && t.dataset.lp === 'ticket')) return;
     lp.x = ev.clientX; lp.y = ev.clientY;
     clearTimeout(lp.timer);
-    lp.timer = setTimeout(() => {
-        lp.fired = Date.now();
-        if (t.dataset.lp === 'ticket') openTicketSheet(refFrom(t));
-        else if (t.dataset.lp === 'col') tagMenu(t.dataset.col);
-        else if (t.dataset.lp === 'ltag') toggleBlockTag(t.dataset.tag);
-        else if (t.dataset.lp === 'vibe') vibeMenu(t.dataset.id);
-        else if (t.dataset.lp === 'crgroup') crMenu(t.dataset.id);
-    }, 520);
+    lp.target = t; lp.cancelledTarget = null;
+    lp.timer = setTimeout(() => lpFire(t), 450);
+}
+function lpFire(t) {
+    clearTimeout(lp.timer);
+    if (lp.cancelledTarget === t || (lp.lastTarget === t && Date.now() - lp.lastFire < 800)) return;
+    lp.fired = lp.lastFire = Date.now(); lp.lastTarget = t;
+    if (t.dataset.lp === 'ticket') openTicketSheet(refFrom(t));
+    else if (t.dataset.lp === 'col') tagMenu(t.dataset.col);
+    else if (t.dataset.lp === 'ltag') toggleBlockTag(t.dataset.tag);
+    else if (t.dataset.lp === 'vibe') vibeMenu(t.dataset.id);
+    else if (t.dataset.lp === 'crgroup') crMenu(t.dataset.id);
 }
 function cancelLongPress(ev) {
     if (ev.type === 'pointermove' && Math.hypot(ev.clientX - lp.x, ev.clientY - lp.y) < 10) return;
+    if (ev.type === 'pointermove' || ev.type === 'scroll') lp.cancelledTarget = lp.target;
     clearTimeout(lp.timer);
 }
 function refFrom(el) { return { type: el.dataset.type, id: el.dataset.id }; }
@@ -11301,7 +11369,7 @@ function modal(inner) {
     box.closeModal = () => back.remove();
     const openedAt = Date.now();
     back.addEventListener('click', ev => { if (ev.target === back && Date.now() - openedAt > 400) back.remove(); });
-    setTimeout(() => { if (back.isConnected && DOC.querySelectorAll('.pc-modal-backdrop')[DOC.querySelectorAll('.pc-modal-backdrop').length - 1] === back) box.querySelector('textarea, input')?.focus(); }, 30);
+    setTimeout(() => { if (back.isConnected && DOC.querySelectorAll('.pc-modal-backdrop')[DOC.querySelectorAll('.pc-modal-backdrop').length - 1] === back) box.querySelector('textarea, input')?.focus({preventScroll:true}); }, 30);
     return box;
 }
 function promptText(title, value = '', multiline = false) {
@@ -11677,7 +11745,7 @@ async function start() {
         onRequest: request => { illustrationLastRequest = request; },
         afterSave: async (id, selection = {}) => { addMesButtons(); return __mod_marker.process(id, selection.manual ? {manual:true,tokenIndices:selection.tokenIndices} : {}); },
     });
-    const selectedImages = createSelectedImageController({document:DOC,getContext:()=>SillyTavern.getContext(),settings:()=>__mod_marker.settings(),generate:shot=>illustrationPlanner.selected(shot),notify:message=>toastr.info(message,'智库 · 选段生图')});
+    const selectedImages = createSelectedImageController({document:DOC,getContext:()=>SillyTavern.getContext(),settings:()=>__mod_marker.settings(),generate:shot=>illustrationPlanner.selected(shot),notify:message=>toastr.info(message,'智库 · 选段生图'),modal:inner=>__mod_ui.modal(inner)});
     cleanups.push(() => selectedImages.stop());
     const syncIllust = type => illustrationPlanner.sync(type);
     const illustAfter = id => illustrationPlanner.after(id);

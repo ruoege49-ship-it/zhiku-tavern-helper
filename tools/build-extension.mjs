@@ -25,8 +25,8 @@ process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.44';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.44');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.45';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.45');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -4854,6 +4854,63 @@ patch("const fakeArtistName = text => NOT_ARTIST.test(String(text || '').replace
     const a=s.indexOf('    const fake = a => a && (NOT_ARTIST.test('),b=s.indexOf('\n',a);assert(a>=0&&b>a);
     patch(s.slice(a,b),'    const fake = a => a && fakeArtistName(a.tag);');
 }
+// 0.8.45: bounded retry also handles structured provider errors.
+patch("async function askLLM(system, user, opts = {}) {\n    try { return await withTokenFallback(o => askLLMOnce(system, user, o), opts); }",fs.readFileSync('src/ai-block-retry.js','utf8')+'\n'+"async function askLLM(system, user, opts = {}) {\n    try { return await retryIfBlocked(system, s => withTokenFallback(o => askLLMOnce(s, user, o), opts), opts); }");
+patch(`async function askVision(system, text, imageDataUrl, opts = {}) {
+    return withTokenFallback(o => askVisionOnce(system, text, imageDataUrl, o), opts);
+}`,`async function askVision(system, text, imageDataUrl, opts = {}) {
+    return retryIfBlocked(system, s => withTokenFallback(o => askVisionOnce(s, text, imageDataUrl, o), opts), opts);
+}`);
+patch(`async function askLLMOnce(system, user, { maxTokens = 800, fn = '' } = {}) {
+    const api = apiFor(fn);
+    const messages = await aiMessages(fn, system, user);`,`function logAiSend(fn, api, messages, maxTokens) {
+    try {
+        const act = aiCfg().active ?? 'tavern:';
+        const preset = act === 'plain' ? '不套预设' : act.startsWith('tavern:') ? \`酒馆预设「\${act.slice(7) || currentTavernPreset() || '当前'}」\` : \`智库预设「\${aiCfg().list?.[act]?.name || act}」\`;
+        const lines = messages.map((m, i) => \`\${i + 1}. \${m.role}：\${typeof m.content === 'string' ? m.content.replace(/\\s+/g, ' ').slice(0, 90) : '[文字＋图片]'}\`);
+        globalThis.__zkLog?.('AI 请求', \`\${(AI_FNS.find(f => f[0] === fn) || [0, fn || '其它'])[1]} · \${api.from || '独立接口'} / \${api.model || '?'} · \${preset} · \${messages.length} 条 · 上限 \${maxTokens}\`, lines.join('\\n'));
+    } catch { /* 记不了就算了 */ }
+}
+async function askLLMOnce(system, user, { maxTokens = 800, fn = '' } = {}) {
+    const api = apiFor(fn);
+    const messages = await aiMessages(fn, system, user);
+    logAiSend(fn, api, messages, maxTokens);`);
+patch(`    const messages = await aiMessages(fn, system, [{ type: 'text', text }, { type: 'image_url', image_url: { url: imageDataUrl } }]);`,`    const messages = await aiMessages(fn, system, [{ type: 'text', text }, { type: 'image_url', image_url: { url: imageDataUrl } }]);
+    logAiSend(fn, api, messages, maxTokens);`);
+// 0.8.39：长按修好：手机长按时浏览器的 contextmenu / pointercancel 会把计时器取消，改成 contextmenu 直接触发（电脑右键也能用）
+patch(`    lp.timer = setTimeout(() => {
+        lp.fired = Date.now();
+        if (t.dataset.lp === 'ticket') openTicketSheet(refFrom(t));
+        else if (t.dataset.lp === 'col') tagMenu(t.dataset.col);
+        else if (t.dataset.lp === 'ltag') toggleBlockTag(t.dataset.tag);
+        else if (t.dataset.lp === 'vibe') vibeMenu(t.dataset.id);
+        else if (t.dataset.lp === 'crgroup') crMenu(t.dataset.id);
+    }, 520);
+}`,`    lp.target = t; lp.cancelledTarget = null;
+    lp.timer = setTimeout(() => lpFire(t), 450);
+}
+function lpFire(t) {
+    clearTimeout(lp.timer);
+    if (lp.cancelledTarget === t || (lp.lastTarget === t && Date.now() - lp.lastFire < 800)) return;
+    lp.fired = lp.lastFire = Date.now(); lp.lastTarget = t;
+    if (t.dataset.lp === 'ticket') openTicketSheet(refFrom(t));
+    else if (t.dataset.lp === 'col') tagMenu(t.dataset.col);
+    else if (t.dataset.lp === 'ltag') toggleBlockTag(t.dataset.tag);
+    else if (t.dataset.lp === 'vibe') vibeMenu(t.dataset.id);
+    else if (t.dataset.lp === 'crgroup') crMenu(t.dataset.id);
+}`);
+patch(`        root.addEventListener('contextmenu', ev => { if (ev.target.closest?.('[data-lp]')) ev.preventDefault(); });`,`        // 手机上长按时浏览器先发 contextmenu（还会 pointercancel 把计时器取消）：直接在这里触发长按；电脑上右键也一样
+        root.addEventListener('contextmenu', ev => { const t = ev.target.closest?.('[data-lp]'); if (!t) return; ev.preventDefault(); if (!(ui.selecting && t.dataset.lp === 'ticket')) lpFire(t); });`);
+// 0.8.39：双击段落生图的弹窗改用智库自己的弹窗（样子统一，不会被挤到屏幕上面看不见）
+patch(`notify:message=>toastr.info(message,'智库 · 选段生图')});`,`notify:message=>toastr.info(message,'智库 · 选段生图'),modal:inner=>__mod_ui.modal(inner)});`);
+// 0.8.39：插图张数改成「画满」
+patch(`<span>每条回复最多几张 · 自行填写</span>`,`<span>每条回复画几张（正文够长就画满）</span>`);
+// Shared modal delayed focus must preserve the viewport, including paragraph dialogs.
+patch(`    if (ev.type === 'pointermove' && Math.hypot(ev.clientX - lp.x, ev.clientY - lp.y) < 10) return;
+    clearTimeout(lp.timer);`, `    if (ev.type === 'pointermove' && Math.hypot(ev.clientX - lp.x, ev.clientY - lp.y) < 10) return;
+    if (ev.type === 'pointermove' || ev.type === 'scroll') lp.cancelledTarget = lp.target;
+    clearTimeout(lp.timer);`);
+patch("box.querySelector('textarea, input')?.focus();", "box.querySelector('textarea, input')?.focus({preventScroll:true});");
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
@@ -4867,9 +4924,9 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',(prefix+s+'\n}\n').replace(/\r\n/g, '\n'));
 fs.copyFileSync('src/index.js',dir+'/index.js');
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.44',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.44',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.45',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.45',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.8.44 built; storage keys and shared upload preserved.');
+console.log('Extension 0.8.45 built; storage keys and shared upload preserved.');

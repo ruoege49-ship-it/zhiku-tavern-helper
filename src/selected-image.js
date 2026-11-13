@@ -41,21 +41,21 @@ export function selectedImageStory(source, {start='image###',end='###'}={}) {
     return imageStoryText(text);
 }
 
-export function createSelectedImageController({document:doc,getContext,settings,generate,notify}) {
+export function createSelectedImageController({document:doc,getContext,settings,generate,notify,modal}) {
     const win=doc.defaultView;
     let stopped=false,snapshot=null,panel=null,busy=false,timer;
     const key=c=>String(c.getCurrentChatId?.()??c.chatId??'')+'|'+String(c.characterId??'')+'|'+String(c.groupId??'');
     const mount=el=>(doc.documentElement||doc.body).appendChild(el);
     const style=doc.createElement('style');style.textContent=`
-      .pc-selection-image{position:fixed;right:16px;bottom:100px;z-index:2147480100;padding:12px 18px;border:1px solid #aebbc6;border-radius:24px;background:#202a36;color:#fff;font-size:15px;box-shadow:0 4px 16px #0005;cursor:pointer}
+      .pc-selection-image{position:fixed;right:16px;bottom:100px;z-index:2147480100;padding:11px 18px;border:1.5px solid #3a2a22;border-radius:999px;background:#f4efe4;color:#3a2a22;font-size:15px;box-shadow:0 3px 0 #3a2a2233,0 6px 18px #0003;cursor:pointer}
       .pc-selection-image[hidden]{display:none}
       .pc-selection-backdrop{position:fixed;inset:0;z-index:2147480200;display:flex;align-items:center;justify-content:center;background:#0009;padding:14px;box-sizing:border-box}
-      .pc-selection-dialog{width:min(100%,560px);max-height:90dvh;overflow:auto;box-sizing:border-box;border-radius:18px;padding:20px;background:#20242b;color:#f3f4f6;font:15px/1.6 sans-serif;scrollbar-width:none}
+      .pc-selection-dialog{width:min(100%,560px);max-height:90dvh;overflow:auto;box-sizing:border-box;border-radius:18px;padding:20px;background:#f4efe4;color:#3a2a22;border:1.5px solid #3a2a22;font:15px/1.6 serif;scrollbar-width:none}
       .pc-selection-dialog *{box-sizing:border-box;scrollbar-width:none}.pc-selection-dialog::-webkit-scrollbar,.pc-selection-dialog *::-webkit-scrollbar{display:none}
       .pc-selection-dialog h3{margin:0 0 14px}.pc-selection-dialog label{display:block;margin:12px 0 6px}
-      .pc-selection-dialog textarea{display:block;width:100%;height:160px;resize:vertical;overflow:auto;border:1px solid #627082;border-radius:10px;padding:10px;background:#15191f;color:inherit;font:inherit}
-      .pc-selection-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}.pc-selection-actions button{min-height:42px;padding:8px 18px;border-radius:10px;border:1px solid #627082;background:#303e50;color:#fff;font:inherit;cursor:pointer}.pc-selection-actions button:disabled{opacity:.6}
-      .pc-selection-dialog p{font-size:13px;color:#bdc6d0;margin:10px 0}.pc-selection-status{white-space:pre-wrap;overflow-wrap:anywhere}
+      .pc-selection-dialog textarea{display:block;width:100%;height:160px;resize:vertical;overflow:auto;border:0;border-radius:12px;padding:10px;background:#ebe3d3;color:inherit;font:inherit}
+      .pc-selection-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}.pc-selection-actions button{min-height:42px;padding:8px 18px;border-radius:999px;border:1.5px solid #3a2a22;background:#f4efe4;color:#3a2a22;font:inherit;cursor:pointer}.pc-selection-actions button[data-generate]{background:#3a2a22;color:#f4efe4}.pc-selection-actions button:disabled{opacity:.6}
+      .pc-selection-dialog p{font-size:13px;color:#7a6a5c;margin:10px 0}.pc-selection-status{white-space:pre-wrap;overflow-wrap:anywhere}
     `;mount(style);
     const button=doc.createElement('button');button.type='button';button.className='pc-selection-image';button.textContent='为这段生图';button.hidden=true;mount(button);
     const current=s=>{const c=getContext();return !stopped&&key(c)===s.chatKey&&c.chat?.[s.id]===s.msg&&s.msg.mes===s.source&&s.msg.swipe_id===s.swipe;};
@@ -103,14 +103,25 @@ export function createSelectedImageController({document:doc,getContext,settings,
     button.addEventListener('pointerdown',preserve);button.addEventListener('mousedown',preserve);
     function dismiss(){panel?.remove();panel=null;snapshot=null;button.hidden=true;}
     function openDialog(){
-        if(!snapshot||busy)return;
+        if(!snapshot||busy||panel)return;
         const shot=snapshot;
         if(!current(shot)){notify('聊天或原文已变化，请重新选择文字');dismiss();return;}
         if(!Number.isInteger(shot.insertAt)){notify('所选文字无法对应聊天原文，请在正文里重新选择一段');return;}
         button.hidden=true;
+        let box;
+        if(modal){
+            // 用智库自己的弹窗：样子统一，也不会被主题的缩放 / 变形挤到屏幕外
+            box=modal('<h3 class="pc-h3">为这段生成图片？</h3><textarea class="pc-textarea" readonly aria-label="选中段落" style="height:140px"></textarea><div class="pc-hint">结合整篇正文，为这段生成一张图片，插在这段之后。</div><div class="pc-selection-status pc-dim small" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere"></div><div class="pc-actions"><button type="button" class="pc-btn" data-close>取消</button><button type="button" class="pc-btn dark" data-generate>生成图片</button></div>');
+            box.setAttribute('aria-modal','true');box.setAttribute('aria-label','为这段生成图片？');
+            // The shared modal can also close through its backdrop, outside this controller.
+            const observer=new win.MutationObserver(()=>{if(!box.isConnected&&panel===handle)dismiss();});
+            const handle={remove:()=>{observer.disconnect();box.closeModal?.();}};
+            panel=handle;observer.observe(box.parentNode.parentNode,{childList:true});
+        }else{
         panel=doc.createElement('div');panel.className='pc-selection-backdrop';
-        const box=doc.createElement('div');box.className='pc-selection-dialog';box.setAttribute('role','dialog');box.setAttribute('aria-modal','true');box.setAttribute('aria-label','为这段生成图片？');
+        box=doc.createElement('div');box.className='pc-selection-dialog';box.setAttribute('role','dialog');box.setAttribute('aria-modal','true');box.setAttribute('aria-label','为这段生成图片？');
         box.innerHTML='<h3>为这段生成图片？</h3><textarea readonly aria-label="选中段落"></textarea><p>结合整篇正文，为这段生成一张图片，插在这段之后。</p><div class="pc-selection-status" role="status"></div><div class="pc-selection-actions"><button type="button" data-generate>生成图片</button><button type="button" data-close>取消</button></div>';
+        }
         box.querySelector('textarea').value=shot.text;
         const submit=box.querySelector('[data-generate]'),status=box.querySelector('[role="status"]');
         box.querySelector('[data-close]').onclick=dismiss;
@@ -122,7 +133,7 @@ export function createSelectedImageController({document:doc,getContext,settings,
             catch(e){status.textContent=e.message||String(e);submit.disabled=false;}
             finally{busy=false;}
         };
-        panel.append(box);mount(panel);submit.focus();
+        if(!modal){panel.append(box);mount(panel);}try{submit.focus({preventScroll:true});}catch{submit.focus();}
     }
     button.addEventListener('click',openDialog);
     doc.addEventListener('click',clickParagraph);

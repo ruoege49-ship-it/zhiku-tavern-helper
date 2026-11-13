@@ -41,7 +41,7 @@ function zkLog(kind, msg, detail = '') {
         const text = String(msg ?? '').slice(0,300);
         const det = (typeof detail === 'string' ? detail : Object.entries(detail || {}).map(([k,v]) => Array.isArray(v) ? `${k}：${v.length ? '\n  '+v.join('\n  ') : '无'}` : `${k}：${v === true ? '有' : v === false ? '无' : v === '' || v == null ? '（空）' : v}`).join('\n')).slice(0,LOG_DETAIL);
         const last = logBuf.at(-1);
-        if (kind !== '生图' && kind !== '生图失败' && last && last.k === kind && last.m === text && last.d === det && Date.now()-last.t < 60000) { last.n = (last.n || 1)+1; last.t = Date.now(); }
+        if (!['生图','生图失败','AI 请求'].includes(kind) && last && last.k === kind && last.m === text && last.d === det && Date.now()-last.t < 60000) { last.n = (last.n || 1)+1; last.t = Date.now(); }
         else logBuf.push({t:Date.now(),k:String(kind),m:text,d:det});
         trimLogs(logBuf); saveLogsSoon();
     } catch {}

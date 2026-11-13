@@ -4,7 +4,7 @@ import { resolveImageCharacters } from './image-characters.js';
 export const DEFAULT_ILLUSTRATION_PROMPT = `你负责根据小说正文选择插图瞬间，并整理画面信息。
 
 【图片数量】
-遵循输入 imageLimit（玩家设置的最多张数），不自行固定张数。
+按输入 imageLimit 写满张数：正文够长就写满 imageLimit 张，分散在正文前中后不同位置；只有正文太短、实在找不出这么多不同瞬间时才少写。
 每张图描绘一个独立瞬间，不把连续发生的动作塞进同一张图。
 
 【正文范围】
@@ -57,7 +57,11 @@ name（名字）、registered（是否调用候选角色，布尔值）、gender
 characters 只列实际可见的人；人数标签由插件根据名单生成，scene 和各人物标签不另写人数。`;
 
 export function illustrationPrompt(options = {}) {
-    return typeof options.illustPrompt === 'string' && options.illustPrompt.trim() ? options.illustPrompt : DEFAULT_ILLUSTRATION_PROMPT;
+    const p = typeof options.illustPrompt === 'string' ? options.illustPrompt : '';
+    if (!p.trim()) return DEFAULT_ILLUSTRATION_PROMPT;
+    // 存下来的是旧版默认提示词（玩家没改过）：换成新的「写满张数」
+    if (p.includes('遵循输入 imageLimit（玩家设置的最多张数），不自行固定张数。') && p.replace('遵循输入 imageLimit（玩家设置的最多张数），不自行固定张数。', '按输入 imageLimit 写满张数：正文够长就写满 imageLimit 张，分散在正文前中后不同位置；只有正文太短、实在找不出这么多不同瞬间时才少写。') === DEFAULT_ILLUSTRATION_PROMPT) return DEFAULT_ILLUSTRATION_PROMPT;
+    return p;
 }
 
 export function saveIllustrationPrompt(options, value) {
