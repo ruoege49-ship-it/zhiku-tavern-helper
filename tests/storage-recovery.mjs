@@ -98,9 +98,9 @@ console.log('PASS: backup recency/priority, corrupt-candidate rejection, setting
     assert.equal(Object.keys(b.probes).length, 0); assert.equal(b.file, file);
 }
 console.log('PASS: no pre-load writes, cross-client additions, deletion propagation, diagnosis read/write/cleanup without changing the library.');
-// Saved empty groups and style-like artists survive file/backup recovery, until explicitly deleted.
+// Saved empty groups and ordinary artists survive file/backup recovery, until explicitly deleted.
 {
-    const data = M.emptyData(), artist = M.ensureArtist(data, 'artist:detailed');
+    const data = M.emptyData(), artist = M.ensureArtist(data, 'artist:fixture_artist');
     data.groups.empty = { id: 'empty', name: '保留的空串', members: [], images: [], extra: '', raw: '', note: '备注保留', neg: 'blur' };
     const ref = { type: 'group', id: 'empty' };
     data.active = ref; data.recent = [ref, { type: 'artist', id: artist.id }]; data.bindings.card = ref;
@@ -118,4 +118,4 @@ console.log('PASS: no pre-load writes, cross-client additions, deletion propagat
     assert.equal(c.store.getData().active, null); assert.equal(c.store.getData().recent.length, 0); assert(!c.store.getData().bindings.card);
     for (const h of [a,b,c,recovered]) h.store.detach();
 }
-console.log('PASS: saved empty groups and style-like artists survive reload/recovery; manual deletion persists and clears references.');
+console.log('PASS: saved empty groups and ordinary artists survive reload/recovery; manual deletion persists and clears references.');
