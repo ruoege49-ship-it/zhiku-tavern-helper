@@ -1097,7 +1097,7 @@ function createComicController(deps) {
 const DEFAULT_ILLUSTRATION_PROMPT = `你负责根据小说正文选择插图瞬间，并整理画面信息。
 
 【图片数量】
-按输入 imageLimit 写满张数：正文够长就写满 imageLimit 张，分散在正文前中后不同位置；只有正文太短、实在找不出这么多不同瞬间时才少写。
+必须正好写满输入 imageLimit 张，分散在正文前中后不同位置。正文里的瞬间不够时自己编：同一场景换景别和角度（特写、背影、俯拍）、写在场人物的反应、补正文没细写但合理的前后一刻，直到写满为止，不能少写。
 每张图描绘一个独立瞬间，不把连续发生的动作塞进同一张图。
 
 【正文范围】
@@ -1153,7 +1153,7 @@ function illustrationPrompt(options = {}) {
     const p = typeof options.illustPrompt === 'string' ? options.illustPrompt : '';
     if (!p.trim()) return DEFAULT_ILLUSTRATION_PROMPT;
     // 存下来的是旧版默认提示词（玩家没改过）：换成新的「写满张数」
-    if (p.includes('遵循输入 imageLimit（玩家设置的最多张数），不自行固定张数。') && p.replace('遵循输入 imageLimit（玩家设置的最多张数），不自行固定张数。', '按输入 imageLimit 写满张数：正文够长就写满 imageLimit 张，分散在正文前中后不同位置；只有正文太短、实在找不出这么多不同瞬间时才少写。') === DEFAULT_ILLUSTRATION_PROMPT) return DEFAULT_ILLUSTRATION_PROMPT;
+    for (const line of ['遵循输入 imageLimit（玩家设置的最多张数），不自行固定张数。', '按输入 imageLimit 写满张数：正文够长就写满 imageLimit 张，分散在正文前中后不同位置；只有正文太短、实在找不出这么多不同瞬间时才少写。']) if (p.includes(line) && p.replace(line, '必须正好写满输入 imageLimit 张，分散在正文前中后不同位置。正文里的瞬间不够时自己编：同一场景换景别和角度（特写、背影、俯拍）、写在场人物的反应、补正文没细写但合理的前后一刻，直到写满为止，不能少写。') === DEFAULT_ILLUSTRATION_PROMPT) return DEFAULT_ILLUSTRATION_PROMPT;
     return p;
 }
 
@@ -1688,7 +1688,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.45（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.46（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1737,7 +1737,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.45';
+globalThis.__PC_VERSION = '0.8.46';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -2466,7 +2466,7 @@ function idbOperation(k, value, writing = false) {
 const idbGet = k => idbOperation(k);
 const idbSet = (k, value) => (idbSaving = idbSaving.then(() => idbOperation(k, value, true)));
 // Device-local diagnostics; library files and settings never contain these records.
-const LOG_KEY = 'zhiku_log', LOG_MAX = 300, LOG_BYTES = 1000000, LOG_DETAIL = 3000;
+const LOG_KEY = 'zhiku_log', LOG_MAX = 300, LOG_BYTES = 1000000, LOG_DETAIL = 12000;
 let logBuf = [], logTimer = null, logEpoch = 0;
 const logs = () => logBuf;
 function cleanLogs(value) {
@@ -2883,6 +2883,7 @@ function skipSigma(w, h, model) {
  * refs：{ images:[base64], strengths:[], infos:[] }（氛围，可不填）
  */
 function buildParameters({ positive, negative, width, height, seed, chars = [], refs = null, director = null, comic = false }) {
+    chars=normalizeNaiChars(chars);
     const s = settings();
     const model = comic ? 'nai-diffusion-5-full' : s.novelaimode;
     const isV3 = model === 'nai-diffusion-3';
@@ -2923,8 +2924,11 @@ function buildParameters({ positive, negative, width, height, seed, chars = [], 
         p.characterPrompts = chars.map(c => ({ enabled: true, prompt: c.prompt, uc: c.uc || '', center: c.center || { x: 0.5, y: 0.5 } }));
         p.v4_prompt = { caption: { base_caption: positive, char_captions: chars.map(c => ({ char_caption: c.prompt, centers: [c.center || { x: 0.5, y: 0.5 }] })) }, use_coords: useCoords, use_order: true };
         p.v4_negative_prompt = { caption: { base_caption: negative, char_captions: chars.map(c => ({ char_caption: c.uc || '', centers: [c.center || { x: 0.5, y: 0.5 }] })) }, legacy_uc: false };
-        delete p.reference_image_multiple;
-        delete p.reference_information_extracted_multiple;
+        if (isV5) {
+            delete p.reference_image_multiple; delete p.reference_information_extracted_multiple;
+        } else {
+            p.autoSmea = false; p.inpaintImg2ImgStrength = 1;
+        }
     }
     if (isV5) {
         const k = ucpValue(s).toLowerCase();
@@ -2984,16 +2988,19 @@ function authKey() {
  */
 function createNaiGate({sleep=ms=>new Promise(r=>setTimeout(r,ms)),now=()=>Date.now(),notice=()=>{},gap=1500}={}) {
  let queue=Promise.resolve(),next=0,stopped=false;
- return {stop(){stopped=true;},run(fn){const job=queue.then(async()=>{
+ let wake;const stopping=new Promise(resolve=>{wake=resolve;});
+ return {stop(){stopped=true;wake();},run(fn,{retryServer=true}={}){const job=queue.then(async()=>{
   for(let attempt=0;;attempt++){
    if(stopped)throw new Error('生图已停止');
-   const delay=next-now();if(delay>0)await sleep(delay);
+   const delay=next-now();if(delay>0)await Promise.race([sleep(delay),stopping]);
    if(stopped)throw new Error('生图已停止');
    try{return await fn();}
-   catch(e){if((e.status!==429&&!e.retryable)||attempt>=2)throw e;
+   catch(e){if(e?.name==='AbortError'||(e.status!==429&&!(retryServer&&(e.retryable||(e.status>=500&&e.status<=504))))||attempt>=2)throw e;
     const seconds=Number(e.retryAfter),date=Date.parse(e.retryAfter);
     const retry=Number.isFinite(seconds)&&seconds>0?seconds*1000:Number.isFinite(date)?Math.max(0,date-now()):0;
-    next=now()+Math.max(retry,5000*2**attempt);notice('请求受到限流，等待 '+Math.ceil((next-now())/1000)+' 秒后重试');
+    next=now()+Math.max(retry,5000*2**attempt);const wait=Math.ceil((next-now())/1000);
+    notice(e.status===429?'请求受到限流（共享账号可能有人同时在用），等待 '+wait+' 秒后重试':'NovelAI 服务器返回 '+e.status+'，等待 '+wait+' 秒后重试');
+    globalThis.__zkLog?.('生图重试',(e.status===429?'限流 429':'服务器 '+e.status)+' · 第 '+(attempt+1)+' 次重试，等 '+wait+' 秒');
    }finally{next=Math.max(next,now()+gap);}
   }
  });queue=job.catch(()=>{});return job;}};
@@ -3007,7 +3014,42 @@ function netError(e) {
     const where = mode === 'site' ? '第三方站点（站点可能挂了，或者地址填错了）' : mode === 'tavern' ? '酒馆后端（酒馆可能断开了，刷新页面试试）' : 'NovelAI（image.novelai.net）';
     return Object.assign(new Error(`连不上${where}，请求没发出去（${e.message}）。检查网络和 VPN，换个节点或稍后再试`), { status: 0 });
 }
-function generate(opts){opts={...opts,src:opts.src || '其他生图入口'};return __naiGate.run(()=>generateRequest(opts)).catch(e=>{throw netError(e);});}
+function normalizeNaiChars(chars) {
+    const snap = v => { const n = Number(v); return Number.isFinite(n) ? +Math.min(0.9, Math.max(0.1, Math.round((n - 0.1) / 0.2) * 0.2 + 0.1)).toFixed(1) : 0.5; };
+    return (Array.isArray(chars) ? chars : []).filter(c => String(c?.prompt || '').trim()).slice(0,6).map(c => ({
+        ...c, prompt:String(c.prompt).replace(/\b1girl\b/gi,'girl').replace(/\b1boy\b/gi,'boy'),
+        ...(c.center ? {center:{x:snap(c.center.x),y:snap(c.center.y)}} : {})
+    }));
+}
+// Keep the actual request's parameter shape and readable text; omit image/cache credentials by field.
+function naiRequestSnapshot(value, key = '', image = false) {
+    if (/key|token|secret|authorization/i.test(key)) return '[凭据已省略]';
+    image ||= /^(?:image|mask|data|reference_image_multiple(?:_cached)?|director_reference_images(?:_cached)?|vibe_encodings)$/.test(key);
+    if (typeof value === 'string') return image || /^data:image\//i.test(value) ? '[图片数据已省略]' : value;
+    if (Array.isArray(value)) return value.map(x=>naiRequestSnapshot(x,'',image));
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k,v])=>[k,naiRequestSnapshot(v,k,image)]));
+    return value;
+}
+function generate(opts) {
+    opts={...opts,src:opts.src || '其他生图入口'};
+    const cfg=settings(),nai=opts.backend!=='comfy'&&cfg.naiMode!=='gpt';
+    const divided=nai&&cfg.naiMode!=='tavern'&&(opts.comic||cfg.novelaimode!=='nai-diffusion-3')&&!(cfg.naiMode==='site'&&String(cfg.naiSiteSimple)==='true'&&!opts.comic);
+    const chars=divided?normalizeNaiChars(opts.chars):[];
+    if(divided)opts.chars=chars;
+    return __naiGate.run(()=>generateRequest(opts),{retryServer:nai}).catch(async error=>{
+        if(error?.name!=='AbortError'&&error?.status>=500&&error.status<=504&&chars.length){
+            globalThis.__zkLog?.('生图降级',`分人物请求连续返回 ${error.status}，合并 ${chars.length} 个人物的提示词后再试`);
+            const merged={...opts,positive:[opts.positive,...chars.map(c=>c.prompt)].filter(Boolean).join(', '),negative:[opts.negative,...chars.map(c=>c.uc)].filter(Boolean).join(', '),chars:[]};
+            try {
+                const result=await __naiGate.run(()=>generateRequest(merged),{retryServer:true});
+                toastr.info('分人物请求连续报错，这张已合并人物提示词生成','智库',{timeOut:4000});
+                return result;
+            }catch(next){throw netError(next);}
+        }
+        throw netError(error);
+    });
+}
+
 // ───────────── ComfyUI ─────────────
 // 出图走酒馆自带的 /api/sd/comfy/* 转发（酒馆服务器去连 ComfyUI）；
 // 读 ComfyUI 里存的工作流要浏览器直接去问 ComfyUI，ComfyUI 启动时得加 --enable-cors-header
@@ -3350,16 +3392,20 @@ async function generateRequest(opts) {
         分人物: (opts.chars || []).map((c, i) => `${i + 1}. ${c.prompt}${c.center ? ` @${c.center.x},${c.center.y}` : ''}`),
         角色参考: opts.director?.length || 0, 氛围: opts.refs?.images?.length || 0, 垫图: !!opts.i2i?.image,
     });
+    let naiSent=null;
     try {
-        const r = await generateRequestInner(opts);
+        const r = await generateRequestInner(opts, body=>{try{naiSent=naiRequestSnapshot(body);}catch{}});
         globalThis.__zkLog?.('生图', `成功 · ${((Date.now() - t0) / 1000).toFixed(1)} 秒 · ${(opts.chars || []).length ? (opts.chars.length + ' 个人物') : '没分人物'}${opts.director?.length ? ' · 带角色参考 ' + opts.director.length + ' 张' : ''}`, brief());
         return r;
     } catch (e) {
-        globalThis.__zkLog?.('生图失败', e.message || String(e), brief());
+        const b=brief();
+        const json=naiSent?JSON.stringify(naiSent,null,1):'';
+        const detail=json?'实际发送的 NovelAI 请求（图片与缓存凭据已省略）：\n'+json.slice(0,10000)+(json.length>10000?'\n[参数记录超过 10000 字，已截断]':'')+'\n来源：'+logSource:b;
+        globalThis.__zkLog?.('生图失败',(e.message || String(e))+(e.status?' · HTTP '+e.status:''),detail);
         throw e;
     }
 }
-async function generateRequestInner(opts) {
+async function generateRequestInner(opts, recordNai = () => {}) {
     const s = settings();
     if (opts.backend === 'comfy') {
         if (opts.i2i?.image) throw new Error('ComfyUI 通道暂不支持这里的垫图，请使用 NovelAI 通道');
@@ -3389,7 +3435,7 @@ async function generateRequestInner(opts) {
     const sent = {
         prompt: opts.positive, negative: opts.negative,
         size: `${params.width}×${params.height}`,
-        chars: (opts.chars || []).map(c => c.prompt),
+        chars: s.naiMode==='tavern'?[]:(params.characterPrompts || []).map(c => c.prompt),
         seed: params.seed,
         model,
         director: params.director_reference_images_cached?.length || 0,
@@ -3402,6 +3448,7 @@ async function generateRequestInner(opts) {
             variety_boost: !!params.skip_cfg_above_sigma, sm: false, sm_dyn: false, seed: params.seed,
         };
         if (model.includes('nai-diffusion-5')) { body.tag_hint_uc_preset = params.tag_hint_uc_preset; body.tag_hint_qt = 1; delete body.scheduler; }
+        recordNai(body);
         const r = await http('/api/novelai/generate-image', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });
         const text = await r.text();
         if (!r.ok) throw Object.assign(new Error(explain(r.status, text, true)),{status:r.status,retryAfter:r.headers?.get('Retry-After'),retryable:r.status===500});
@@ -3410,10 +3457,12 @@ async function generateRequestInner(opts) {
         return { image: toDataUrl(b64), sent };
     }
     const key = authKey();
+    const body={ input: opts.positive, model, action: opts.i2i?.image ? 'img2img' : 'generate', parameters: params, use_new_shared_trial: true };
+    recordNai(body);
     const r = await http(siteUrl('/ai/generate-image'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: '*/*', ...(key ? { Authorization: 'Bearer ' + key } : {}) },
-        body: JSON.stringify({ input: opts.positive, model, action: opts.i2i?.image ? 'img2img' : 'generate', parameters: params, use_new_shared_trial: true }),
+        body: JSON.stringify(body),
     });
     const buf = new Uint8Array(await r.arrayBuffer());
     if (!r.ok) throw Object.assign(new Error(explain(r.status, new TextDecoder().decode(buf))),{status:r.status,retryAfter:r.headers?.get('Retry-After')});
@@ -3435,7 +3484,7 @@ function explain(status, text, viaTavern = false) {
     if (status === 402) return 'NovelAI 点数不够，或者订阅不支持这个尺寸/步数';
     if (status === 429) return 'NovelAI 说太快了，同一个账号一次只能生成一张，等上一张出来再试';
     if (status === 400) return '参数不对：' + msg;
-    if (status >= 500) return 'NovelAI 服务器出错了，过一会再试（' + status + '）' + (viaTavern ? '。用酒馆里的 key 时，请求太快也会显示成这个' : '');
+    if (status >= 500) return 'NovelAI 服务器返回错误（' + status + '）' + (msg && !/^<|<html/i.test(msg) ? '：' + msg : '') + (viaTavern ? '。酒馆转发也可能将限流显示为这个状态' : '');
     return `生成失败（${status}）：${msg}`;
 }
 
@@ -9049,7 +9098,7 @@ function viewSettings(d) {
       <div class="pc-row-between pc-mt-s"><b>正文自动插图</b><span class="pc-dim small">点击正文段落即可确认生图</span></div>
       <div class="pc-seg three">${[['off', '关'], ['inline', '跟正文一起写'], ['after', '写完再请求']].map(([v, t]) => `<button class="${(d.options.illustMode || 'off') === v ? 'on' : ''}" data-act="illmode" data-mode="${v}">${t}</button>`).join('')}</div>
       <div class="pc-hint">${d.options.illustMode === 'inline' ? '每次发消息时告诉聊天 AI：在有画面感的地方顺手写一行生图标记。不多花请求，但要模型听话；破限或预设管得很死的话可能不写。' : d.options.illustMode === 'after' ? '回复写完后，用「AI」设置里选的 API 另外请求一次，先整理瞬间、人物姿势和镜头构图，再转成标签插回正文。多一次请求，但不改聊天 AI 的输出，跟智绘姬的「自动 LLM 请求生图」一样。' : '打开后不用自己写标记，回复里会自动出现生图标记，再按上面的开关自动出图。'}</div>
-      ${d.options.illustMode && d.options.illustMode !== 'off' ? `<label class="pc-field"><span>每条回复画几张（正文够长就画满）</span><input type="number" min="1" step="1" inputmode="numeric" data-illmax value="${esc(d.options.illustMax ?? 1)}"></label>` : ''}`);
+      ${d.options.illustMode && d.options.illustMode !== 'off' ? `<label class="pc-field"><span>每条回复画几张（一定画满）</span><input type="number" min="1" step="1" inputmode="numeric" data-illmax value="${esc(d.options.illustMax ?? 1)}"></label>` : ''}`);
 
     const illustEditor = renderIllustrationEditor(d.options, ui.illustPromptDraft, !!illustrationLastRequest, esc);
     const nightMode = d.options.nightMode || 'day';

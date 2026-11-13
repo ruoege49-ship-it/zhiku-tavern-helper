@@ -1,5 +1,5 @@
 // Device-local diagnostics; library files and settings never contain these records.
-const LOG_KEY = 'zhiku_log', LOG_MAX = 300, LOG_BYTES = 1000000, LOG_DETAIL = 3000;
+const LOG_KEY = 'zhiku_log', LOG_MAX = 300, LOG_BYTES = 1000000, LOG_DETAIL = 12000;
 let logBuf = [], logTimer = null, logEpoch = 0;
 const logs = () => logBuf;
 function cleanLogs(value) {

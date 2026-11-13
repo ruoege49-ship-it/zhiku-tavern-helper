@@ -1,3 +1,4 @@
+import {applyNaiRequestCompatibility} from './nai-request-compat.mjs';
 import {applyAiBudgetCompatibility} from './ai-budget-compat.mjs';
 import {applyImageChannelCompatibility} from './image-channel-compat.mjs';
 import {applyShareEditCompatibility} from './share-edit-compat.mjs';
@@ -25,8 +26,8 @@ process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.45';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.45');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.46';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.46');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -161,7 +162,7 @@ patch(`            case 'saveartist': {`,`            case 'clearresult': ui.stu
                 break;
             }
             case 'saveartist': {`);
-// 队列早就编进了脚本 JSON，src/nai-gate.js 的改动不会再注入：在这里同步「酒馆 key 的 500 也重试」
+// 兼容旧脚本内嵌队列；构建末尾统一替换为 src/nai-gate.js。
 if(!s.includes('!e.retryable'))patch('catch(e){if(e.status!==429||attempt>=2)throw e;','catch(e){if((e.status!==429&&!e.retryable)||attempt>=2)throw e;');
 // 导入场外脚本做的「画师串包」（带例图），只往画师库里加，不替换
 patch(`function batchBanWarn(d, text) {`,`/** 导入 zhiku-artist-pack.mjs 打出来的画师串包；同一串、同一张图重复导入会跳过 */
@@ -4904,13 +4905,15 @@ patch(`        root.addEventListener('contextmenu', ev => { if (ev.target.closes
 // 0.8.39：双击段落生图的弹窗改用智库自己的弹窗（样子统一，不会被挤到屏幕上面看不见）
 patch(`notify:message=>toastr.info(message,'智库 · 选段生图')});`,`notify:message=>toastr.info(message,'智库 · 选段生图'),modal:inner=>__mod_ui.modal(inner)});`);
 // 0.8.39：插图张数改成「画满」
-patch(`<span>每条回复最多几张 · 自行填写</span>`,`<span>每条回复画几张（正文够长就画满）</span>`);
+patch(`<span>每条回复最多几张 · 自行填写</span>`,`<span>每条回复画几张（一定画满）</span>`);
 // Shared modal delayed focus must preserve the viewport, including paragraph dialogs.
 patch(`    if (ev.type === 'pointermove' && Math.hypot(ev.clientX - lp.x, ev.clientY - lp.y) < 10) return;
     clearTimeout(lp.timer);`, `    if (ev.type === 'pointermove' && Math.hypot(ev.clientX - lp.x, ev.clientY - lp.y) < 10) return;
     if (ev.type === 'pointermove' || ev.type === 'scroll') lp.cancelledTarget = lp.target;
     clearTimeout(lp.timer);`);
 patch("box.querySelector('textarea, input')?.focus();", "box.querySelector('textarea, input')?.focus({preventScroll:true});");
+// Patches 0046-0049: use one shared queue, with request-local diagnostics.
+s=applyNaiRequestCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
@@ -4924,9 +4927,9 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',(prefix+s+'\n}\n').replace(/\r\n/g, '\n'));
 fs.copyFileSync('src/index.js',dir+'/index.js');
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.45',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.45',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.46',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.46',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.8.45 built; storage keys and shared upload preserved.');
+console.log('Extension 0.8.46 built; storage keys and shared upload preserved.');
