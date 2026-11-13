@@ -25,8 +25,8 @@ process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.43';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.43');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.44';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.44');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -4667,6 +4667,193 @@ patch("const loadBook = async name => { try { return name ? (await cx.loadWorldI
         } catch (e) { used.push(\`「\${name}」读取失败：\${e.message || e}\`); return null; }
     };`);
 patch("    return parts.join('\\n\\n').slice(0, 60000);", "    const full = parts.join('\\n\\n');\n    if (full.length > 60000) { globalThis.__zkLog?.('读设定', '设定超出长度限制', `共 ${full.length} 字，仅发送前 60000 字`); toastr.warning('设定超过 60000 字，这次只发送前 60000 字，后面的角色可能读不到', '角色'); }\n    return full.slice(0,60000);");
+// 0.8.39：artist:4k / artist:8k 这类明显不是画师的：不再当画师，库里有的删掉
+patch(`const NOT_ARTIST = /^(masterpiece|best[ _]quality|amazing[ _]quality|great[ _]quality|good[ _]quality|normal[ _]quality|bad[ _]quality|worst[ _]quality|high[ _]quality|low[ _]quality|ultra[ -_]?detailed|highres|absurdres|very[ _]aesthetic|aesthetic|year \\d{4}|\\d{4}|no text|rating:.*|1boy|1girl|solo|nsfw|sfw)$/i;`,`const NOT_ARTIST = /^(masterpiece|best[ _]quality|amazing[ _]quality|great[ _]quality|good[ _]quality|normal[ _]quality|bad[ _]quality|worst[ _]quality|high[ _]quality|low[ _]quality|ultra[ -_]?detailed|highres|absurdres|very[ _]aesthetic|aesthetic|year \\d{4}|\\d{4}|no text|rating:.*|1boy|1girl|solo|nsfw|sfw|\\d{1,2}k|\\d{1,2}k[ _]wallpaper|\\d{3,4}p|uhd|fhd|hd|hdr|ultra[ _]hd|high[ _]res(?:olution)?|hi[ _-]?res|lowres|low[ _]res(?:olution)?|newest|latest|oldest|recent|early|mid|old|official[ _]art|wallpaper|best|top[ _]quality|(?:extremely|highly|very|ultra|hyper)[ _-]?detailed|intricate[ _]details?|sharp[ _]focus|depth[ _]of[ _]field|cinematic[ _]lighting|perfect[ _]anatomy|detailed[ _]background|score_\\d+(?:_up)?|source_\\w+)$/i;
+/** artist:4k、artist:masterpiece 这类：带了 artist: 但明显不是画师 */
+const fakeArtistName = text => NOT_ARTIST.test(String(text || '').replace(/^artist\\s*:\\s*/i, '').trim());`);
+patch(`            tokens.push({ text: t, weight: round2(weight * outer), isArtist: /^artist\\s*:/i.test(t), raw: outer === 1 ? raw : null });`,`            // artist:4k 这类不是画师：去掉 artist:，当普通词
+            if (/^artist\\s*:/i.test(t) && fakeArtistName(t)) { tokens.push({ text: t.replace(/^artist\\s*:\\s*/i, '').trim(), weight: round2(weight * outer), isArtist: false, raw: null }); continue; }
+            tokens.push({ text: t, weight: round2(weight * outer), isArtist: /^artist\\s*:/i.test(t), raw: outer === 1 ? raw : null });`);
+patch(`    // 单独存的画师就算名字像画风词也不删：用户存了的东西一律留着，让人自己删`,`    // artist:4k、artist:masterpiece 这类明显不是画师的：从画师库删掉；有例图的改成一个同名画师串保留例图
+    for (const a of Object.values(d.artists)) {
+        if (!fake(a)) continue;
+        if (a.images?.length) {
+            const word = a.tag.replace(/^artist\\s*:\\s*/i, '').trim();
+            const gid = 'g_' + a.id;
+            if (!d.groups[gid]) d.groups[gid] = { id: gid, name: word, note: '原来误存成画师，例图留在这里', extra: word, neg: '', members: [], images: a.images, collections: a.collections || [] };
+        }
+        if (d.active?.type === 'artist' && d.active.id === a.id) d.active = null;
+        delete d.artists[a.id];
+    }`);
+// 0.8.39：原样发的画师串里 artist:4k 这类也去掉 artist:
+patch(`    if (rawStillValid(data, t.item)) return t.item.raw;`,`    if (rawStillValid(data, t.item)) return t.item.raw.replace(/\\bartist\\s*:\\s*([^,:{}\\[\\]()\\n]+)/gi, (m, n) => fakeArtistName(n) ? n.trim() : m);`);
+// 0.8.39：看图读姿势构图 / 看图写提示词：写人数性别、NSFW 写细；「换成固定提示词」真的换（正面里旧的姿势构图词去掉）；固定提示词挪到正面负面下面；放底图自动改尺寸比例
+patch(`    \${fold('scene', '固定提示词', st.sceneOn === false ? '不发送' : !String(st.scene || '').trim() ? '跟着发送 · 还没写' : !sceneReady() ? '跟着发送 · 生成时转成标签' : \`跟着发送 · \${M.tokenize(sceneTags()).length} 个词\`, \`
+      <label class="pc-switch"><input type="checkbox" data-scene-on \${st.sceneOn !== false ? 'checked' : ''}><span></span>每次生成都带上<small>接在正面提示词后面、质量词前面一起发。不改你的正面提示词，也不进画师串。</small></label>
+      <textarea id="pc-scene" class="pc-textarea small" data-bind="studio.scene" placeholder="中文英文都行。比如：坐在窗边喝咖啡，外面下雨 / 1boy, sitting, window, rain">\${esc(st.scene || '')}</textarea>
+      \${sceneLibrary()}
+      <div id="pc-scene-ai" \${sceneZh() ? '' : 'hidden'}>
+        <div class="pc-dim small pc-mt-s" id="pc-scene-state">\${sceneStateText()}</div>
+        <div class="pc-row-between pc-mt-s"><span class="pc-dim small">用哪个 AI 转</span></div>\${apiChips(true)}
+        <label class="pc-switch"><input type="checkbox" data-bind-check="studio.sceneExpand" \${st.sceneExpand ? 'checked' : ''}><span></span>让 AI 补全细节<small>外貌、衣服、动作、场景、光线、构图都写全。关掉就只翻译你写的。</small></label>
+        <button class="pc-btn" data-act="scenetrans" \${st.sceneBusy ? 'disabled' : ''}>\${st.sceneBusy ? '<span class="pc-busy">转换中</span>' : sceneReady() ? '重新转换' : '现在转换'}</button>
+        \${st.sceneEn ? \`<label class="pc-label">AI 转好的（实际发这段，可以直接改）</label>
+        <textarea class="pc-textarea small mono" data-bind="studio.sceneEn">\${esc(st.sceneEn)}</textarea>\` : ''}
+      </div>\`)}
+`,``);
+patch(`      <div class="pc-mt-s">\${castFold()}</div>
+      <div class="pc-mt-s">\${i2iFold(s)}</div>`,`      <div class="pc-mt-s">\${sceneFold()}</div>
+      <div class="pc-mt-s">\${castFold()}</div>
+      <div class="pc-mt-s">\${i2iFold(s)}</div>`);
+patch(`function studioParts() { return { pos: ui.studio.pos, neg: ui.studio.neg, scene: sceneTags() }; }`,`function studioParts() { return { pos: ui.studio.pos, neg: ui.studio.neg, scene: sceneTags() }; }
+/** 固定提示词（原来在页面下面，挪到正面、负面下面） */
+function sceneFold() {
+    const st = ui.studio;
+    return fold('scene', '固定提示词', st.sceneOn === false ? '不发送' : !String(st.scene || '').trim() ? '跟着发送 · 还没写' : !sceneReady() ? '跟着发送 · 生成时转成标签' : \`跟着发送 · \${M.tokenize(sceneTags()).length} 个词\`, \`
+      <label class="pc-switch"><input type="checkbox" data-scene-on \${st.sceneOn !== false ? 'checked' : ''}><span></span>每次生成都带上<small>接在正面提示词后面、质量词前面一起发。不改你的正面提示词，也不进画师串。</small></label>
+      <textarea id="pc-scene" class="pc-textarea small" data-bind="studio.scene" placeholder="中文英文都行。比如：坐在窗边喝咖啡，外面下雨 / 1boy, sitting, window, rain">\${esc(st.scene || '')}</textarea>
+      \${sceneLibrary()}
+      <div id="pc-scene-ai" \${sceneZh() ? '' : 'hidden'}>
+        <div class="pc-dim small pc-mt-s" id="pc-scene-state">\${sceneStateText()}</div>
+        <div class="pc-row-between pc-mt-s"><span class="pc-dim small">用哪个 AI 转</span></div>\${apiChips(true)}
+        <label class="pc-switch"><input type="checkbox" data-bind-check="studio.sceneExpand" \${st.sceneExpand ? 'checked' : ''}><span></span>让 AI 补全细节<small>外貌、衣服、动作、场景、光线、构图都写全。关掉就只翻译你写的。</small></label>
+        <button class="pc-btn" data-act="scenetrans" \${st.sceneBusy ? 'disabled' : ''}>\${st.sceneBusy ? '<span class="pc-busy">转换中</span>' : sceneReady() ? '重新转换' : '现在转换'}</button>
+        \${st.sceneEn ? \`<label class="pc-label">AI 转好的（实际发这段，可以直接改）</label>
+        <textarea class="pc-textarea small mono" data-bind="studio.sceneEn">\${esc(st.sceneEn)}</textarea>\` : ''}
+      </div>\`);
+}`);
+patch(`        st.open.i2i = true; render(); return true;`,`        st.open.i2i = true;
+        const [fw, fh] = i2iFitSize(im.width, im.height), n = N.settings();
+        if (String(n.novelai_width) !== String(fw) || String(n.novelai_height) !== String(fh)) { n.novelai_width = String(fw); n.novelai_height = String(fh); N.save(); toastr.info(\`尺寸改成跟底图一样的比例（\${fw}×\${fh}）\`, '垫图', { timeOut: 3000 }); }
+        render(); return true;`);
+patch(`不写长相、衣服、背景、画风、画师。看不清的不要编。
+只在 NSFW 图里才会用的标签（性行为、裸露部位、体液、明显带性暗示的姿势，比如 spread legs、presenting、sex、saliva、cum、nipples 等）不要放进 pose，单独放进 nsfw；普通图里也常见的姿势放 pose。
+\${PAIRS}
+只输出 JSON：{"pose": [...], "composition": [...], "nsfw": [...]}\`;`,`人数和性别写进 people（1girl、1boy、2girls、1boy 1girl、no humans 等），看不清性别时按体型判断，别空着。
+不写长相、衣服、背景、画风、画师。看不清的不要编。
+只在 NSFW 图里才会用的标签（性行为、裸露部位、体液、明显带性暗示的姿势，比如 spread legs、presenting、sex、saliva、cum、nipples 等）不要放进 pose，单独放进 nsfw；普通图里也常见的姿势放 pose。
+NSFW 图（有裸露或性行为）额外写细，全部放进 nsfw：
+- 先看清每个人的性别：看胸、生殖器、体型、喉结，写进 people（1girl、1boy、2girls、2boys、1boy 1girl、multiple boys、futanari、otoko no ko 这类）；男方只露一部分也要写（faceless male、male pov、disembodied penis）。
+- 性行为：sex、vaginal、anal、fellatio、cunnilingus、irrumatio、paizuri、handjob、footjob、fingering、masturbation、kissing、group sex、threesome 等，谁对谁做。
+- 体位：missionary、cowgirl position、reverse cowgirl position、doggystyle、prone bone、standing sex、mating press、spooning、full nelson、suspended congress、69、leg lift、legs up、spread legs、bent over、straddling 等。
+- 露出的部位：nipples、areolae、breasts out、pussy、clitoris、penis、testicles、anus、ass、pubic hair、navel 等，看到哪个写哪个；大小写清（large penis、small breasts）。
+- 衣服状态：clothes lift、shirt lift、skirt lift、panties aside、clothes pull、partially undressed、completely nude、open shirt、torn clothes、no panties 等。
+- 体液和效果：cum、cum in pussy、cum on body、cum on face、creampie、pussy juice、saliva、saliva trail、sweat、trembling、motion lines、heart-shaped pupils、ahegao、rolling eyes、tongue out、x-ray、cross-section 等。
+- 手和互动：grabbing another's breast、hand on another's hip、holding another's leg、pinned down、hair pull、arm grab 等。
+- 镜头焦点：pussy focus、ass focus、penis focus、close-up on genitals 这类写进构图或 nsfw。
+看起来是未成年或年龄不明的人，不写任何 NSFW 标签。只写图里看得到的。
+\${PAIRS}
+只输出 JSON：{"people": [...], "pose": [...], "composition": [...], "nsfw": [...]}\`;`);
+patch(`    let pose = normPairs(j.pose), composition = normPairs(j.composition), nsfw = normPairs(j.nsfw);`,`    let pose = normPairs(j.pose), composition = normPairs(j.composition), nsfw = normPairs(j.nsfw);
+    const people = normPairs(j.people);`);
+patch(`    if (!pose.length && !composition.length && !nsfw.length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
+    return { pose, composition, nsfw };`,`    if (!pose.length && !composition.length && !nsfw.length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
+    return { people, pose, composition, nsfw };`);
+patch(`const NSFW_RE = /\\b(nsfw|sex|penis|vagina|pussy|nipples?|cum|ejaculation|saliva|spread legs|presenting|masturbation|fellatio|paizuri|orgasm|ahegao|nude|naked|bdsm|bondage|groping|panties aside|after sex|rape)\\b/i;`,`const NSFW_RE = /\\b(nsfw|sex|penis|vagina|pussy|nipples?|areolae|clitoris|testicles|anus|cum|creampie|ejaculation|saliva|spread legs|presenting|masturbation|fellatio|cunnilingus|irrumatio|paizuri|handjob|footjob|fingering|orgasm|ahegao|nude|naked|bdsm|bondage|groping|panties aside|after sex|rape|missionary|cowgirl position|doggystyle|prone bone|mating press|pussy juice|x-ray|cross-section)\\b/i;`);
+patch(`1. people：人数和性别（1girl、1boy、2girls、1boy 1girl、multiple girls、no humans 等）。`,`1. people：人数和性别（1girl、1boy、2girls、1boy 1girl、multiple girls、futanari、no humans 等）。性别看胸、生殖器、体型、喉结判断，男方只露一部分也写（faceless male、male pov）。`);
+patch(`不写画师名，不写 masterpiece 这类质量词，不写画风名（除非是明显的 monochrome、sketch、lineart 这类）。`,`8. nsfw：只有 NSFW 图才写，普通图写 []。- 先看清每个人的性别：看胸、生殖器、体型、喉结，写进 people（1girl、1boy、2girls、2boys、1boy 1girl、multiple boys、futanari、otoko no ko 这类）；男方只露一部分也要写（faceless male、male pov、disembodied penis）。
+- 性行为：sex、vaginal、anal、fellatio、cunnilingus、irrumatio、paizuri、handjob、footjob、fingering、masturbation、kissing、group sex、threesome 等，谁对谁做。
+- 体位：missionary、cowgirl position、reverse cowgirl position、doggystyle、prone bone、standing sex、mating press、spooning、full nelson、suspended congress、69、leg lift、legs up、spread legs、bent over、straddling 等。
+- 露出的部位：nipples、areolae、breasts out、pussy、clitoris、penis、testicles、anus、ass、pubic hair、navel 等，看到哪个写哪个；大小写清（large penis、small breasts）。
+- 衣服状态：clothes lift、shirt lift、skirt lift、panties aside、clothes pull、partially undressed、completely nude、open shirt、torn clothes、no panties 等。
+- 体液和效果：cum、cum in pussy、cum on body、cum on face、creampie、pussy juice、saliva、saliva trail、sweat、trembling、motion lines、heart-shaped pupils、ahegao、rolling eyes、tongue out、x-ray、cross-section 等。
+- 手和互动：grabbing another's breast、hand on another's hip、holding another's leg、pinned down、hair pull、arm grab 等。
+- 镜头焦点：pussy focus、ass focus、penis focus、close-up on genitals 这类写进构图或 nsfw。
+看起来是未成年或年龄不明的人，不写任何 NSFW 标签。只写图里看得到的。
+不写画师名，不写 masterpiece 这类质量词，不写画风名（除非是明显的 monochrome、sketch、lineart 这类）。`);
+patch(`只输出 JSON：{"people":[],"outfit":[],"action":[],"expression":[],"camera":[],"background":[],"lighting":[],`,`只输出 JSON：{"people":[],"outfit":[],"action":[],"nsfw":[],"expression":[],"camera":[],"background":[],"lighting":[],`);
+patch(`    const order = ['people', 'camera', 'action', 'expression', 'outfit', 'background', 'lighting'];`,`    const order = ['people', 'camera', 'action', 'nsfw', 'expression', 'outfit', 'background', 'lighting'];`);
+patch(`    const all = [...r.pose.map(p => ({ ...p, g: '姿势' })), ...r.composition.map(p => ({ ...p, g: '构图' })), ...(r.nsfw || []).map(p => ({ ...p, g: 'NSFW' }))];`,`    const all = [...(r.people || []).map(p => ({ ...p, g: '人数性别' })), ...r.pose.map(p => ({ ...p, g: '姿势' })), ...r.composition.map(p => ({ ...p, g: '构图' })), ...(r.nsfw || []).map(p => ({ ...p, g: 'NSFW' }))];`);
+patch(`          <div class="pc-label">姿势</div><div>\${grp('姿势')}</div>`,`          \${all.some(p => p.g === '人数性别') ? \`<div class="pc-label">人数性别</div><div>\${grp('人数性别')}</div>\` : ''}
+          <div class="pc-label">姿势</div><div>\${grp('姿势')}</div>`);
+patch(`        else { st.scene = tags; st.sceneEn = ''; st.sceneSrc = ''; st.sceneOn = true; }
+        saveStudio(); box.closeModal(); ui.view = 'studio'; render();
+        toastr.success(a === 'pos' ? '接在正面后面了' : '固定提示词换成这些了', '姿势构图', { timeOut: 1500 });`,`        let cut = 0;
+        if (a === 'scene') {
+            st.scene = tags; st.sceneEn = ''; st.sceneSrc = ''; st.sceneOn = true;
+            // 换构图：正面里原来的景别、机位、姿势词去掉，不然新旧两套一起发，看着像接在后面
+            const POSE_WORD = /^(?:extreme close-up|close-up|portrait|upper body|cowboy shot|full body|wide shot|very wide shot|from (?:above|below|side|behind)|straight-on|dutch angle|pov|high angle|low angle|standing|sitting|kneeling|squatting|lying(?: on (?:back|side|stomach))?|on (?:back|side|stomach)|all fours|leaning (?:forward|back)|bent over|crossed legs|spread legs|knees up|looking (?:at viewer|back|away|down|up)|facing (?:viewer|away)|profile|head tilt|centered|off-center|rule of thirds|foreshortening|fisheye)$/i;
+            const kept = M.tokenize(st.pos || '').filter(t => { const drop = !t.isArtist && POSE_WORD.test(t.text.trim()); if (drop) cut++; return !drop; });
+            if (cut) st.pos = kept.map(t => t.raw || (Math.abs(t.weight - 1) < 0.001 ? t.text : \`\${M.fmtWeight(t.weight)}::\${t.text}::\`)).join(', ');
+        }
+        saveStudio(); box.closeModal(); ui.view = 'studio'; render();
+        toastr.success(a === 'pos' ? '接在正面后面了' : \`固定提示词换成这些了\${cut ? \`，正面里原来的 \${cut} 个姿势构图词去掉了\` : ''}\`, '姿势构图', { timeOut: 2500 });`);
+// 0.8.39：看图读姿势构图改成「反推」：先中文描述再写标签，姿势、构图、物件、背景都要写细；生图页固定提示词 / 入画角色 / 垫图三个折叠压小
+patch(`    const sys = \`你看图，只写人物的姿势和画面构图，写成 NovelAI 标签。
+姿势：身体姿势（standing、sitting、leaning forward、lying on side 等）、手和手臂的动作、腿的动作、头的朝向和视线方向；多人时写互动和相对位置（hug、holding hands、back-to-back 等）；表情最多写一两个。
+构图（必须写，不能空）：景别（extreme close-up、close-up、portrait、upper body、cowboy shot、full body、wide shot 选一个）、机位角度（from above、from below、from side、from behind、straight-on、dutch angle、pov）、裁切（head out of frame、cropped legs、feet out of frame、xx focus）、人物在画面里的位置（centered、off-center、rule of thirds）、透视和景深（foreshortening、fisheye、depth of field、blurry background）。
+人数和性别写进 people（1girl、1boy、2girls、1boy 1girl、no humans 等），看不清性别时按体型判断，别空着。
+不写长相、衣服、背景、画风、画师。看不清的不要编。
+只在 NSFW 图里才会用的标签（性行为、裸露部位、体液、明显带性暗示的姿势，比如 spread legs、presenting、sex、saliva、cum、nipples 等）不要放进 pose，单独放进 nsfw；普通图里也常见的姿势放 pose。
+NSFW 图（有裸露或性行为）额外写细，全部放进 nsfw：
+- 先看清每个人的性别：看胸、生殖器、体型、喉结，写进 people（1girl、1boy、2girls、2boys、1boy 1girl、multiple boys、futanari、otoko no ko 这类）；男方只露一部分也要写（faceless male、male pov、disembodied penis）。
+- 性行为：sex、vaginal、anal、fellatio、cunnilingus、irrumatio、paizuri、handjob、footjob、fingering、masturbation、kissing、group sex、threesome 等，谁对谁做。
+- 体位：missionary、cowgirl position、reverse cowgirl position、doggystyle、prone bone、standing sex、mating press、spooning、full nelson、suspended congress、69、leg lift、legs up、spread legs、bent over、straddling 等。
+- 露出的部位：nipples、areolae、breasts out、pussy、clitoris、penis、testicles、anus、ass、pubic hair、navel 等，看到哪个写哪个；大小写清（large penis、small breasts）。
+- 衣服状态：clothes lift、shirt lift、skirt lift、panties aside、clothes pull、partially undressed、completely nude、open shirt、torn clothes、no panties 等。
+- 体液和效果：cum、cum in pussy、cum on body、cum on face、creampie、pussy juice、saliva、saliva trail、sweat、trembling、motion lines、heart-shaped pupils、ahegao、rolling eyes、tongue out、x-ray、cross-section 等。
+- 手和互动：grabbing another's breast、hand on another's hip、holding another's leg、pinned down、hair pull、arm grab 等。
+- 镜头焦点：pussy focus、ass focus、penis focus、close-up on genitals 这类写进构图或 nsfw。
+看起来是未成年或年龄不明的人，不写任何 NSFW 标签。只写图里看得到的。
+\${PAIRS}
+只输出 JSON：{"people": [...], "pose": [...], "composition": [...], "nsfw": [...]}\`;`,`    const sys = \`你是给 NovelAI / Danbooru 反推提示词的标注员。目标：用你写的标签重新生成，能得到「人摆放位置、姿势、镜头、构图、背景布局」和原图几乎一样的画面。宁可多写不要少写，每个看得到的细节都写成标签。
+先在 look 里用中文把画面从上到下、从左到右仔细描述一遍（人在画面哪个位置、身体每一部分怎么摆、镜头从哪拍、背景有什么、东西放在哪），再照着描述写标签。
+people：人数和性别（1girl、1boy、2girls、1boy 1girl、no humans 等），看不清就按体型判断，不能空。
+pose（姿势，至少 12 个，越细越好）：
+- 全身：standing、sitting、sitting on xx、kneeling、seiza、squatting、lying on back / side / stomach、all fours、leaning forward / back / against xx、bent over、arched back、curled up、walking、running、jumping。
+- 朝向：facing viewer、facing away、facing to the side、turning around、looking back、profile、three-quarter view。
+- 头和视线：head tilt、head down、chin rest、head on hand、looking at viewer / away / down / up / to the side / at another、eyes closed、half-closed eyes。
+- 左右手分别写：hand on own cheek / chest / hip / knee、hand up、hands together、arms behind back、arms crossed、arm support、reaching、holding xx（写清拿着什么）、hand in pocket、hand in hair、v sign、pointing、covering mouth、hugging own legs。
+- 腿和脚：knees up、knees together、legs apart、crossed legs、one knee up、legs folded、legs to the side、feet together、feet up、barefoot、foot out of frame。
+- 多人：谁在谁的哪边（on left、on right、in front、behind）、hug、hug from behind、holding hands、lap pillow、carrying、face-to-face、back-to-back、leaning on another、eye contact 等。
+- 表情写一两个。
+composition（构图，至少 8 个）：景别（extreme close-up、close-up、portrait、upper body、cowboy shot、full body、wide shot、very wide shot 选一个）、机位（from above、from below、from side、from behind、straight-on、high angle、low angle、dutch angle、pov）、人在画面里的位置和大小（centered、off-center、on left side、on right side、subject on the lower half、small figure、filling the frame）、裁切（head out of frame、cropped legs、cropped torso、feet out of frame、xx focus）、构图方式（rule of thirds、symmetry、diagonal composition、negative space、frame within a frame）、透视和景深（foreshortening、perspective、fisheye、wide-angle lens、depth of field、blurry background、blurry foreground、bokeh）、画幅（landscape orientation / portrait orientation 不写，NovelAI 看尺寸）。
+props（人身上和身边的物件，没有写 []）：手里拿的、身边放的、坐的躺的家具（cup、teacup、book、umbrella、chair、bed、pillow、table 等），写清和人的关系（holding cup、sitting on chair、pillow hug）。
+background（背景布局，没有写 simple background）：室内外、地点、墙地板窗、背景里的东西在哪（indoors、bedroom、wallpaper、patterned wall、window、curtains、wooden floor、outdoors、sky、trees 等），光线和色调（sunlight、backlighting、dim lighting、soft lighting、warm colors 等）。
+不写长相（发色、眼睛、脸）、衣服、画风、画师、质量词。看不清的不要编。
+只在 NSFW 图里才会用的标签（性行为、裸露部位、体液、明显带性暗示的姿势，比如 spread legs、presenting、sex、saliva、cum、nipples 等）不要放进 pose，单独放进 nsfw；普通图里也常见的姿势放 pose。
+NSFW 图（有裸露或性行为）额外写细，全部放进 nsfw：
+- 先看清每个人的性别：看胸、生殖器、体型、喉结，写进 people（1girl、1boy、2girls、2boys、1boy 1girl、multiple boys、futanari、otoko no ko 这类）；男方只露一部分也要写（faceless male、male pov、disembodied penis）。
+- 性行为：sex、vaginal、anal、fellatio、cunnilingus、irrumatio、paizuri、handjob、footjob、fingering、masturbation、kissing、group sex、threesome 等，谁对谁做。
+- 体位：missionary、cowgirl position、reverse cowgirl position、doggystyle、prone bone、standing sex、mating press、spooning、full nelson、suspended congress、69、leg lift、legs up、spread legs、bent over、straddling 等。
+- 露出的部位：nipples、areolae、breasts out、pussy、clitoris、penis、testicles、anus、ass、pubic hair、navel 等，看到哪个写哪个；大小写清（large penis、small breasts）。
+- 衣服状态：clothes lift、shirt lift、skirt lift、panties aside、clothes pull、partially undressed、completely nude、open shirt、torn clothes、no panties 等。
+- 体液和效果：cum、cum in pussy、cum on body、cum on face、creampie、pussy juice、saliva、saliva trail、sweat、trembling、motion lines、heart-shaped pupils、ahegao、rolling eyes、tongue out、x-ray、cross-section 等。
+- 手和互动：grabbing another's breast、hand on another's hip、holding another's leg、pinned down、hair pull、arm grab 等。
+- 镜头焦点：pussy focus、ass focus、penis focus、close-up on genitals 这类写进构图或 nsfw。
+看起来是未成年或年龄不明的人，不写任何 NSFW 标签。只写图里看得到的。
+\${PAIRS}
+只输出 JSON：{"look": "中文的详细描述", "people": [...], "pose": [...], "composition": [...], "props": [...], "background": [...], "nsfw": [...]}\`;`);
+patch(`    const j = pickJson(await askVision(sys, '读这张图的姿势和构图。', imageDataUrl, { maxTokens: 1200, fn: 'pose' }));`,`    const j = pickJson(await askVision(sys, '反推这张图：姿势、构图、物件、背景都写细，要能照着重画出几乎一样的画面。', imageDataUrl, { maxTokens: 4000, fn: 'pose' }));`);
+patch(`    const people = normPairs(j.people);`,`    const people = normPairs(j.people), props = normPairs(j.props), background = normPairs(j.background), look = String(j.look || '').trim();`);
+patch(`    return { people, pose, composition, nsfw };`,`    return { people, pose, composition, props, background, nsfw, look };`);
+patch(`...r.composition.map(p => ({ ...p, g: '构图' })), ...(r.nsfw || []).map(p => ({ ...p, g: 'NSFW' }))];`,`...r.composition.map(p => ({ ...p, g: '构图' })), ...(r.props || []).map(p => ({ ...p, g: '物件' })), ...(r.background || []).map(p => ({ ...p, g: '背景' })), ...(r.nsfw || []).map(p => ({ ...p, g: 'NSFW' }))];`);
+patch(`          <div class="pc-label">构图</div><div>\${grp('构图')}</div>`,`          <div class="pc-label">构图</div><div>\${grp('构图')}</div>
+          \${all.some(p => p.g === '物件') ? \`<div class="pc-label">物件</div><div>\${grp('物件')}</div>\` : ''}
+          \${all.some(p => p.g === '背景') ? \`<div class="pc-label">背景</div><div>\${grp('背景')}</div>\` : ''}`);
+patch(`<h3 class="pc-h3">图里的姿势和构图</h3><div class="pc-dim small">点标签选上 / 取消，选上的才会用。</div>`,`<h3 class="pc-h3">图里的姿势和构图</h3>\${r.look ? \`<details class="pc-details"><summary class="pc-dim small">AI 看到的画面（中文）</summary><div class="small" style="line-height:1.7">\${esc(r.look)}</div></details>\` : ''}<div class="pc-dim small">点标签选上 / 取消，选上的才会用。不想要背景就把「背景」那组点掉。</div>`);
+patch(`      <div class="pc-mt-s">\${sceneFold()}</div>
+      <div class="pc-mt-s">\${castFold()}</div>
+      <div class="pc-mt-s">\${i2iFold(s)}</div>`,`      <div class="pc-mini pc-mt-s">\${sceneFold()}\${castFold()}\${i2iFold(s)}</div>`);
+patch(`style.textContent = ".pc-loghead{`,`style.textContent = ".pc-mini>.pc-fold{margin-top:6px;border-width:1px;box-shadow:none;border-radius:12px}.pc-mini>.pc-fold>summary{padding:7px 12px;gap:8px}.pc-mini>.pc-fold>summary b{font-size:13.5px}.pc-mini>.pc-fold>summary i{font-size:11.5px}.pc-mini>.pc-fold>summary::after{font-size:16px}" + ".pc-loghead{`);
+// Preserve weighted ordinary tags, images, and references when old artist entries migrate.
+{
+    const a=s.indexOf('    for (const g of Object.values(d.groups)) {\n        const bad = g.members.filter(m => fake(d.artists[m.artistId]));'),b=s.indexOf('    d.recent = Array.isArray(d.recent)',a);
+    assert(a>=0&&b>a);
+    s=s.slice(0,a)+'    migrateNonArtists(d, fake);\n'+s.slice(b);
+    patch('const uid = (p =',fs.readFileSync('src/non-artist-migration.js','utf8')+'\nconst uid = (p =');
+}
+// Hide scrollbar chrome on the scrolling containers themselves as well as descendants.
+patch('style.textContent = ".pc-mini>', 'style.textContent = ".pc-overlay,.pc-sheet,.pc-modal,.pc-modal-backdrop{scrollbar-width:none}.pc-overlay::-webkit-scrollbar,.pc-sheet::-webkit-scrollbar,.pc-modal::-webkit-scrollbar,.pc-modal-backdrop::-webkit-scrollbar{display:none}" + ".pc-mini>');
+// Use the same classifier for new input and saved-library migration.
+patch("const fakeArtistName = text => NOT_ARTIST.test(String(text || '').replace(/^artist\\s*:\\s*/i, '').trim());", `const fakeArtistName = text => {
+    const tag = String(text || '').replace(/^artist\\s*:\\s*/i, '').trim();
+    return NOT_ARTIST.test(tag) || /^(?:(?:ultra|very|highly|extremely|hyper)[ _-]?)?detailed$|^(?:illustration|anime(?: style)?|best|quality)$/i.test(tag) || /[<>]/.test(tag);
+};`);
+{
+    const a=s.indexOf('    const fake = a => a && (NOT_ARTIST.test('),b=s.indexOf('\n',a);assert(a>=0&&b>a);
+    patch(s.slice(a,b),'    const fake = a => a && fakeArtistName(a.tag);');
+}
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
@@ -4680,9 +4867,9 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',(prefix+s+'\n}\n').replace(/\r\n/g, '\n'));
 fs.copyFileSync('src/index.js',dir+'/index.js');
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.43',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.43',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.44',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.44',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.8.43 built; storage keys and shared upload preserved.');
+console.log('Extension 0.8.44 built; storage keys and shared upload preserved.');

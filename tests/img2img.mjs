@@ -21,7 +21,7 @@ try {
 const ui={studio:{pos:'original',scene:'rain',sceneOn:true,open:{},i2i:{image:'first',strength:.4,noise:0}}};
 const pending=[],errors=[];let crops=0,releaseCrop,stored,remembered;
 const options={novelai_width:'832',novelai_height:'1216'};
-const box={ui,stopped:false,Image:class {set src(v){this.url=v;pending.push(this)}},render(){},toastr:{error:x=>errors.push(x),warning:assert.fail},N:{isReady:()=>true,settings:()=>options},T:{hasChinese:()=>false},studioCast:()=>[],sceneReady:()=>true,saveStudio(){},studioParts:()=>({pos:ui.studio.pos,scene:ui.studio.scene}),sceneSnapshot:()=>({scene:ui.studio.scene}),rememberScene:(...v)=>remembered=v,
+const box={ui,stopped:false,Image:class {set src(v){this.url=v;pending.push(this)}},render(){},toastr:{error:x=>errors.push(x),warning:assert.fail,info(){}},N:{isReady:()=>true,settings:()=>options,save(){}},T:{hasChinese:()=>false},studioCast:()=>[],sceneReady:()=>true,saveStudio(){},studioParts:()=>({pos:ui.studio.pos,scene:ui.studio.scene}),sceneSnapshot:()=>({scene:ui.studio.scene}),rememberScene:(...v)=>remembered=v,
  i2iImage:async()=>{crops++;return new Promise(r=>releaseCrop=r)},E:{composeStudio:({pos,scene})=>({positive:pos+', '+scene,negative:''}),generateFull:async o=>{stored=o;return 'result'},runtime:{lastSent:{}}},pcStoreImage:async()=>({url:'saved'}),pcRecordImage(){}};
 const api=vm.runInNewContext(part('function i2iFitSize(', 'function i2iFold(')+part('async function doGenerate()', 'async function saveStudioResult()')+'\n({i2iFitSize,loadI2i,doGenerate,off:()=>++i2iLoadSeq})',box);
 assert.deepEqual(Array.from(api.i2iFitSize(4000,1000)),[1600,384]);
@@ -30,7 +30,7 @@ const first=api.loadI2i('A'),second=api.loadI2i('B');Object.assign(pending[1],{w
 const removed=api.loadI2i('C');api.off();ui.studio.i2i.image='';pending[2].onload();await removed;assert.equal(ui.studio.i2i.image,'');
 const stopped=api.loadI2i('D');box.stopped=true;pending[3].onload();await stopped;assert.equal(ui.studio.i2i.image,'');box.stopped=false;
 const broken=api.loadI2i('bad');pending[4].onerror();await broken;assert.equal(errors.length,1);errors.length=0;
-ui.studio.i2i.image='base';const gen=api.doGenerate();await api.doGenerate();assert.equal(crops,1);
+options.novelai_width='832';options.novelai_height='1216';ui.studio.i2i.image='base';const gen=api.doGenerate();await api.doGenerate();assert.equal(crops,1);
 options.novelai_width='1024';ui.studio.pos='edited';ui.studio.scene='snow';ui.studio.i2i.strength=.9;releaseCrop('cropped');await gen;
 assert.equal(stored.width,832);assert.equal(stored.height,1216);assert.equal(stored.positive,'original, rain');assert.equal(stored.i2i.strength,.4);assert.equal(remembered[0].scene,'rain');assert.equal(ui.studio.generating,false);assert.equal(ui.studio.busy,false);assert.deepEqual(errors,[]);
 console.log('PASS: img2img HTTP payload and unsupported channels, fit sizes, latest image selection, removal/stop/error, duplicate guard and request snapshot.');
