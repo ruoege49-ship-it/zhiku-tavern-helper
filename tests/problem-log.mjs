@@ -35,7 +35,7 @@ function boot({saved='[]',legacy=null,read=null,fail=false}={}){
  const malformed=boot({saved:'[null,3,{}, {"t":1,"k":"提醒","m":"valid"}]'});await malformed.api.logsReady;assert.equal(malformed.api.logs().length,1);
 }
 // Logging wraps the real request without changing its returned result or thrown error.
-const a=runtime.indexOf('async function generateRequest(opts) {'),b=runtime.indexOf('async function generateRequestInner(opts)',a);
+const a=runtime.indexOf('async function generateRequest(opts) {'),b=runtime.indexOf('async function generateRequestInner(',a);
 assert(a>0&&b>a);let finish;const events=[];
 const context={settings:()=>({naiMode:'key',novelaimode:'model'}),__zkSrc:'source one',__zkLog:(...args)=>events.push(args),generateRequestInner:()=>new Promise(r=>finish=r)};
 const request=vm.runInNewContext(runtime.slice(a,b)+'\ngenerateRequest',context);
