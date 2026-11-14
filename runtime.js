@@ -5133,6 +5133,38 @@ async function handTags(imageDataUrl, j, look, pose, composition) {
     return { tags: [...tags.values()], hands, zoomNotes, replaced };
 }
 
+// 0.8.59：构图复核。第一遍要写的东西太多，模型注意力被摊薄，常把「画面外的人捏着他下巴」读成「自己托腮」。
+// 第二遍只问一件事：这张图的「梗」是什么、每只手是谁的，再把第一遍读错的标签纠正掉。
+async function reviewMeta(imageDataUrl, first) {
+    const list = (k, arr) => `${k}：${arr.map(p => p.en).join(', ') || '（空）'}`;
+    const sys = `你是构图复核员。另一个标注员已经看过这张图，写了一版标签，但他经常漏掉图里最特别的「梗」，把它当成普通人像。你只做复核，按下面的顺序一条条认真检查，看不到就算了，不要编：
+1. 每只手、每条手臂顺着往回找，连到谁的肩膀？
+   - 连到画里人自己的肩膀 → 是他自己的手。
+   - 从画面边缘（下边、左右边、上边）伸进来，连不到画里任何人的肩膀，或者袖子、肤色、粗细和画里的人对不上 → 是画面外的人的手（多半是镜头前的人 / 看图的人）。这时候写 pov、pov hands，再写清这只手在干什么：hand on another's chin（捏 / 托着他下巴）、hand on another's face / cheek、hand on another's mouth / covering another's mouth、holding another's wrist、grabbing another's collar、hand on another's head、finger to another's mouth 等。
+   - 第一遍如果把别人的手写成了他自己的（chin rest、head on hand、hand on own chin、hand on own cheek 这类），放进 remove。
+2. 镜头前有没有人在拍、在看、拿着东西：画面里出现手机 / 相机的取景框、拍照按钮、HDR、焦距这些界面 → pov、holding phone、taking picture、viewfinder、phone screen、camera ui、frame within a frame。画里的人其实在屏幕里面。
+3. 大小比例对不对：有没有巨大的手 / 人 / 东西和很小的人放在一起 → size difference、giant、minigirl、mini person、tiny、in palm、hand over another；人被书、手、盒子压着或夹着 → under book、between pages、trapped、pinned down、squished。
+4. 机位和方向反不反常：倒过来、斜很多、从正上方很远的地方往下看 → upside-down、rotated、dutch angle、bird's-eye view、from above。
+5. 画面处理：故障、色差、扫描线、胶片、画上的字 → glitch、chromatic aberration、scanlines、film grain、vertical text。
+最后用一句中文写 idea：这张图真正的梗是什么（比如「镜头前的人从下面伸手捏着他的下巴，他用手指抵着嘴笑」）。
+${PAIRS}
+只输出 JSON：{"hands": "每只手是谁的、从哪伸进来（中文）", "idea": "一句话", "add": [...要补的标签], "remove": ["第一遍写错的英文标签"]}`;
+    const user = `第一遍的结果：
+画面描述：${first.look || '（无）'}
+${list('人数', first.people)}
+${list('特殊构图', first.concept)}
+${list('姿势', first.pose)}
+${list('构图', first.composition)}
+请复核这张图。`;
+    const j = pickJson(await askVision(sys, user, imageDataUrl, { maxTokens: 1500, fn: 'pose' }));
+    return {
+        hands: String(j?.hands || '').trim(),
+        idea: String(j?.idea || '').trim(),
+        add: normPairs(j?.add),
+        remove: new Set((Array.isArray(j?.remove) ? j.remove : []).map(x => String(typeof x === 'object' ? x?.en || '' : x).replace(/_/g, ' ').trim().toLowerCase()).filter(Boolean)),
+    };
+}
+
 /** 看图只读姿势和构图（带中文） */
 async function imagePose(imageDataUrl) {
     const sys = `你是给 NovelAI / Danbooru 反推提示词的标注员。目标：用你写的标签重新生成，能得到「人摆放位置、姿势、镜头、构图、背景布局」和原图几乎一样的画面。宁可多写不要少写，每个看得到的细节都写成标签。
@@ -5189,10 +5221,21 @@ ${PAIRS}
     pose = pose.filter(p => !restricted(p)); composition = composition.filter(p => !restricted(p));
     nsfw = [...new Map([...nsfw, ...moved].map(p => [p.en.replace(/_/g, ' ').trim().toLowerCase(), p])).values()];
     if (!pose.length && !composition.length && !nsfw.length && !normPairs(j.concept).length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
-    const idea = String(j.idea || '').trim();
+    let idea = String(j.idea || '').trim();
     let concept = normPairs(j.concept).filter(p => !restricted(p) && !ht.replaced.has(p.en.replace(/_/g, ' ').trim().toLowerCase()));
     { const key = p => p.en.replace(/_/g, ' ').trim().toLowerCase(); const seen = new Set(concept.map(key)); concept = [...new Map(concept.map(p => [key(p), p])).values()]; pose = pose.filter(p => !seen.has(key(p))); composition = composition.filter(p => !seen.has(key(p))); }
-    return { people, concept, idea, pose, composition, props, background, nsfw, look };
+    let lookOut = look;
+    try {
+        const rv = await reviewMeta(imageDataUrl, { look, people, concept, pose, composition });
+        const key = p => p.en.replace(/_/g, ' ').trim().toLowerCase();
+        const drop = p => rv.remove.has(key(p));
+        pose = pose.filter(p => !drop(p)); composition = composition.filter(p => !drop(p)); concept = concept.filter(p => !drop(p));
+        const have = new Set([...concept, ...pose, ...composition].map(key));
+        concept = [...rv.add.filter(p => { const k = key(p); if (restricted(p) || have.has(k) || rv.remove.has(k)) return false; have.add(k); return true; }), ...concept];
+        if (rv.idea) idea = rv.idea;
+        if (rv.hands) lookOut = [look, '复核：' + rv.hands].filter(Boolean).join('\n');
+    } catch (e) { if (e?.name === 'AbortError') throw e; console.warn('[智库] 构图复核没成功，用第一遍的结果', e); }
+    return { people, concept, idea, pose, composition, props, background, nsfw, look: lookOut };
 }
 return { AI_FNS, stopFetch, extractCastFromChat, identifyCanon, apiFor, aiSeen, aiCfg, splitFormat, stToEntries, tavernPresets, entriesFor, currentTavernPreset, imagePose, imageToPrompt, zhForTags, extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
 })();
@@ -6627,13 +6670,27 @@ function applyScene(p) {
 const SCENE_NSFW = /\b(?:nsfw|nude|naked|nipples?|areolae?|penis|pussy|vagina|clitoris|sex|cum|ejaculation|masturbation|erection|anus|anal|fellatio|paizuri|handjob|cunnilingus|testicles|pubic hair|topless|bottomless|spread (?:ass|legs|pussy))\b/i;
 /** 没标过的旧条目：带明显 NSFW 词的先标上 NSFW */
 const sceneAutoTags = text => SCENE_NSFW.test(String(text || '')) ? ['NSFW'] : [];
+/** 让 AI 给一段固定提示词起个短名字；失败就抛错 */
+async function aiSceneName(p) {
+    const text = String(p.scene || '').trim().slice(0, 1500);
+    if (!text) throw new Error('固定提示词是空的');
+    const used = (ui.studio.scenes || []).map(x => x.name).filter(Boolean).slice(0, 40).join('、');
+    const sys = `你给一段 AI 画图用的提示词起个好记的名字，方便以后在列表里一眼认出来。
+只输出名字本身：中文，2 到 10 个字，抓住画面最特别的地方（场景、动作、构图、梗），比如「雨天窗边咖啡」「POV 捏下巴」「大手和小人」「被书压扁」「对镜自拍」。
+不要引号、书名号、句号，不要解释，不要写画质词、画师。${used ? '这些名字已经用过，别重复：' + used : ''}`;
+    const r = await T.askLLM(sys, text, { maxTokens: 80, fn: 'tr' });
+    const name = String(r || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim().split('\n').map(x => x.trim()).filter(Boolean).pop() || '';
+    const clean = name.replace(/^(?:名字[:：])?["'“”「」『』【】《》\s]*|["'“”「」『』【】《》。.!！\s]+$/g, '').slice(0, 16);
+    if (!clean) throw new Error('AI 没给出名字');
+    return clean;
+}
 function sceneRow(p, i, kind) {
     const cur = sceneSig(p) === sceneSig(sceneSnapshot());
     const title = kind === 'saved' ? p.name || '没起名' : new Date(p.at).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
     return `<div class="pc-promptrow ${cur ? 'cur' : ''}">
       <div class="pc-grow"><b>${esc(title)}${cur ? ' <em>在用</em>' : ''}</b>${kind === 'saved' && p.tags?.length ? `<span class="pc-scenetags">${p.tags.map(t => `<i>${esc(t)}</i>`).join('')}</span>` : ''}<small class="mono" ${kind === 'saved' ? `data-act="sceneedit" data-i="${i}" style="cursor:pointer" title="点一下修改"` : ''}>${esc(p.scene)}</small></div>
       <div class="pc-promptacts">${cur ? '' : `<button class="pc-pill tiny on" data-act="sceneuse" data-kind="${kind}" data-i="${i}">换上</button>`}
-        ${kind === 'recent' ? `<button class="pc-pill tiny dashed" data-act="scenekeep" data-i="${i}">存下</button>` : `<button class="pc-pill tiny dashed" data-act="sceneedit" data-i="${i}">修改</button>`}
+        ${kind === 'recent' ? `<button class="pc-pill tiny dashed" data-act="scenekeep" data-i="${i}">存下</button>` : `<button class="pc-pill tiny dashed" data-act="sceneedit" data-i="${i}">修改</button><button class="pc-pill tiny dashed" data-act="sceneainame" data-i="${i}">AI 起名</button>`}
         <button class="pc-x" data-act="scenedel" data-kind="${kind}" data-i="${i}" aria-label="删掉">×</button></div></div>`;
 }
 function sceneLibrary() {
@@ -6657,7 +6714,7 @@ function sceneLibrary() {
 .pc-i2i img{width:84px;max-height:120px;object-fit:cover;border-radius:12px;cursor:zoom-in}
 .pc-i2i input[type=range]{width:100%}
 </style>
-      <div class="pc-actions wrap" style="margin-top:8px"><button class="pc-pill dashed" data-act="scenesave">＋ 存下这段</button></div>
+      <div class="pc-actions wrap" style="margin-top:8px"><button class="pc-pill dashed" data-act="scenesave">＋ 存下这段（起个名字）</button><button class="pc-pill dashed" data-act="scenesave" data-ai="1">✦ AI 起名存下</button></div>
       ${saved.length ? (() => {
         const tagsOf = p => (p.tags ??= sceneAutoTags(p.scene));
         const all = [...new Set(saved.flatMap(tagsOf))];
@@ -6676,7 +6733,8 @@ function studioParts() { return { pos: ui.studio.pos, neg: ui.studio.neg, scene:
 /** 固定提示词（原来在页面下面，挪到正面、负面下面） */
 function sceneFold() {
     const st = ui.studio;
-    return fold('scene', '固定提示词', st.sceneOn === false ? '不发送' : !String(st.scene || '').trim() ? '跟着发送 · 还没写' : !sceneReady() ? '跟着发送 · 生成时转成标签' : `跟着发送 · ${M.tokenize(sceneTags()).length} 个词`, `
+    const named = String(st.scene || '').trim() ? (st.scenes || []).find(p => sceneSig(p) === sceneSig(sceneSnapshot()))?.name : '';
+    return fold('scene', named ? `固定提示词 · ${named}` : '固定提示词', st.sceneOn === false ? '不发送' : !String(st.scene || '').trim() ? '跟着发送 · 还没写' : !sceneReady() ? '跟着发送 · 生成时转成标签' : `跟着发送 · ${M.tokenize(sceneTags()).length} 个词`, `
       <label class="pc-switch"><input type="checkbox" data-scene-on ${st.sceneOn !== false ? 'checked' : ''}><span></span>每次生成都带上<small>接在正面提示词后面、质量词前面一起发。不改你的正面提示词，也不进画师串。</small></label>
       <textarea id="pc-scene" class="pc-textarea small" data-bind="studio.scene" placeholder="中文英文都行。比如：坐在窗边喝咖啡，外面下雨 / 1boy, sitting, window, rain">${esc(st.scene || '')}</textarea>
       ${sceneLibrary()}
@@ -9837,9 +9895,20 @@ async function onClick(ev, outside = false) {
                 const p = sceneSnapshot();
                 if (!p.scene) { toastr.info('固定提示词还是空的', '固定提示词'); break; }
                 if ((ui.studio.scenes || []).some(x => sceneSig(x) === sceneSig(p))) { toastr.info('这段已经存过了', '固定提示词'); break; }
-                ui.studio.scenes = [{ ...p, name: sceneName(p.scene) || '没起名' }, ...(ui.studio.scenes || [])];
+                const st = ui.studio, current = () => ui.studio === st && String(st.scene || '').trim() === p.scene && (st.sceneEn || '') === p.sceneEn && (st.sceneSrc || '') === p.sceneSrc;
+                let guess = sceneName(p.scene);
+                if (el.dataset.ai) {
+                    el.disabled = true; el.innerHTML = '<span class="pc-busy">AI 起名中</span>';
+                    try { guess = await aiSceneName(p); } catch (e) { if (e?.name === 'AbortError') { render(); break; } toastr.warning('AI 起名没成功，先用自动截的：' + e.message, '固定提示词'); }
+                }
+                if (!current()) { render(); break; }
+                const name = await promptText(el.dataset.ai ? '给这段固定提示词起个名字（AI 起的，可以改）' : '给这段固定提示词起个名字', guess);
+                if (name == null || !current()) { render(); break; }
+                if ((ui.studio.scenes || []).some(x => sceneSig(x) === sceneSig(p))) { render(); break; }
+                ui.studio.scenes = [{ ...p, name: name.trim() || '没起名' }, ...(ui.studio.scenes || [])];
                 ui.studio.recentScenes = (ui.studio.recentScenes || []).filter(x => sceneSig(x) !== sceneSig(p));
-                saveStudio(); toastr.success('存好了，想换名字点它旁边的「改名」', '固定提示词', { timeOut: 2500 }); render(); break;
+                ui.studio.open.savedScenes = true;
+                saveStudio(); toastr.success(`存好了：「${name.trim() || '没起名'}」`, '固定提示词', { timeOut: 2000 }); render(); break;
             }
             case 'sceneuse': {
                 const p = (el.dataset.kind === 'saved' ? ui.studio.scenes : ui.studio.recentScenes)?.[Number(el.dataset.i)];
@@ -9897,6 +9966,19 @@ async function onClick(ev, outside = false) {
                     saveStudio(); box.closeModal(); render();
                     toastr.success('改好了', '固定提示词', { timeOut: 1200 });
                 });
+                break;
+            }
+            case 'sceneainame': {
+                const st = ui.studio, p = st.scenes?.[Number(el.dataset.i)];
+                if (!p) break;
+                const beforeName = p.name, beforeScene = p.scene;
+                el.disabled = true; el.innerHTML = '<span class="pc-busy">起名中</span>';
+                try {
+                    const n = await aiSceneName(p);
+                    if (ui.studio !== st || !st.scenes?.includes(p) || p.name !== beforeName || p.scene !== beforeScene) break;
+                    const old = p.name; p.name = n; saveStudio();
+                    toastr.success(`「${old || '没起名'}」改叫「${n}」，不喜欢点「修改」自己改`, '固定提示词', { timeOut: 2500 });
+                } catch (e) { if (e?.name !== 'AbortError') toastr.error('AI 起名失败：' + e.message, '固定提示词'); } finally { render(); }
                 break;
             }
             case 'scenerename': {
