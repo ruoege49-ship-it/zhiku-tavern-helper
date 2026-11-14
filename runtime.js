@@ -1688,7 +1688,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.53（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.56（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1737,7 +1737,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.53';
+globalThis.__PC_VERSION = '0.8.56';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -4107,6 +4107,40 @@ async function makeSampleFor(ref, templateId, { soloWeight = getData().options.s
     return image;
 }
 
+/**
+ * 批量里的一张。job：{ ref（画师库里有的才有）, text, templateId, char, charTags, charNeg, charRef }
+ * 返回 { image, saved }：画师库里有这串、又不是画角色的，照旧存进例图；别的不存，等用户勾选再存
+ */
+async function makeBatchImage(job) {
+    const d = getData();
+    const tpl = d.templates[job.templateId] || d.templates.sfw_bust;
+    const ref = job.ref && M.resolveTicket(d, job.ref) ? job.ref : null;
+    if (ref && !job.char) return { image: await makeSampleFor(ref, tpl.id, { soloWeight: job.soloWeight ?? 1 }), saved: true };
+    let fixed = ref ? M.ticketString(d, ref) : String(job.text || '');
+    const neg0 = ref ? M.ticketNeg(d, ref) : '';
+    const w = Number(d.options.sampleSoloWeight) || 1;
+    const one = M.parseArtistString(fixed);
+    if (w !== 1 && one.members.length === 1 && Math.abs(one.members[0].weight - 1) < 0.001 && !new RegExp(`::\\s*${one.members[0].tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*::`).test(fixed)) fixed = fixed.replace(one.members[0].tag, `${w}::${one.members[0].tag}::`);
+    if (!job.char) return { image: await generateSample({ fixed, template: tpl, neg: neg0 }), saved: false };
+    // 画角色：角色外貌 + 固定的衣服 + 模板的景别（照角色页「生成这个角色的图」）
+    const shot = tpl.shot || 'bust';
+    const SHOT = { head: '1.4::portrait::, close-up, upper body, looking at viewer', bust: '1.4::upper body::, looking at viewer', full: '1.2::full body::, standing, looking at viewer' };
+    const CUT = shot === 'full' ? /^(upper body|portrait|close-up|cowboy shot|bust)$/i
+        : /^(full body|standing|feet|barefoot|wide shot|very wide shot)$|\b(shoes|boots|loafers|sneakers|heels|sandals|slippers|socks|kneehighs|thighhighs|pantyhose|legwear|footwear|leggings)\b/i;
+    const cut = t => M.tokenize(t || '').filter(x => !CUT.test(x.text.trim())).map(x => x.raw || (Math.abs(x.weight - 1) < 0.001 ? x.text : `${M.fmtWeight(x.weight)}::${x.text}::`)).join(', ');
+    const builtIn = /^(?:sfw|nsfw)_(?:head|bust|full)$/.test(tpl.id);
+    const pos = builtIn
+        ? M.mergeTags(cut(fixed), tpl.nsfw ? 'nsfw, adult' : '', cut(job.charTags), 'solo', SHOT[shot] || SHOT.bust, 'simple background, white background')
+        : M.mergeTags(fixed, job.charTags, tpl.positive);
+    const neg = [neg0, job.charNeg, 'text, watermark, signature, multiple views', builtIn ? '' : tpl.negative].filter(Boolean).join(', ');
+    const { positive, negative } = composeStudio({ pos, neg });
+    const W = builtIn ? ({ head: [1024, 1024], bust: [896, 1152], full: [768, 1344] }[shot] || [896, 1152]) : [Number(tpl.width) || undefined, Number(tpl.height) || undefined];
+    const o = d.options;
+    const seed = o.sampleSameSeed === false ? undefined : (Number(o.sampleSeed) > 0 ? Number(o.sampleSeed) : (o.sampleSeed = Math.floor(Math.random() * 4294967294) + 1));
+    const director = job.charRef ? await charRefs([job.charRef]) : null;
+    return { image: await run({ noVibe: true, positive, negative, width: W[0], height: W[1], seed, director }), saved: false };
+}
+
 function createBatch(jobs, { onUpdate } = {}) {
     const state = {
         jobs: jobs.map(j => ({ soloWeight: getData().options.sampleSoloWeight, ...j, status: 'wait', error: '', image: '' })),
@@ -4123,7 +4157,8 @@ function createBatch(jobs, { onUpdate } = {}) {
             if (job.status === 'done' || job.status === 'skip') continue;
             job.status = 'run'; tick();
             try {
-                job.image = await makeSampleFor(job.ref, job.templateId, { soloWeight: job.soloWeight ?? 1 });
+                const r = await makeBatchImage(job);
+                job.image = r.image; job.saved = r.saved;
                 job.status = 'done';
             } catch (e) {
                 job.status = 'error'; job.error = e.message || String(e);
@@ -5083,13 +5118,15 @@ function avatarUrl(c) {
 }
 
 /** 酒馆里所有角色卡 */
-function stCards() {
-    return (ctx().characters || []).filter(c => c?.avatar).map(c => ({ key: 'char:' + c.avatar, kind: 'char', name: c.name, avatar: c.avatar, desc: [c.description, c.data?.description].find(Boolean) || '' }));
+function stCards({ all = false } = {}) {
+    const hid = getData().options?.hiddenChars || {};
+    return (ctx().characters || []).filter(c => c?.avatar && (all || !hid['char:' + c.avatar])).map(c => ({ key: 'char:' + c.avatar, kind: 'char', name: c.name, avatar: c.avatar, desc: [c.description, c.data?.description].find(Boolean) || '' }));
 }
 /** 酒馆里所有人设 */
-function stPersonas() {
+function stPersonas({ all = false } = {}) {
     const pu = ctx().powerUserSettings || {};
-    return Object.entries(pu.personas || {}).map(([id, name]) => ({ key: 'user:' + id, kind: 'user', name, avatar: id, desc: pu.persona_descriptions?.[id]?.description || '' }));
+    const hid = getData().options?.hiddenChars || {};
+    return Object.entries(pu.personas || {}).filter(([id]) => all || !hid['user:' + id]).map(([id, name]) => ({ key: 'user:' + id, kind: 'user', name, avatar: id, desc: pu.persona_descriptions?.[id]?.description || '' }));
 }
 function currentPersonaKey() {
     const c = ctx();
@@ -5109,20 +5146,21 @@ const blank = src => ({
 function getChar(key) {
     const d = getData();
     if (d.characters[key]) return d.characters[key];
-    const src = [...stCards(), ...stPersonas()].find(x => x.key === key);
+    const src = [...stCards({ all: true }), ...stPersonas({ all: true })].find(x => x.key === key);
     return src ? blank(src) : null;
 }
 function saveChar(c) {
     const d = getData();
     linkSameOutfits();
     d.characters[c.key] = c;
+    if (d.options.hiddenChars?.[c.key]) delete d.options.hiddenChars[c.key]; // 删掉后又写了：重新显示
     try { syncOutfitsFrom(c); } catch (e) { console.warn('[智库] 同步衣服', e); }
     commit({ silent: true });
 }
 /** 角色卡描述（给 AI 读外貌用） */
 function descOf(c) {
     if (c.kind === 'side') return '';
-    return [...stCards(), ...stPersonas()].find(x => x.key === c.key)?.desc || '';
+    return [...stCards({ all: true }), ...stPersonas({ all: true })].find(x => x.key === c.key)?.desc || '';
 }
 /** 读人设用：描述、性格、场景、卡里的世界书、绑定的世界书都拿来；配角只拿提到它名字的世界书条目 */
 async function descOfFull(c, { all = false } = {}) {
@@ -5536,6 +5574,10 @@ function outfitHolders(o) {
 }
 /** 衣柜按「同一套」分组：[{ o, owner, holders }] */
 function wardrobeGroups() {
+    // 以前读卡自动存的衣服都叫「默认」，一多分不清：改成「XX的衣服」
+    let renamed = false;
+    for (const c of Object.values(getData().characters)) for (const o of c.outfits || []) if (o.name === '默认') { o.name = `${c.name}的衣服`; o.auto = true; renamed = true; }
+    if (renamed) commit({ silent: true });
     linkSameOutfits();
     const groups = new Map(), out = [];
     for (const x of wardrobe()) {
@@ -6880,7 +6922,7 @@ function viewStudio(d) {
       <div class="pc-row-between" style="margin-top:10px"><span class="pc-label" style="margin:0">正面提示词</span><span class="pc-chips" style="margin:0;flex-wrap:wrap;justify-content:flex-end"><label class="pc-pill dashed tiny" style="cursor:pointer">${ui.img2pBusy ? '<span class="pc-busy">看图中</span>' : '看图写提示词'}<input type="file" accept="image/*" data-img2prompt hidden ${ui.img2pBusy ? 'disabled' : ''}></label><label class="pc-pill dashed tiny" style="cursor:pointer">${ui.poseBusy ? '<span class="pc-busy">读姿势中</span>' : '看图读姿势构图'}<input type="file" accept="image/*" data-imgpose hidden ${ui.poseBusy ? 'disabled' : ''}></label></span></div>
       <div class="pc-artline">
         ${(() => { const cv = owner && M.ticketCover(d, owner); return cv ? `<img class="pc-artcover" src="${esc(imgUrl(cv))}" alt="看例图" data-act="viewticket" data-type="${owner.type}" data-id="${esc(owner.id)}">` : seal(); })()}
-        <div class="pc-grow"><b>${owner ? esc(M.ticketName(d, owner)) : (st.pos.trim() ? '这串还没存进画师库' : '还没写')}</b><small>${[nArtists ? nArtists + ' 位画师' : '没有 artist: 画师', nOther ? nOther + ' 个别的词' : ''].filter(Boolean).join(' · ')}${owner && M.ticketCover(d, owner) ? ' · 点图看大图' : ''}</small></div>
+        <div class="pc-grow"><b ${owner?.type === 'group' ? 'data-act="studiorename" style="cursor:pointer" title="点一下改名"' : ''}>${owner ? esc(M.ticketName(d, owner)) : (st.pos.trim() ? '这串还没存进画师库' : '还没写')}${owner?.type === 'group' ? ' <span class="pc-dim" style="font-weight:400;font-size:12px">✎ 改名</span>' : ''}</b><small>${[nArtists ? nArtists + ' 位画师' : '没有 artist: 画师', nOther ? nOther + ' 个别的词' : ''].filter(Boolean).join(' · ')}${owner && M.ticketCover(d, owner) ? ' · 点图看大图' : ''}</small></div>
         <button class="pc-pill dashed" data-act="pickartist">换画师</button>
       </div>
       ${(() => { const bare = guessBareArtists(d, st.pos); return bare.length ? `<div class="pc-bare" style="margin-top:8px"><div class="pc-row-between"><span class="pc-dim small">没写 artist: 的画师名 · 点名字单个补</span><button class="pc-pill tiny on" data-act="addprefix">全部补上</button></div><div class="pc-chips wrap">${bare.map(n => `<button class="pc-pill dashed tiny" data-act="addprefix" data-name="${esc(n)}">${esc(n)}</button>`).join('')}</div></div>` : ''; })()}
@@ -7774,6 +7816,9 @@ function viewWardrobe(d) {
     const q = ui.wardSearch.trim().toLowerCase();
     const list = all.filter(x => (ui.wardFilter === 'all' || (ui.wardFilter === 'none' ? !x.owner : x.holders.some(h => h.owner?.key === ui.wardFilter)))
         && (!q || (x.o.name + ' ' + C.tagText(x.o.tags) + ' ' + x.o.tags.map(t => t.zh).join(' ')).toLowerCase().includes(q)));
+    // 读卡自动存的、没加图、没改名、只有本人穿的：收进下面一栏
+    const isAuto = x => x.o.auto && !x.o.image && x.holders.length <= 1 && x.owner && x.o.name === `${x.owner.name}的衣服`;
+    const mine = list.filter(x => !isAuto(x)), autos = list.filter(isAuto);
     return `${castTop()}
     <div class="pc-outmake">
       <label class="pc-btn dark">${IMG_ICON} 图片<input type="file" accept="image/*" multiple data-wardimg hidden></label>
@@ -7786,10 +7831,11 @@ function viewWardrobe(d) {
     <div class="pc-chips">${[['all', '全部'], ...owners.map(c => [c.key, c.name]), ['none', '没给谁穿']].map(([k, t]) => `<button class="pc-pill ${ui.wardFilter === k ? 'on' : 'dashed'}" data-act="wardfilter" data-v="${esc(k)}">${esc(t)}</button>`).join('')}</div>
     <div class="pc-row-between pc-mt-s"><span class="pc-dim small">卡片上的图</span><div class="pc-chips" style="margin:0">${[['head', '裁成一样高'], ['full', '展示整张']].map(([k, t]) => `<button class="pc-pill tiny ${(d.options.wardThumb || 'head') === k ? 'on' : 'dashed'}" data-act="wardthumb" data-v="${k}">${t}</button>`).join('')}</div></div>
     <style>.pc-wardgrid.thumb-head .pc-ticket-img img{object-fit:cover;object-position:50% 8%}.pc-wardgrid.thumb-full{align-items:start}.pc-wardgrid.thumb-full .pc-ticket-img{height:auto!important;-webkit-mask-image:none;mask-image:none}.pc-wardgrid.thumb-full .pc-ticket-img img{height:auto;object-fit:contain;display:block}</style>
-    <div class="pc-grid2 pc-mt-s pc-wardgrid thumb-${d.options.wardThumb === 'full' ? 'full' : 'head'}">${list.map(({ o, owner, holders }) => `<article class="pc-ticket" data-act="openoutfit" data-owner="${esc(owner?.key || '')}" data-id="${esc(o.id)}">
+    <div class="pc-grid2 pc-mt-s pc-wardgrid thumb-${d.options.wardThumb === 'full' ? 'full' : 'head'}">${mine.map(({ o, owner, holders }) => `<article class="pc-ticket" data-act="openoutfit" data-owner="${esc(owner?.key || '')}" data-id="${esc(o.id)}">
         <div class="pc-ticket-img">${o.image ? `<img src="${esc(o.image.startsWith('data:') ? o.image : '/' + o.image.replace(/^\/+/, ''))}" loading="lazy" alt="">` : '<span>还没有图</span>'}</div>
         <div class="pc-ticket-text"><b>${esc(o.name)}</b><small>${o.tags.length} 个标签</small><span class="pc-state ${owner ? '' : 'todo'}">${owner ? '穿在：' + esc(holders.map(h => h.owner.name).join('、')) : '还没给谁穿'}</span></div></article>`).join('')
-        || empty('衣柜是空的', '点上面「图片」放一张图，AI 会把衣服写成标签；也可以让 AI 设计，或者自己写。')}</div>
+        || (autos.length ? '' : empty('衣柜是空的', '点上面「图片」放一张图，AI 会把衣服写成标签；也可以让 AI 设计，或者自己写。'))}</div>
+    ${autos.length ? `<style>.pc-wardrow{display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;padding:10px 2px;border:0;border-top:1px dashed var(--pc-dash);background:transparent;color:inherit;font:inherit;font-size:14px;cursor:pointer;text-align:left}.pc-wardrow:first-of-type{border-top:0}.pc-wardrow em{font-style:normal;opacity:.6;font-size:12px;flex:none}</style><div class="pc-mt-s">${fold('wardauto', '角色卡里读出来的衣服', autos.length + ' 套', `<div class="pc-dim small" style="margin-bottom:4px">读角色时自动存的。加了图、改了名或给第二个人穿，就会挪到上面。</div>${autos.map(({ o, owner }) => `<button class="pc-wardrow" data-act="openoutfit" data-owner="${esc(owner.key)}" data-id="${esc(o.id)}"><span>${esc(o.name)}</span><em>${o.tags.length} 个标签</em></button>`).join('')}`)}</div>` : ''}
     <div style="height:24px"></div>`;
 }
 
@@ -7853,7 +7899,15 @@ function viewOutfit(d) {
       <b>${u.draft ? '存到哪里' : holders.length ? '谁在穿' : '给谁穿'}</b>
       ${holders.length ? `<div class="pc-chips wrap">${holders.map(h => `<button class="pc-pill on" data-act="outtakeoff" data-v="${esc(h.key)}" title="从${esc(h.name)}身上拿掉">${esc(h.name)} ×</button>`).join('')}</div><div class="pc-dim small">点名字 × 从他身上拿掉（衣柜里还在）。下面点名字再给别人穿，几个人穿的是同一套，改了一起变。</div>${label('再给谁穿')}` : ''}
       <div class="pc-chips wrap">${u.draft ? `<button class="pc-pill ${!u.dest ? 'on' : 'dashed'}" data-act="outdest" data-v="">只存进衣柜</button>` : ''}
-        ${people.filter(c => c.key !== owner?.key && !holders.some(h => h.key === c.key)).map(c => `<button class="pc-pill ${u.dest === c.key ? 'on' : 'dashed'}" data-act="${u.draft ? 'outdest' : 'outgive'}" data-v="${esc(c.key)}">${u.draft ? '给' : ''}${esc(c.name)}${u.draft ? '穿' : ''}</button>`).join('') || '<span class="pc-dim small">「角色」里还没有角色</span>'}</div>
+        ${(() => {
+            const avail = people.filter(c => c.key !== owner?.key && !holders.some(h => h.key === c.key));
+            const inChat = new Set(cast.map(c => c.key));
+            const now = avail.filter(c => inChat.has(c.key) || u.dest === c.key), rest = avail.filter(c => !inChat.has(c.key));
+            const chip = (c, small) => `<button class="pc-pill ${small ? 'tiny ' : ''}${u.dest === c.key ? 'on' : 'dashed'}" data-act="${u.draft ? 'outdest' : 'outgive'}" data-v="${esc(c.key)}" data-name="${esc(c.name)}">${u.draft ? '给' : ''}${esc(c.name)}${u.draft ? '穿' : ''}</button>`;
+            if (!avail.length) return '<span class="pc-dim small">「角色」里还没有角色</span>';
+            const q = String(ui.outPeopleQ || '').trim().toLowerCase();
+            return `${rest.length && now.length ? '</div><div class="pc-dim small" style="margin:8px 0 4px">这次聊天里的人</div><div class="pc-chips wrap">' : ''}${now.map(c => chip(c)).join('')}${rest.length ? `</div><div class="pc-mt-s" id="pc-outmore">${fold('outmore', now.length ? '别的角色' : '角色', rest.length + ' 个', `<label class="pc-search" style="margin:0 0 8px"><span class="pc-sr">搜名字</span>${ICON.search}<input data-bind="outPeopleQ" value="${esc(ui.outPeopleQ || '')}" placeholder="搜名字"></label><div class="pc-chips wrap">${rest.map(c => chip(c, true).replace('<button ', q && !c.name.toLowerCase().includes(q) ? '<button style="display:none" ' : '<button ')).join('')}</div>`)}</div><div>` : ''}`;
+        })()}</div>
       ${!u.draft && !holders.length ? '<div class="pc-dim small">点名字：给他穿，并设为他固定穿的衣服。</div>' : ''}
     </section>
     ${u.draft ? `<button class="pc-btn dark big pc-mt" data-act="outsave" ${o.tags.length ? '' : 'disabled'}>${seal()}保存</button>${o.tags.length ? '' : '<div class="pc-dim small pc-center" style="margin-top:6px">至少要有一件衣服才能保存</div>'}` : ''}
@@ -7905,6 +7959,7 @@ function viewCast(d) {
     </div>
     <label class="pc-search pc-mt-s"><span class="pc-sr">搜索</span>${ICON.search}<input data-bind="castSearch" value="${esc(ui.castSearch)}" placeholder="搜角色名"></label>
     <div class="pc-grid2 pc-mt-s">${list.map(card).join('') || empty('这里是空的', ui.castTab === 'user' ? '酒馆里还没有人设' : '酒馆里还没有角色卡')}</div>
+    ${(() => { const pre = ui.castTab === 'user' ? 'user:' : ui.castTab === 'char' ? 'char:' : ''; const n = pre ? Object.keys(d.options.hiddenChars || {}).filter(k => k.startsWith(pre)).length : 0; return n ? `<div class="pc-dim small pc-center pc-mt-s">从智库删掉了 ${n} 个${pre === 'user:' ? '人设' : '角色卡'} <button class="pc-pill dashed tiny" data-act="unhidechars" data-v="${pre}">全部恢复</button></div>` : ''; })()}
     <div style="height:24px"></div>`;
 }
 
@@ -8063,7 +8118,7 @@ function viewCharEdit(d) {
       </div>` : ''}
       <div class="pc-actions wrap" style="padding:10px"><button class="pc-btn" data-act="charkeep" data-w="photo" ${busy ? 'disabled' : ''}>存进相册</button><button class="pc-btn" data-act="charkeep" data-w="avatar" ${busy ? 'disabled' : ''}>设为头像</button><button class="pc-btn" data-act="charkeep" data-w="ref" ${busy ? 'disabled' : ''}>加进角色参考图</button></div></section>` : ''}
     <div class="pc-center pc-mt"><button class="pc-pill dashed" data-act="sharechar">分享这个角色</button></div>
-    ${c.kind === 'side' || c.kind === 'free' ? `<div class="pc-center pc-mt"><button class="pc-pill dashed danger" data-act="delside">删除这个角色</button></div>` : ''}
+    <div class="pc-center pc-mt"><button class="pc-pill dashed danger" data-act="${c.kind === 'side' || c.kind === 'free' ? 'delside' : 'delcard'}">${c.kind === 'char' ? '从智库删掉这个角色卡' : c.kind === 'user' ? '从智库删掉这个人设' : '删除这个角色'}</button></div>
     <div style="height:24px"></div>`;
 }
 
@@ -8254,7 +8309,7 @@ async function charAction(act, el) {
                     if (!ch.appearance.length) {
                         ch.appearance = p.appearance;
                         if (p.nsfw?.length && !(ch.nsfwBody || []).length) ch.nsfwBody = p.nsfw;
-                        if (p.outfit.length && !ch.outfits.length) { const o = { id: M.uid('o_'), name: '默认', tags: p.outfit }; ch.outfits.push(o); ch.outfitId = o.id; }
+                        if (p.outfit.length && !ch.outfits.length) { const o = { id: M.uid('o_'), name: `${ch.name}的衣服`, tags: p.outfit, auto: true }; ch.outfits.push(o); ch.outfitId = o.id; }
                     }
                     const al = new Set(String(ch.aliases || '').split(/[,，、;；\s]+/).filter(Boolean));
                     for (const a of p.aliases) if (a !== ch.name) al.add(a);
@@ -8295,7 +8350,7 @@ async function charAction(act, el) {
                 c.appearance = r.appearance;
                 if (r.nsfw?.length) c.nsfwBody = r.nsfw;
                 if (r.canon && !c.canonTag) { c.canonTag = r.canon; c.canonOn = true; toastr.info(`认出是同人角色「${r.canon}」，已经打开「同人角色」，不对可以关掉`, '读外貌', { timeOut: 4000 }); }
-                if (r.outfit.length && !c.outfits.length) { const o = { id: M.uid('o_'), name: '默认', tags: r.outfit }; c.outfits.push(o); c.outfitId = o.id; }
+                if (r.outfit.length && !c.outfits.length) { const o = { id: M.uid('o_'), name: `${c.name}的衣服`, tags: r.outfit, auto: true }; c.outfits.push(o); c.outfitId = o.id; }
                 toastr.success(`读到 ${r.appearance.length} 个外貌标签${r.outfit.length ? `，${r.outfit.length} 个衣服标签（存在「默认」这套里）` : ''}`, '角色');
             } catch (e) { toastr.error(e.message, '读取失败'); }
             ui.charBusy = ''; save();
@@ -8428,6 +8483,12 @@ async function charAction(act, el) {
         }
         case 'sharechar': await shareCharacterPost('character', c); return true;
         case 'shareout': { const o = C.currentOutfit(c); if (o) await shareCharacterPost('outfit', c, o); return true; }
+        case 'delcard': {
+            if (!(await confirmBox(`从智库删掉「${c.name}」？外貌、衣服、参考图都会清掉，角色页里不再显示。酒馆里的${c.kind === 'user' ? '人设' : '角色卡'}不会删；以后打开它聊天，它还会出现在「这次聊天」里，写了外貌就会重新显示。`, { ok: '删掉' }))) return true;
+            (d.options.hiddenChars ||= {})[c.key] = Date.now();
+            C.deleteChar(c.key); ui.view = 'cast'; render();
+            return true;
+        }
         case 'delside': {
             if (!(await confirmBox(`删除「${c.name}」？`))) return true;
             C.deleteChar(c.key); ui.view = 'cast'; render();
@@ -8514,25 +8575,12 @@ function viewBatch(d) {
     const done = st ? st.jobs.filter(j => ['done', 'error', 'skip'].includes(j.status)).length : 0;
     const names = batchUnits(d, b.text);
     const tpls = chosenTemplates('batch');
-    const count = names.reduce((n, u) => { const r = findUnit(d, u); const it = r && M.resolveTicket(d, r)?.item; return n + tpls.filter(t => !(b.skipExisting && it?.images.some(i => i.template === t))).length; }, 0);
+    const whoChars = b.who === 'chars' ? (b.chars || []).filter(k => C.getChar(k)?.appearance?.length) : [];
+    const count = b.who === 'chars' ? names.length * tpls.length * whoChars.length : names.reduce((n, u) => { const r = findUnit(d, u); const it = r && M.resolveTicket(d, r)?.item; return n + tpls.filter(t => !(b.skipExisting && it?.images.some(i => i.template === t))).length; }, 0);
     const tplText = tpls.map(t => d.templates[t]?.positive).filter(Boolean).join(' / ');
     const picked = st ? st.jobs.filter(j => j.picked).length : 0;
     const head = `<div class="pc-dhead"><button class="pc-round" data-act="back" aria-label="返回">‹</button><h2 class="pc-dtitle">批量生成例图</h2></div>`;
-    if (st && !b.showSetup) return `${head}
-    <section class="pc-card pc-pad pc-mt">
-      <div class="pc-row-between"><b>${done} / ${st.jobs.length} 张</b>
-        <div class="pc-chips" style="margin:0">${st.running ? `<button class="pc-round" data-act="batchpause" aria-label="${st.paused ? '继续' : '暂停'}">${st.paused ? '▶' : '❚❚'}</button><button class="pc-round" data-act="batchstop" aria-label="停止">■</button>` : ''}</div></div>
-      <div class="pc-prog"><i style="width:${st.jobs.length ? Math.round(done / st.jobs.length * 100) : 0}%"></i></div>
-      <div class="pc-dim small pc-mt-s">每张出来会自动存进那位画师的例图。${st.running ? '关掉这一页也会继续生成。' : ''}</div>
-      <div class="pc-actions wrap"><button class="pc-btn" data-act="batchsetup">${st.running ? '‹ 回到设置，再加一批' : '‹ 回到设置，再来一批'}</button></div>
-    </section>
-    <div class="pc-grid2 pc-mt pc-bgrid">${st.jobs.map((j, i) => `<div class="pc-bcell shot-${d.templates[j.templateId]?.shot || 'bust'} ${j.picked ? 'on' : ''} ${j.status}" ${j.status === 'done' ? `data-act="batchpick" data-i="${i}"` : ''} title="${esc(j.error)}">
-        ${j.image ? `<img src="${esc(j.image)}" alt="">` : `<span>${{ wait: '排队', run: '<span class="pc-busy">生成中</span>', error: '失败', skip: '已有，跳过' }[j.status] || ''}</span>`}
-        ${j.status === 'done' ? `<i class="pc-bpick">${j.picked ? '✓' : ''}</i>` : ''}
-        <b class="mono">${esc(M.ticketName(d, j.ref))} · ${esc(d.templates[j.templateId]?.name || '')}</b></div>`).join('')}</div>
-    ${!st.running && st.jobs.some(j => j.status === 'done') ? `<div class="pc-tip">点图片可以勾选，看中的几位能直接拼成一个画师组</div>
-    <button class="pc-btn dark big pc-mt" data-act="batchgroup" ${picked ? '' : 'disabled'}>${picked ? `把勾选的 ${picked} 位拼成画师组` : '先勾选几张'}</button>` : ''}
-    <div style="height:24px"></div>`;
+    if (st && !b.showSetup) return viewBatchResults(d, head);
     const doneN = st ? st.jobs.filter(j => ['done', 'error', 'skip'].includes(j.status)).length : 0;
     return `${head}
     ${st ? `<section class="pc-card pc-pad pc-mt pc-row-between"><div><b>${st.running ? '正在生成' : '上一批'} ${doneN} / ${st.jobs.length} 张</b><div class="pc-dim small">${st.running ? '再点「开始生成」会排到后面一起生成' : '点右边看结果'}</div></div><button class="pc-btn dark" data-act="batchview">看进度 ›</button></section>` : ''}
@@ -8543,11 +8591,13 @@ function viewBatch(d) {
       <div class="pc-chips wrap"><button class="pc-pill dashed tiny" data-act="batchfill" data-v="all">放进画师库里全部单个画师</button><button class="pc-pill dashed tiny" data-act="batchfill" data-v="empty">只放还没有例图的</button></div>
       ${label('用哪种提示词')}
       ${sampleChooser('batch')}
-      <label class="pc-switch"><input type="checkbox" data-bind-check="batch.skipExisting" ${b.skipExisting ? 'checked' : ''}><span></span>已经有这种例图的画师跳过</label>
+      ${b.who === 'chars' ? '' : `<label class="pc-switch"><input type="checkbox" data-bind-check="batch.skipExisting" ${b.skipExisting ? 'checked' : ''}><span></span>已经有这种例图的画师跳过</label>`}
       <label class="pc-switch"><input type="checkbox" data-opt="sampleSameSeed" ${d.options.sampleSameSeed !== false ? 'checked' : ''}><span></span>所有画师用同一个种子<small>同一张脸、同一个姿势，只比画风${Number(d.options.sampleSeed) > 0 ? ` · 种子 ${d.options.sampleSeed}` : ''}</small></label>
       ${d.options.sampleSameSeed !== false && Number(d.options.sampleSeed) > 0 ? '<button class="pc-pill dashed tiny" data-act="newsampleseed">换一个种子</button>' : ''}
-      <div class="pc-row-between"><span>共 ${names.length} 位画师，会生成 <b>${count}</b> 张</span><span class="pc-dim small">会用掉 NovelAI 点数</span></div>
+      <div class="pc-row-between"><span>共 ${names.length} 串${b.who === 'chars' ? ` × ${whoChars.length} 个角色` : ''}，会生成 <b>${count}</b> 张</span><span class="pc-dim small">会用掉 NovelAI 点数</span></div>
+      <div class="pc-dim small">画师库里已有的串，出的图照旧存进例图；不在库里的<b>不会自动建成画师串</b>，看中了再勾选存进去。</div>
     </section>
+    ${batchWhoCard(d)}
     <details class="pc-fold"><summary><b>例图提示词</b><i>${esc(tplText)}</i></summary><div class="pc-fold-in">
       ${tpls.map(t => `<div class="pc-label">${esc(d.templates[t]?.name)}</div><p class="pc-quote small mono">正面：${esc(d.templates[t]?.positive)}<br>负面：${esc(d.templates[t]?.negative)}</p>`).join('')}
       <button class="pc-btn" data-act="edittpl" data-scope="batch">改提示词</button></div></details>
@@ -9446,6 +9496,16 @@ async function onClick(ev, outside = false) {
                 saveStudio(); render(); break;
             }
             case 'saveartist': await saveStudioTicket(); break;
+            case 'unhidechars': { const h = getData().options.hiddenChars || {}; for (const k of Object.keys(h)) if (k.startsWith(el.dataset.v || '')) delete h[k]; commit(); render(); break; }
+            case 'studiorename': {
+                const ref = studioSource(), g = ref && getData().groups[ref.id];
+                if (!g) break;
+                const n = await promptText('画师串的新名字', g.name);
+                if (n == null || !n.trim() || n.trim() === g.name) break;
+                g.name = n.trim();
+                await __mod_store.commit({ immediate: true, silent: true });
+                render(); toastr.success('改好了', '智库', { timeOut: 1500 }); break;
+            }
             case 'studiouse': useStudioForChat(); break;
             case 'unticket': E.setActive(null); break;
             case 'use': {
@@ -9956,6 +10016,13 @@ async function onClick(ev, outside = false) {
             case 'batchsetup': ui.batch.showSetup = true; render(); root.querySelector('.pc-body')?.scrollTo(0, 0); break;
             case 'batchview': ui.batch.showSetup = false; render(); root.querySelector('.pc-body')?.scrollTo(0, 0); break;
             case 'batchpick': { const j = ui.batch.state?.jobs[Number(el.dataset.i)]; if (j) { j.picked = !j.picked; render(); } break; }
+            case 'batchwho': ui.batch.who = el.dataset.v; render(); break;
+            case 'batchchar': { const s = new Set(ui.batch.chars || []); const k = el.dataset.v; if (s.has(k)) s.delete(k); else s.add(k); ui.batch.chars = [...s]; render(); break; }
+            case 'batchuseref': ui.batch.useRef = el.dataset.v === '1'; render(); break;
+            case 'batchviewmode': ui.batch.view = el.dataset.v; render(); break;
+            case 'batchsave': try { await batchSavePicked(d); } catch (e) { toastr.error(e.message, '存进画师库'); } render(); break;
+            case 'batchtochar': try { await batchToChar(d); } catch (e) { toastr.error(e.message, '存进角色相册'); } render(); break;
+            case 'batchexport': try { await batchExport(d); } catch (e) { toastr.error(e.message, '导出'); } break;
             case 'batchfill': {
                 const arts = Object.values(d.artists).filter(a => (el.dataset.v === 'all' || !a.images.length) && !M.banInfo(d, a.tag));
                 ui.batch.text = arts.map(a => a.tag.replace(/^artist:/, '')).join('\n');
@@ -9965,10 +10032,12 @@ async function onClick(ev, outside = false) {
             case 'batchstop': ui.batch.state?.stop(); break;
             case 'batchgroup': {
                 const picked = ui.batch.state.jobs.filter(j => j.picked);
-                const name = await promptText('新画师组的名字', picked.map(j => M.ticketName(d, j.ref)).slice(0, 2).join(' + '));
+                // 不在画师库里的串：现在才把里面的画师建好
+                const memberIds = j => j.ref && M.resolveTicket(d, j.ref) ? (j.ref.type === 'group' ? (d.groups[j.ref.id]?.members || []).map(m => m.artistId) : [j.ref.id]) : M.parseArtistString(j.text || '').members.map(m => M.ensureArtist(d, m.tag).id);
+                const name = await promptText('新画师组的名字', [...new Set(picked.map(j => batchRowName(d, j)))].slice(0, 2).join(' + '));
                 if (!name) break;
                 const id = M.uid('g_');
-                d.groups[id] = { id, name, note: '', extra: '', collections: [], fav: false, images: [], createdAt: Date.now(), usedAt: 0, members: [...new Set(picked.flatMap(j => j.ref.type === 'group' ? (d.groups[j.ref.id]?.members || []).map(m => m.artistId) : [j.ref.id]))].map(artistId => ({ artistId, weight: 1 })) };
+                d.groups[id] = { id, name, note: '', extra: '', collections: [], fav: false, images: [], createdAt: Date.now(), usedAt: 0, members: [...new Set(picked.flatMap(memberIds))].map(artistId => ({ artistId, weight: 1 })) };
                 commit();
                 ui.view = 'group'; ui.detailId = id; ui.backTo = 'book'; render();
                 break;
@@ -10287,6 +10356,8 @@ function onInput(ev) {
         }
         if (el.dataset.bind === 'studio.sceneQ' || el.dataset.bind === 'combine.q') { clearTimeout(onInput.sq); onInput.sq = setTimeout(render, 250); }
         if (el.dataset.bind === 'studio.pos') { const w = root.querySelector('#pc-pos-ban'); if (w) w.innerHTML = banWarn(getData(), el.value) + lintHtml(el.value); }
+        if (el.dataset.bind === 'batchCharQ') { const q = el.value.trim().toLowerCase(); root.querySelectorAll('#pc-bcharmore [data-name]').forEach(b => { b.style.display = q && !b.dataset.name.toLowerCase().includes(q) ? 'none' : ''; }); }
+        if (el.dataset.bind === 'outPeopleQ') { const q = el.value.trim().toLowerCase(); root.querySelectorAll('#pc-outmore [data-name]').forEach(b => { b.style.display = q && !b.dataset.name.toLowerCase().includes(q) ? 'none' : ''; }); }
         if (el.dataset.bind === 'batch.text') { const w = root.querySelector('#pc-batch-ban'); if (w) w.innerHTML = batchBanWarn(getData(), el.value); }
         if (String(el.dataset.bind).startsWith('cfy.')) { clearTimeout(onInput.cf); onInput.cf = setTimeout(saveCfy, 600); }
         if (['studio.pos', 'studio.neg', 'studio.scene', 'studio.sceneEn'].includes(el.dataset.bind)) { updateStudioPreview(); clearTimeout(onInput.ss); onInput.ss = setTimeout(saveStudio, 600); }
@@ -10660,6 +10731,184 @@ async function saveStudioResult() {
     toastr.success('已保存', '智库');
 }
 
+/** 批量设置：画谁（模板里的人 / 角色页的角色） */
+function batchWhoCard(d) {
+    const b = ui.batch;
+    const chars = b.who === 'chars';
+    const cast = C.currentCast().map(x => x.char).filter(c => c.appearance?.length);
+    const inChat = new Set(cast.map(c => c.key));
+    const rest = [...new Map(Object.values(d.characters).filter(c => c.appearance?.length && !inChat.has(c.key)).map(c => [c.key, c])).values()];
+    const sel = new Set(b.chars || []);
+    const row = c => `<button class="pc-bwho ${sel.has(c.key) ? 'on' : ''}" data-act="batchchar" data-v="${esc(c.key)}" data-name="${esc(c.name)}">${C.avatarUrl(c) ? `<img src="${esc(C.avatarUrl(c))}" alt="" onerror="this.remove()">` : '<i></i>'}<span><b>${esc(c.name)}</b><small>外貌 ${c.appearance.length} 词 · ${c.outfitMode === 'fixed' && C.currentOutfit(c) ? '衣服：' + esc(C.currentOutfit(c).name) : '衣服跟剧情（不带衣服）'}${c.charRef && d.charRefGroups?.[c.charRef] ? ' · 有角色参考' : ''}</small></span><em>${sel.has(c.key) ? '✓' : ''}</em></button>`;
+    const q = String(ui.batchCharQ || '').trim().toLowerCase();
+    return `<style>.pc-bwho{display:flex;align-items:center;gap:9px;width:100%;margin:0 0 6px;padding:7px 10px;border:1.5px dashed var(--pc-dash);border-radius:14px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}.pc-bwho.on{border-style:solid;border-color:var(--pc-ink);background:var(--pc-paper-2)}.pc-bwho img,.pc-bwho i{width:32px;height:32px;border-radius:10px;object-fit:cover;flex:none;background:var(--pc-gold)}.pc-bwho span{flex:1;min-width:0}.pc-bwho b{display:block;font-size:14px}.pc-bwho small{display:block;font-size:11.5px;opacity:.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pc-bwho em{font-style:normal;flex:none}</style>
+    <section class="pc-card pc-pad pc-mt">
+      <b>画谁</b>
+      <div class="pc-chips wrap pc-mt-s"><button class="pc-pill ${!chars ? 'on' : 'dashed'}" data-act="batchwho" data-v="tpl">模板里的人</button><button class="pc-pill ${chars ? 'on' : 'dashed'}" data-act="batchwho" data-v="chars">选角色</button></div>
+      ${!chars ? '<div class="pc-dim small">用例图模板里的人，只比画风（跟以前一样）。</div>' : `
+      <div class="pc-dim small" style="margin:2px 0 8px">每串画师 × 每个选中的角色各画一张：角色外貌 + 固定的衣服 + 模板的景别。只列写了外貌的角色。</div>
+      ${cast.length ? `<div class="pc-label" style="margin-top:0">这次聊天里的人</div>${cast.map(row).join('')}` : ''}
+      ${rest.length ? `<div id="pc-bcharmore">${fold('bcharmore', cast.length ? '别的角色' : '角色', rest.length + ' 个' + (rest.filter(c => sel.has(c.key)).length ? ` · 选了 ${rest.filter(c => sel.has(c.key)).length}` : ''), `<label class="pc-search" style="margin:0 0 8px"><span class="pc-sr">搜名字</span>${ICON.search}<input data-bind="batchCharQ" value="${esc(ui.batchCharQ || '')}" placeholder="搜名字"></label>${rest.map(c => row(c).replace('<button ', q && !c.name.toLowerCase().includes(q) ? '<button style="display:none" ' : '<button ')).join('')}`)}</div>` : ''}
+      ${!cast.length && !rest.length ? '<div class="pc-dim small">还没有写了外貌的角色，先到「角色」页写外貌。</div>' : ''}
+      <div class="pc-label">角色参考</div>
+      <div class="pc-chips wrap"><button class="pc-pill tiny ${b.useRef !== false ? 'on' : 'dashed'}" data-act="batchuseref" data-v="1">绑了就带上</button><button class="pc-pill tiny ${b.useRef === false ? 'on' : 'dashed'}" data-act="batchuseref" data-v="0">不带</button><span class="pc-dim small" style="align-self:center">只有 NAI 4.5 能用</span></div>`}
+    </section>`;
+}
+/** 批量里一张图属于哪一行（哪串画师）、哪一列（哪个角色 / 模板） */
+function batchRowKey(j) { return j.ref ? j.ref.type + ':' + j.ref.id : 't:' + j.text; }
+function batchRowName(d, j) {
+    if (j.ref && M.resolveTicket(d, j.ref)) return M.ticketName(d, j.ref);
+    if (j.name) return j.name;
+    const p = M.parseArtistString(j.text || '');
+    return p.members.length ? p.members.slice(0, 3).map(m => m.tag.replace(/^artist:/, '')).join(' + ') + (p.members.length > 3 ? ' …' : '') : String(j.text || '').slice(0, 30);
+}
+function batchColKey(j) { return (j.char || '') + '|' + j.templateId; }
+function batchColName(d, j, multiTpl) {
+    const t = d.templates[j.templateId]?.name || '';
+    return j.char ? (multiTpl ? `${j.charName} · ${t}` : j.charName) : t;
+}
+function batchLayout(d, jobs) {
+    const rows = [], cols = [], rIdx = new Map(), cIdx = new Map();
+    const multiTpl = new Set(jobs.map(j => j.templateId)).size > 1;
+    jobs.forEach(j => {
+        const rk = batchRowKey(j), ck = batchColKey(j);
+        if (!rIdx.has(rk)) { rIdx.set(rk, rows.length); rows.push({ key: rk, name: batchRowName(d, j), text: j.ref && M.resolveTicket(d, j.ref) ? M.ticketString(d, j.ref) : j.text, inLib: !!(j.ref && M.resolveTicket(d, j.ref)) }); }
+        if (!cIdx.has(ck)) { cIdx.set(ck, cols.length); cols.push({ key: ck, name: batchColName(d, j, multiTpl) }); }
+    });
+    const cell = new Map(jobs.map((j, i) => [rIdx.get(batchRowKey(j)) + ':' + cIdx.get(batchColKey(j)), i]));
+    return { rows, cols, cell };
+}
+function viewBatchResults(d, head) {
+    const b = ui.batch, st = b.state;
+    const done = st.jobs.filter(j => ['done', 'error', 'skip'].includes(j.status)).length;
+    const picked = st.jobs.filter(j => j.picked && j.image);
+    const pickNew = picked.filter(j => !j.saved).length, pickChar = picked.filter(j => j.char && !j.toChar).length;
+    const table = (b.view || 'table') === 'table';
+    const shotOf = j => d.templates[j.templateId]?.shot || 'bust';
+    const cellHtml = (j, i) => `<div class="pc-bcell shot-${shotOf(j)} ${j.picked ? 'on' : ''} ${j.status}" ${j.status === 'done' ? `data-act="batchpick" data-i="${i}"` : ''} title="${esc(j.error)}">
+        ${j.image ? `<img src="${esc(j.image)}" alt="">` : `<span>${{ wait: '排队', run: '<span class="pc-busy">生成中</span>', error: '失败', skip: '已有，跳过' }[j.status] || ''}</span>`}
+        ${j.status === 'done' ? `<i class="pc-bpick">${j.picked ? '✓' : ''}</i>` : ''}
+        ${table ? '' : `<b class="mono">${esc(batchRowName(d, j))} · ${esc(batchColName(d, j, true))}</b>`}${j.saved ? '<u class="pc-bsaved">已存</u>' : ''}</div>`;
+    let body;
+    if (table) {
+        const { rows, cols, cell } = batchLayout(d, st.jobs);
+        body = `<div class="pc-btable" style="grid-template-columns:72px repeat(${cols.length},minmax(84px,1fr))"><span></span>${cols.map(c => `<span class="pc-bth">${esc(c.name)}</span>`).join('')}
+          ${rows.map((r, ri) => `<span class="pc-btr" title="${esc(r.text)}">${esc(r.name)}${r.inLib ? '' : '<em>不在库里</em>'}</span>${cols.map((c, ci) => { const i = cell.get(ri + ':' + ci); return i === undefined ? '<span></span>' : cellHtml(st.jobs[i], i); }).join('')}`).join('')}</div>`;
+    } else body = `<div class="pc-grid2 pc-bgrid">${st.jobs.map(cellHtml).join('')}</div>`;
+    const any = st.jobs.some(j => j.status === 'done');
+    return `${head}<style>.pc-btable{display:grid;gap:6px;overflow-x:auto;align-items:start;scrollbar-width:none}.pc-btable::-webkit-scrollbar{display:none}.pc-bth{font-size:12px;text-align:center;opacity:.75;align-self:end;line-height:1.3}.pc-btr{font-size:12px;line-height:1.35;align-self:center;word-break:break-all}.pc-btr em{display:block;font-style:normal;font-size:10.5px;opacity:.6}.pc-btable .pc-bcell b{display:none}.pc-bsaved{position:absolute;left:5px;bottom:5px;text-decoration:none;font-size:10.5px;padding:0 6px;border-radius:6px;background:rgba(0,0,0,.55);color:#fff}.pc-bcell{position:relative}</style>
+    <section class="pc-card pc-pad pc-mt">
+      <div class="pc-row-between"><b>${done} / ${st.jobs.length} 张</b>
+        <div class="pc-chips" style="margin:0">${st.running ? `<button class="pc-round" data-act="batchpause" aria-label="${st.paused ? '继续' : '暂停'}">${st.paused ? '▶' : '❚❚'}</button><button class="pc-round" data-act="batchstop" aria-label="停止">■</button>` : ''}</div></div>
+      <div class="pc-prog"><i style="width:${st.jobs.length ? Math.round(done / st.jobs.length * 100) : 0}%"></i></div>
+      <div class="pc-dim small pc-mt-s">画师库里已有的串（不画角色时）出的图会自动存进例图，标着「已存」；别的都只在这里，勾选了再存，或者整包导出。${st.running ? '关掉这一页也会继续生成。' : ''}</div>
+      <div class="pc-actions wrap"><button class="pc-btn" data-act="batchsetup">${st.running ? '‹ 回到设置，再加一批' : '‹ 回到设置，再来一批'}</button></div>
+    </section>
+    <div class="pc-seg pc-mt"><button class="${table ? 'on' : ''}" data-act="batchviewmode" data-v="table">对照表</button><button class="${!table ? 'on' : ''}" data-act="batchviewmode" data-v="list">一张张看</button></div>
+    <div class="pc-mt-s">${body}</div>
+    ${any ? `<div class="pc-tip">点图勾选。${table ? '一行是一串画师，一列是一个角色或模板。' : ''}</div>
+    <div class="pc-actions wrap pc-mt-s" style="flex-direction:column;align-items:stretch">
+      <button class="pc-btn" data-act="batchsave" ${pickNew ? '' : 'disabled'}>${pickNew ? `把勾选的 ${pickNew} 张存进画师库（没有的串会建好）` : '勾选几张，存进画师库'}</button>
+      ${st.jobs.some(j => j.char) ? `<button class="pc-btn" data-act="batchtochar" ${pickChar ? '' : 'disabled'}>${pickChar ? `把勾选的 ${pickChar} 张存进角色相册` : '勾选角色的图，存进角色相册'}</button>` : ''}
+      <button class="pc-btn" data-act="batchgroup" ${picked.length ? '' : 'disabled'}>${picked.length ? `把勾选的画师拼成一个画师组` : '勾选几张，把画师拼成画师组'}</button>
+      <button class="pc-btn dark" data-act="batchexport" ${st.running ? 'disabled' : ''}>${st.running ? '出完了才能导出' : '导出整包（预览页 + 原图 + 能导回智库的包）'}</button>
+    </div>` : ''}
+    <div style="height:24px"></div>`;
+}
+/** 勾选的批量图存进画师库：没有的串现在才建 */
+async function batchSavePicked(d) {
+    const jobs = ui.batch.state.jobs.filter(j => j.picked && j.image && !j.saved);
+    let made = 0, saved = 0;
+    for (const j of jobs) {
+        let ref = j.ref && M.resolveTicket(d, j.ref) ? j.ref : null;
+        if (!ref) {
+            const p = M.parseArtistString(j.text || '');
+            const single = p.members.length === 1 && !p.extra && Math.abs(p.members[0].weight - 1) < 0.001;
+            ref = findUnit(d, single ? { tag: p.members[0].tag } : { text: j.text, members: p.members })
+                || (single ? { type: 'artist', id: M.ensureArtist(d, p.members[0].tag).id } : M.createFromString(d, { name: j.name || '', text: j.text, note: '批量生成时存的' }));
+            if (!ref) continue;
+            made++;
+            for (const o of ui.batch.state.jobs) if (batchRowKey(o) === 't:' + j.text) o.ref = ref;
+        }
+        const tpl = d.templates[j.templateId];
+        await E.saveImageTo(ref, j.image, { nsfw: !!tpl?.nsfw, templateId: j.char ? '' : (tpl?.id || '') });
+        j.saved = true; saved++;
+    }
+    commit();
+    toastr.success(`存了 ${saved} 张${made ? `，新建 ${made} 串` : ''}`, '批量生成例图');
+}
+async function batchToChar(d) {
+    const jobs = ui.batch.state.jobs.filter(j => j.picked && j.image && j.char && !j.toChar);
+    let n = 0;
+    for (const j of jobs) {
+        const c = C.getChar(j.char);
+        if (!c) continue;
+        const { path } = await uploadImage(j.image, `charphoto_${M.uid('')}`);
+        (c.photos ||= []).unshift({ path, nsfw: !!d.templates[j.templateId]?.nsfw, at: Date.now(), artist: batchRowName(d, j) });
+        C.saveChar(c); j.toChar = true; n++;
+    }
+    commit();
+    toastr.success(`存进角色相册 ${n} 张（角色页「相册」里能设成头像）`, '批量生成例图');
+}
+/** 不压缩的 zip（图片本来就压过了） */
+function makeZip(files) {
+    const T = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; T[n] = c >>> 0; }
+    const crc = u8 => { let c = 0xffffffff; for (let i = 0; i < u8.length; i++) c = T[(c ^ u8[i]) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+    const enc = new TextEncoder(), parts = [], central = [];
+    let off = 0;
+    for (const f of files) {
+        const name = enc.encode(f.name), data = f.data, c = crc(data);
+        const h = new DataView(new ArrayBuffer(30));
+        h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true); h.setUint32(14, c, true); h.setUint32(18, data.length, true); h.setUint32(22, data.length, true); h.setUint16(26, name.length, true);
+        parts.push(new Uint8Array(h.buffer), name, data);
+        const e = new DataView(new ArrayBuffer(46));
+        e.setUint32(0, 0x02014b50, true); e.setUint16(4, 20, true); e.setUint16(6, 20, true); e.setUint16(8, 0x0800, true); e.setUint32(16, c, true); e.setUint32(20, data.length, true); e.setUint32(24, data.length, true); e.setUint16(28, name.length, true); e.setUint32(42, off, true);
+        central.push(new Uint8Array(e.buffer), name);
+        off += 30 + name.length + data.length;
+    }
+    const size = central.reduce((n, x) => n + x.length, 0);
+    const end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true); end.setUint32(12, size, true); end.setUint32(16, off, true);
+    return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: 'application/zip' });
+}
+async function dataUrlBytes(u) {
+    if (String(u).startsWith('data:')) { const b = atob(String(u).split(',')[1] || ''); const out = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) out[i] = b.charCodeAt(i); return out; }
+    return new Uint8Array(await (await fetch(u)).arrayBuffer());
+}
+/** 导出这批：预览.html（对照表 / 不对照）+ 图片 + 能导回智库的画师串包 */
+async function batchExport(d) {
+    const st = ui.batch.state;
+    const jobs = st.jobs.map((j, i) => ({ j, i })).filter(x => x.j.image);
+    if (!jobs.length) { toastr.warning('还没有出好的图', '导出'); return; }
+    toastr.info(`正在打包 ${jobs.length} 张…`, '导出', { timeOut: 2000 });
+    const safe = s => String(s || '').replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 40) || 'x';
+    const { rows, cols, cell } = batchLayout(d, st.jobs);
+    const files = [], fileOf = new Map(), items = new Map();
+    for (const { j, i } of jobs) {
+        const ext = /^data:image\/jpe?g/.test(j.image) ? 'jpg' : /^data:image\/webp/.test(j.image) ? 'webp' : 'png';
+        const name = `图片/${String(i + 1).padStart(3, '0')}_${safe(batchRowName(d, j))}__${safe(batchColName(d, j, true))}.${ext}`;
+        files.push({ name, data: await dataUrlBytes(j.image) });
+        fileOf.set(i, name);
+        const rk = batchRowKey(j), text = j.ref && M.resolveTicket(d, j.ref) ? M.ticketString(d, j.ref) : j.text;
+        if (!items.has(rk)) items.set(rk, { key: 'batch:' + text, name: batchRowName(d, j), text, note: '批量生成导出', images: [] });
+        const tpl = d.templates[j.templateId];
+        items.get(rk).images.push({ template: j.char ? '' : (tpl?.id || ''), nsfw: !!tpl?.nsfw, seed: `${j.char || 'tpl'}-${j.templateId}`, data: j.image });
+    }
+    const pack = { app: 'zhiku-pack', version: 1, createdAt: new Date().toISOString(), items: [...items.values()] };
+    files.push({ name: '智库画师串包.json', data: new TextEncoder().encode(JSON.stringify(pack)) });
+    const h = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+    const tableHtml = `<table><tr><th></th>${cols.map(c => `<th>${h(c.name)}</th>`).join('')}</tr>${rows.map((r, ri) => `<tr><td class="rn"><b>${h(r.name)}</b><code title="点一下复制">${h(r.text)}</code></td>${cols.map((c, ci) => { const i = cell.get(ri + ':' + ci); const f = i !== undefined && fileOf.get(i); return `<td>${f ? `<a href="${h(f)}" target="_blank"><img loading="lazy" src="${h(f)}"></a>` : ''}</td>`; }).join('')}</tr>`).join('')}</table>`;
+    const listHtml = rows.map((r, ri) => `<figure><figcaption><b>${h(r.name)}</b><code title="点一下复制">${h(r.text)}</code></figcaption><div>${cols.map((c, ci) => { const i = cell.get(ri + ':' + ci); const f = i !== undefined && fileOf.get(i); return f ? `<a href="${h(f)}" target="_blank"><img loading="lazy" src="${h(f)}" title="${h(c.name)}"><span>${h(c.name)}</span></a>` : ''; }).join('')}</div></figure>`).join('');
+    const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>智库批量生图</title>
+<style>body{margin:0;padding:14px;background:#7ea29c;font:14px/1.55 "Noto Serif SC",serif;color:#3a2a22}h1{font-size:18px;margin:0 0 4px;color:#fff}p.s{margin:0 0 10px;color:#eef;font-size:12px}.seg{display:inline-flex;background:#f4efe4;border:1.5px solid #3a2a22;border-radius:99px;padding:3px;margin-bottom:12px}.seg button{border:0;background:none;padding:5px 14px;border-radius:99px;font:inherit;cursor:pointer}.seg .on{background:#3a2a22;color:#fff}.wrap{overflow-x:auto;scrollbar-width:none}.wrap::-webkit-scrollbar{display:none}table{border-collapse:separate;border-spacing:6px;background:#f4efe4;border:1.5px solid #3a2a22;border-radius:16px;padding:6px}th{font-size:12px;font-weight:600}td{vertical-align:top}td img{width:150px;max-width:28vw;border-radius:10px;display:block}td.rn{width:150px;font-size:12px}code{display:block;font-size:11px;color:#6e5a4d;word-break:break-all;cursor:pointer;margin-top:3px}main{display:grid;gap:12px}figure{margin:0;background:#f4efe4;border:1.5px solid #3a2a22;border-radius:16px;padding:10px 12px}figure div{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}figure a{width:150px;max-width:44vw;text-decoration:none;color:inherit;font-size:11px;text-align:center}figure img{width:100%;border-radius:10px;display:block}.hide{display:none}</style>
+<h1>智库批量生图</h1><p class="s">${new Date().toLocaleString()} · ${rows.length} 串 × ${cols.length} 列 · 点图看大图，点提示词复制。智库「设置 → 数据 → 导入画师串包」选 智库画师串包.json 能把画师串和图导回画师库。</p>
+<div class="seg"><button class="on" data-v="t">对照表</button><button data-v="l">不对照</button></div>
+<div id="t" class="wrap">${tableHtml}</div><main id="l" class="hide">${listHtml}</main>
+<script>document.querySelectorAll('.seg button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.seg button').forEach(x=>x.classList.toggle('on',x===b));document.getElementById('t').classList.toggle('hide',b.dataset.v!=='t');document.getElementById('l').classList.toggle('hide',b.dataset.v!=='l');});document.querySelectorAll('code').forEach(c=>c.onclick=()=>{navigator.clipboard?.writeText(c.textContent);c.style.background='#e8dcc8';setTimeout(()=>c.style.background='',600);});</script>`;
+    files.unshift({ name: '预览.html', data: new TextEncoder().encode(html) });
+    saveBlob(makeZip(files), `智库批量_${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.zip`);
+}
 /** 批量的每一行 → 画师或整串；带黑名单画师的跳过 */
 function batchUnits(d, text) {
     return M.parseBatchLines(text).filter(u => u.text ? !u.members.some(m => M.banInfo(d, m.tag)) : !M.banInfo(d, u.tag));
@@ -10726,11 +10975,18 @@ function startBatch() {
     const tpls = chosenTemplates('batch');
     if (!tpls.length) { toastr.warning('这条固定提示词已删除或还没有有效英文标签，请在生图页转换并重新保存后再选', '批量生成例图'); return; }
     const jobs = [];
+    // 画谁：选了角色就每串 × 每个角色；没在画师库里的串不自动建，看中了勾选再存
+    const who = ui.batch.who === 'chars' ? (ui.batch.chars || []).map(k => C.getChar(k)).filter(c => c && c.appearance?.length) : [];
+    if (ui.batch.who === 'chars' && !who.length) { toastr.warning('选几个写了外貌的角色，或者改回「模板里的人」', '批量生成例图'); return; }
     for (const u of list) {
-        const ref = findUnit(d, u) || (u.text ? M.createFromString(d, { name: u.name || '', text: u.text, forceGroup: !!u.name }) : { type: 'artist', id: M.ensureArtist(d, u.tag).id });
-        if (!ref) continue;
-        const item = M.resolveTicket(d, ref).item;
-        for (const t of tpls) jobs.push({ ref, templateId: t, soloWeight: Number(d.options.sampleSoloWeight) || 1, skip: ui.batch.skipExisting && item.images.some(i => i.template === t) });
+        const ref = findUnit(d, u);
+        const text = u.text || (Math.abs((u.weight ?? 1) - 1) < 0.001 ? u.tag : `${u.weight}::${u.tag}::`);
+        const item = ref && M.resolveTicket(d, ref)?.item;
+        for (const t of tpls) {
+            const tpl = d.templates[t];
+            if (who.length) for (const c of who) jobs.push({ ref, text, name: u.name || '', templateId: t, soloWeight: Number(d.options.sampleSoloWeight) || 1, char: c.key, charName: c.name, charTags: C.fixedTags(c, { nsfw: !!tpl?.nsfw }), charNeg: c.negative || '', charRef: ui.batch.useRef !== false && c.charRef && d.charRefGroups?.[c.charRef] ? c.charRef : '' });
+            else jobs.push({ ref, text, name: u.name || '', templateId: t, soloWeight: Number(d.options.sampleSoloWeight) || 1, char: '', skip: !!(ui.batch.skipExisting && item?.images.some(i => i.template === t)) });
+        }
     }
     commit();
     const old = ui.batch.state;

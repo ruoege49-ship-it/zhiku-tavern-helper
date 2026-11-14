@@ -22,6 +22,7 @@ const ui={view:'batch',studio:{loaded:false,scenes:[],neg:''},batch:{text:'34 �
 const warnings=[];const box={M,ui,sceneSig,SCENE_NSFW:/\bnsfw\b/i,hashText:x=>[...x].reduce((h,c)=>(Math.imul(h,31)+c.charCodeAt(0))>>>0,0),getData:()=>data,commit:()=>saved=JSON.stringify(data),render(){},root:{querySelector:()=>null},N,E:{createBatch(list){jobs=list;return {jobs:list,run(){}}}},toastr:{warning:x=>warnings.push(x),info(){}}};
 const api=vm.runInNewContext(part('const BATCH_SCENE_NEG =','function viewArtist(')+part('function batchUnits(', 'function batchBanWarn(')+part('function startBatch()', '// ═════════════════════ 大堂动作')+'\n({chosenTemplates,batchScenePrompt,startBatch})',box);
 try {
+ M.createFromString(data,{name:'雨景画师串',text:'artist:alpha, artist:beta'});
  data.options.batchSceneNeg='custom negative';api.startBatch();assert.equal(jobs.length,3);assert.equal(M.ticketName(data,jobs[0].ref),'雨景画师串');
  const oldJobs=plain(jobs),oldIds=jobs.map(j=>j.templateId),oldTemplates=oldIds.map(id=>plain(data.templates[id]));
  data.options.batchSceneNeg='later negative';const newIds=api.chosenTemplates('batch');assert.notEqual(newIds[0],oldIds[0]);assert.deepEqual(oldIds.map(id=>plain(data.templates[id])),oldTemplates);

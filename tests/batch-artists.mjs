@@ -23,8 +23,10 @@ const start=vm.runInNewContext(between('function batchUnits(', 'function batchBa
     M,ui,root:{querySelector:()=>null},getData:()=>data,N:{isReady:()=>true},chosenTemplates:()=>['sfw_head'],commit:()=>{saved=JSON.stringify(data);},render(){},
     toastr:{warning(){},info(){}},E:{createBatch(list){jobs=list;return {jobs:list,run(){}};}}
 });
-start();assert.equal(jobs.length,1);assert.equal(jobs[0].ref.type,'group');assert.equal(Object.keys(data.artists).length,2);
-const groupId=jobs[0].ref.id;assert.match(M.ticketString(data,jobs[0].ref),/detailed background/);
+start();assert.equal(jobs.length,1);assert.equal(jobs[0].ref,null,'batch no longer creates library entries by itself');
+assert.equal(Object.keys(data.artists).length,0);assert.equal(Object.keys(data.groups).length,0);assert.match(jobs[0].text,/detailed background/);
+const made=M.createFromString(data,{text:jobs[0].text});const groupId=made.id;assert.equal(made.type,'group');assert.match(M.ticketString(data,made),/detailed background/);
+saved=JSON.stringify(data);
 data=M.normalizeData(JSON.parse(saved));data.groups[groupId].images.push({template:'sfw_head',path:'keep.png'});start();
 assert.equal(Object.keys(data.groups).length,1);assert.equal(jobs[0].skip,true);assert.equal(jobs[0].ref.id,groupId);
 // 明显不是画师的（<artist>、4k 这类）从画师库删掉；有例图的改成同名画师串，例图不丢。

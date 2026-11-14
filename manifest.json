@@ -3,7 +3,7 @@
   "loading_order": 100,
   "js": "index.js",
   "author": "if love",
-  "version": "0.8.53",
+  "version": "0.8.56",
   "homePage": "https://github.com/ruoege49-ship-it/zhiku-tavern-helper",
   "auto_update": true,
   "minimum_client_version": "1.14.0",
