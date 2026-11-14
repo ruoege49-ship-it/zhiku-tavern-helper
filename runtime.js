@@ -6964,7 +6964,6 @@ function addArtistPrefix(text, names) {
 const HIST_CSS = `<style>.pc-hist{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.pc-hist-item{position:relative;padding:0;border:0;border-radius:10px;overflow:hidden;aspect-ratio:2/3;background:var(--pc-paper-2);cursor:pointer}.pc-hist-item img{width:100%;height:100%;object-fit:cover;display:block}.pc-hist-item i{position:absolute;left:4px;bottom:4px;font-style:normal;font-size:10px;padding:0 5px;border-radius:6px;background:rgba(0,0,0,.55);color:#fff}.pc-hist-item.missing::after{content:'这台设备上没有';position:absolute;inset:0;display:grid;place-items:center;font-size:11px;color:var(--pc-ink-soft)}.pc-hist-item.sel{outline:3px solid var(--pc-gold);outline-offset:-3px}.pc-hist-item b{position:absolute;right:5px;top:5px;width:20px;height:20px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.35);display:grid;place-items:center;color:#fff;font-size:12px}.pc-hist-item.sel b{background:var(--pc-gold)}.pc-hist-detail img{width:100%;border-radius:12px;display:block}.pc-hist-meta{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12px;margin-top:8px}.pc-hist-meta dt{color:var(--pc-ink-soft)}.pc-hist-meta dd{margin:0;word-break:break-all}@media (max-width:420px){.pc-hist{grid-template-columns:repeat(3,minmax(0,1fr))}}</style>`;
 const histList = () => pcHist.all();
 globalThis.__zkHistChanged = () => { if (DOC.querySelector('#pc-root.open')) render(); };
-cleanups.push(() => { delete globalThis.__zkHistChanged; });
 function historyFold(d) {
     if (!pcHist.loaded()) { void pcHist.load().then(() => { if (DOC.querySelector('#pc-root.open')) render(); }).catch(e => console.warn('[智库] 历史读取失败', e)); return ''; }
     const hist = histList();
@@ -12336,6 +12335,7 @@ const UI = __mod_ui;
 const C = __mod_chars;
 const { getData } = __mod_store;
 const cleanups = [];
+cleanups.push(() => { delete globalThis.__zkHistChanged; });
 
 
 function injectCss() {
