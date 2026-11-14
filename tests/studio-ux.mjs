@@ -61,7 +61,7 @@ const {N,requests}=naiHarness({naiMode:'site',naiSite:'https://test.invalid'});
 await assert.rejects(N.generate({positive:'artist:c',negative:'text'}));
 assert.equal(requests[0].body.parameters.sampler,'k_dpmpp_2m_sde');assert.equal(requests[0].body.parameters.noise_schedule,'karras');assert.equal(requests[0].body.parameters.cfg_rescale,0.18);
 await assert.rejects(N.inpaint({image:'test',mask:'test',width:832,height:1216,prompt:'artist:c',negative:'text'}));
-assert.equal(requests[1].body.parameters.cfg_rescale,0.18,'inpaint must use the same CFG setting');
+assert.equal(requests.length,2,'400 does not retry the raw address');assert.equal(requests[1].body.parameters.cfg_rescale,0.18,'inpaint must use the same CFG setting');
 assert.equal(requests[1].body.parameters.sampler,'k_dpmpp_2m_sde');
 N.stopQueue();defaults.N.stopQueue();old.N.stopQueue();custom.N.stopQueue();
 console.log('PASS: source tracking across reload, overwrite preserves metadata and bindings, save-as creates a new group, cancel/empty/deleted guards, sampling migration and actual generate/inpaint request bodies.');

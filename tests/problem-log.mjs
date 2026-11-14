@@ -37,7 +37,7 @@ function boot({saved='[]',legacy=null,read=null,fail=false}={}){
 // Logging wraps the real request without changing its returned result or thrown error.
 const a=runtime.indexOf('async function generateRequest(opts) {'),b=runtime.indexOf('async function generateRequestInner(',a);
 assert(a>0&&b>a);let finish;const events=[];
-const context={settings:()=>({naiMode:'key',novelaimode:'model'}),__zkSrc:'source one',__zkLog:(...args)=>events.push(args),generateRequestInner:()=>new Promise(r=>finish=r)};
+const context={siteResponseText:r=>r.format||'',settings:()=>({naiMode:'key',novelaimode:'model'}),__zkSrc:'source one',__zkLog:(...args)=>events.push(args),generateRequestInner:()=>new Promise(r=>finish=r)};
 const request=vm.runInNewContext(runtime.slice(a,b)+'\ngenerateRequest',context);
 const pending=request({positive:'sunset',src:'source one'});context.__zkSrc='source two';finish('image');assert.equal(await pending,'image');assert.equal(events[0][2].来源,'source one');
 const error=Error('failed');context.generateRequestInner=async()=>{throw error};await assert.rejects(request({src:'explicit'}),e=>e===error);assert.equal(events.at(-1)[0],'生图失败');
