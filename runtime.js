@@ -1688,7 +1688,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.56（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.58（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1737,7 +1737,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.56';
+globalThis.__PC_VERSION = '0.8.58';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -5013,6 +5013,8 @@ async function imageToPrompt(imageDataUrl) {
    - 全身姿势：standing、sitting、kneeling、squatting、lying on back、lying on side、on stomach、all fours、leaning forward、leaning back、bent over、arched back、crossed legs、spread legs、walking、running、jumping。
    - 身体朝向：facing viewer、facing away、turning around、looking back、profile。
    - 手和手臂：每只手在做什么（hand on own chest、hand on hip、hands up、arms behind back、arm support、reaching towards viewer、holding xx、covering mouth、v sign、hand in hair）。
+   - 手势要认出来、写准（先放大看手指：哪根伸直、哪根弯、有没有交叉、两只手是不是合在一起），认出来就写专门的标签，不要只写 hand near face / hand on own cheek：finger heart（拇指和食指交叉的单手比心）、heart hands（双手合成心形）、heart hands duo（两个人一起比）、v sign / double v / v over eye、ok sign、thumbs up、pointing at viewer / pointing up、index finger raised、finger to mouth / shushing、finger gun、claw pose、paw pose、fox shadow puppet、\\m/（horns）、waving、salute、fist、open hand、reaching towards viewer。手势放在哪也写上，比如 finger heart + hand on own cheek。拿着手机伸手自拍写 selfie、arm up / outstretched arm、holding phone（手机在画面外就不写 holding phone）。
+   - 画面外的人也要找：图边上伸进来的手、手臂、腿（常见是镜头前的人 / 看图的人，也就是 POV），哪怕只露一只手也算一个人。写 pov、pov hands（镜头前的人的手）或 disembodied hand / out of frame，再写清他和画里的人怎么互动、谁抓着谁：holding another's wrist、holding another's hand、hand on another's face / cheek / chin、hand on another's head（摸头）、pulling another's tie、kissing hand、kissing another's fingers、finger to another's mouth、finger in another's mouth、licking another's fingers、biting another's finger、hand on another's chest、grabbing another's collar、reaching towards viewer、holding hands with viewer。分清是「自己的手」（hand on own chin）还是「别人的手」（another's hand on face），手臂从哪边伸进来（from below / from left / from right）也写上。人数照算，比如 1boy, pov。
    - 腿和脚：knees up、legs together、one knee up、feet up、standing on one leg。
    - 头：head tilt、chin rest、looking down、looking up。
    - 多人时写互动和相对位置：hug、hug from behind、holding hands、carrying、lap pillow、face-to-face、back-to-back、on top、between legs，谁在谁的哪边。
@@ -5058,6 +5060,8 @@ pose（姿势，至少 12 个，越细越好）：
 - 朝向：facing viewer、facing away、facing to the side、turning around、looking back、profile、three-quarter view。
 - 头和视线：head tilt、head down、chin rest、head on hand、looking at viewer / away / down / up / to the side / at another、eyes closed、half-closed eyes。
 - 左右手分别写：hand on own cheek / chest / hip / knee、hand up、hands together、arms behind back、arms crossed、arm support、reaching、holding xx（写清拿着什么）、hand in pocket、hand in hair、v sign、pointing、covering mouth、hugging own legs。
+- 手势要认出来、写准（先放大看手指：哪根伸直、哪根弯、有没有交叉、两只手是不是合在一起），认出来就写专门的标签，不要只写 hand near face / hand on own cheek：finger heart（拇指和食指交叉的单手比心）、heart hands（双手合成心形）、heart hands duo（两个人一起比）、v sign / double v / v over eye、ok sign、thumbs up、pointing at viewer / pointing up、index finger raised、finger to mouth / shushing、finger gun、claw pose、paw pose、fox shadow puppet、\\m/（horns）、waving、salute、fist、open hand、reaching towards viewer。手势放在哪也写上，比如 finger heart + hand on own cheek。拿着手机伸手自拍写 selfie、arm up / outstretched arm、holding phone（手机在画面外就不写 holding phone）。
+- 画面外的人也要找：图边上伸进来的手、手臂、腿（常见是镜头前的人 / 看图的人，也就是 POV），哪怕只露一只手也算一个人。写 pov、pov hands（镜头前的人的手）或 disembodied hand / out of frame，再写清他和画里的人怎么互动、谁抓着谁：holding another's wrist、holding another's hand、hand on another's face / cheek / chin、hand on another's head（摸头）、pulling another's tie、kissing hand、kissing another's fingers、finger to another's mouth、finger in another's mouth、licking another's fingers、biting another's finger、hand on another's chest、grabbing another's collar、reaching towards viewer、holding hands with viewer。分清是「自己的手」（hand on own chin）还是「别人的手」（another's hand on face），手臂从哪边伸进来（from below / from left / from right）也写上。人数照算，比如 1boy, pov。
 - 腿和脚：knees up、knees together、legs apart、crossed legs、one knee up、legs folded、legs to the side、feet together、feet up、barefoot、foot out of frame。
 - 多人：谁在谁的哪边（on left、on right、in front、behind）、hug、hug from behind、holding hands、lap pillow、carrying、face-to-face、back-to-back、leaning on another、eye contact 等。
 - 表情写一两个。
@@ -10503,7 +10507,7 @@ async function onChangeEv(ev) {
         if (!f || ui.poseBusy) return;
         ui.poseBusy = true; render();
         try {
-            const r = await T.imagePose(await shrinkDataUrl(await fileToDataUrl(f), 1024, 0.88));
+            const r = await T.imagePose(await shrinkDataUrl(await fileToDataUrl(f), 1536, 0.9));
             ui.poseBusy = false; render();
             showPose(r);
         } catch (e) { ui.poseBusy = false; render(); toastr.error(e.message || String(e), '看不了图', { timeOut: 9000 }); }
@@ -10537,7 +10541,7 @@ async function onChangeEv(ev) {
         ui.img2pBusy = true; render();
         try {
             let r = await readImagePrompt(f).catch(() => null), from = 'meta';
-            if (!r?.positive) { from = 'ai'; r = await T.imageToPrompt(await shrinkDataUrl(await fileToDataUrl(f), 1024, 0.88)); }
+            if (!r?.positive) { from = 'ai'; r = await T.imageToPrompt(await shrinkDataUrl(await fileToDataUrl(f), 1536, 0.9)); }
             ui.img2pBusy = false; render();
             showImg2Prompt(r, from);
         } catch (e) { ui.img2pBusy = false; render(); toastr.error(e.message || String(e), '看不了图', { timeOut: 9000 }); }
