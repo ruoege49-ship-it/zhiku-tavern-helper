@@ -55,8 +55,8 @@ try {
  await N.comfyUseWorkflow('');assert.equal(config.comfyWf,'');assert.equal(config.comfyWfApi,'');
 } finally {N.stopQueue();}
 // Full history survives former limits, including more than six characters.
-const history={history:[]};const record=vm.runInNewContext(between('async function pcRecordImage(',"let pcMarkerRaw =")+'\npcRecordImage',{
- pcLocal:{put:async()=> 'thumb'},pcMakeThumb:async()=> 'thumb',__mod_store:{getData:()=>history,commit(){}},DOC:{querySelector:()=>null},console});
+const history={history:[]};const record=vm.runInNewContext(between('const pcHist =',"let pcMarkerRaw =")+'\npcRecordImage',{
+ P:{},pcLocal:{put:async()=> 'thumb'},pcMakeThumb:async()=> 'thumb',__mod_store:{getData:()=>history,commit(){}},DOC:{querySelector:()=>null},console});
 const text='x'.repeat(9000),chars=Array.from({length:8},(_,i)=>({prompt:i+text}));
 await record({url:'saved.png',raw:text,sent:{prompt:text,negative:text,chars},from:'comfy'});
 const reloaded=JSON.parse(JSON.stringify(history));assert.equal(reloaded.history[0].raw,text);assert.equal(reloaded.history[0].negative,text);assert.equal(reloaded.history[0].chars.length,8);assert.equal(reloaded.history[0].chars[7],'7'+text);

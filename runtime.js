@@ -6194,6 +6194,93 @@ async function pcMakeThumb(dataUrl) {
     return c.toDataURL('image/jpeg', 0.82);
 }
 /** 记一张生成过的图：原图地址、缩略图、提示词和参数。缩略图总是存在本地浏览器 */
+// History records live separately from the artist library. Failed writes keep a legacy fallback.
+const pcHist = (() => {
+    const IDB = P.indexedDB || globalThis.indexedDB, STORE = 'entries';
+    let dbp = null, list = [], loaded = false, loading = null, idbOk = true, queue = Promise.resolve();
+    const data = () => __mod_store.getData();
+    const keyOf = x => x?.id || x?.url;
+    const max = () => { const n = Number(data().options?.histMax); return n === -1 ? Infinity : Number.isFinite(n) && n > 0 ? Math.floor(n) : 2000; };
+    const unique = rows => {
+        const ids = new Set(), urls = new Set();
+        return rows.filter(x => x && keyOf(x) && x.url).map(x => ({ ...x, id: keyOf(x) })).sort((a,b) => (b.at || 0) - (a.at || 0)).filter(x => {
+            if (ids.has(x.id) || urls.has(x.url)) return false;
+            ids.add(x.id); urls.add(x.url); return true;
+        });
+    };
+    const open = () => dbp ||= new Promise((ok, bad) => {
+        if (!IDB) { bad(new Error('IndexedDB unavailable')); return; }
+        const r = IDB.open('zhiku_history', 1);
+        r.onupgradeneeded = () => { if (!r.result.objectStoreNames.contains(STORE)) r.result.createObjectStore(STORE, { keyPath: 'id' }); };
+        r.onsuccess = () => ok(r.result); r.onerror = () => bad(r.error);
+    }).catch(e => { dbp = null; throw e; });
+    const tx = async (mode, fn) => {
+        const db = await open();
+        return new Promise((ok, bad) => {
+            const t = db.transaction(STORE, mode); let req;
+            t.oncomplete = () => ok(req?.result); t.onerror = t.onabort = () => bad(t.error || new Error('History transaction aborted'));
+            try { req = fn(t.objectStore(STORE)); } catch (e) { t.abort(); bad(e); }
+        });
+    };
+    const serial = fn => { const next = queue.then(fn); queue = next.catch(() => {}); return next; };
+    const pending = () => Array.isArray(data().options?.histPendingDeletes) ? data().options.histPendingDeletes : [];
+    async function fallback(next, removed) {
+        const d = data(), old = d.history, oldDeletes = pending();
+        d.history = [...next]; d.options ||= {};
+        d.options.histPendingDeletes = [...new Set([...oldDeletes, ...removed])];
+        try { await __mod_store.commit({ immediate: true, silent: true }); }
+        catch (e) { d.history = old; d.options.histPendingDeletes = oldDeletes; throw e; }
+    }
+    function load() {
+        return loading ||= (async () => {
+            const d = data(), old = Array.isArray(d.history) ? d.history : [], gone = new Set(pending());
+            let stored = [];
+            try { stored = (await tx('readonly', st => st.getAll())) || []; }
+            catch (e) { idbOk = false; console.warn('[智库] 历史本地存储打不开，保留画师库中的记录', e); }
+            list = unique([...stored, ...old].filter(x => x && !gone.has(keyOf(x))));
+            if (idbOk && (old.length || gone.size)) {
+                try {
+                    const kept = new Set(list.map(keyOf));
+                    await tx('readwrite', st => { for (const x of stored) if (!kept.has(keyOf(x))) st.delete(keyOf(x)); for (const id of gone) st.delete(id); for (const x of list) st.put(x); });
+                    if (d.history === old) d.history = [];
+                    d.options ||= {}; d.options.histPendingDeletes = [];
+                    await __mod_store.commit({ immediate: true, silent: true });
+                } catch (e) { idbOk = false; console.warn('[智库] 历史迁移未完成，保留原记录', e); }
+            }
+            loaded = true; return list;
+        })();
+    }
+    async function persist(next, removed, added = []) {
+        if (idbOk) {
+            try { await tx('readwrite', st => { for (const id of removed) st.delete(id); for (const x of added) st.put(x); }); }
+            catch (e) { idbOk = false; console.warn('[智库] 历史本地写入失败，改存画师库备用记录', e); }
+        }
+        if (!idbOk) await fallback(next, removed);
+        list = next;
+    }
+    async function trimNow() {
+        const originals = new Set(list.map(x => x.url));
+        const over = list.slice(max());
+        if (!over.length) return;
+        await persist(list.slice(0, max()), over.map(keyOf));
+        const retained = new Set(list.flatMap(x => [x.url, x.thumb]));
+        for (const x of over) if (x.thumb && !originals.has(x.thumb) && !retained.has(x.thumb)) await pcLocal.del(x.thumb).catch(e => console.warn('[智库] 缩略图清理失败', e));
+    }
+    return {
+        load, loaded: () => loaded, all: () => list, count: () => list.length,
+        trim: () => serial(async () => { await load(); await trimNow(); }),
+        add: entry => serial(async () => {
+            await load();
+            const removed = list.filter(x => x.url === entry.url && keyOf(x) !== keyOf(entry)).map(keyOf);
+            await persist(unique([entry, ...list.filter(x => x.url !== entry.url && keyOf(x) !== keyOf(entry))]), removed, [entry]);
+            await trimNow();
+        }),
+        remove: ids => serial(async () => {
+            await load(); const gone = new Set(ids);
+            await persist(list.filter(x => !gone.has(keyOf(x))), [...gone]);
+        }),
+    };
+})();
 async function pcRecordImage({ dataUrl, url, raw = '', sent = null, from }) {
     if (!url) return;
     let thumb = '';
@@ -6201,8 +6288,9 @@ async function pcRecordImage({ dataUrl, url, raw = '', sent = null, from }) {
     const d = __mod_store.getData();
     const cut = (v, n) => String(v || '').slice(0, n);
     const entry = { id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), url: String(url), thumb, raw: String(raw ?? ''), prompt: String(sent?.prompt ?? ''), negative: String(sent?.negative ?? ''), chars: (sent?.chars || []).map(c => String(typeof c === 'string' ? c : c?.prompt ?? '')).filter(Boolean), seed: sent?.seed ?? '', size: cut(sent?.size, 20), model: cut(sent?.model, 40), ...(sent?.params ? { params: { ...sent.params } } : {}), from, at: Date.now() };
-    d.history = [entry, ...(Array.isArray(d.history) ? d.history : []).filter(h => h.url !== entry.url)].slice(0, 300);
-    __mod_store.commit({ silent: !DOC.querySelector('#pc-root.open') });
+    void d;
+    await pcHist.add(entry);
+    globalThis.__zkHistChanged?.();
 }
 let pcMarkerRaw = '';
 const __mod_marker=createMarkerController({
@@ -6874,10 +6962,12 @@ function addArtistPrefix(text, names) {
 
 // ───────────── 历史生图 ─────────────
 const HIST_CSS = `<style>.pc-hist{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.pc-hist-item{position:relative;padding:0;border:0;border-radius:10px;overflow:hidden;aspect-ratio:2/3;background:var(--pc-paper-2);cursor:pointer}.pc-hist-item img{width:100%;height:100%;object-fit:cover;display:block}.pc-hist-item i{position:absolute;left:4px;bottom:4px;font-style:normal;font-size:10px;padding:0 5px;border-radius:6px;background:rgba(0,0,0,.55);color:#fff}.pc-hist-item.missing::after{content:'这台设备上没有';position:absolute;inset:0;display:grid;place-items:center;font-size:11px;color:var(--pc-ink-soft)}.pc-hist-item.sel{outline:3px solid var(--pc-gold);outline-offset:-3px}.pc-hist-item b{position:absolute;right:5px;top:5px;width:20px;height:20px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.35);display:grid;place-items:center;color:#fff;font-size:12px}.pc-hist-item.sel b{background:var(--pc-gold)}.pc-hist-detail img{width:100%;border-radius:12px;display:block}.pc-hist-meta{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12px;margin-top:8px}.pc-hist-meta dt{color:var(--pc-ink-soft)}.pc-hist-meta dd{margin:0;word-break:break-all}@media (max-width:420px){.pc-hist{grid-template-columns:repeat(3,minmax(0,1fr))}}</style>`;
-const histList = () => (Array.isArray(getData().history) ? getData().history : []);
+const histList = () => pcHist.all();
+globalThis.__zkHistChanged = () => { if (DOC.querySelector('#pc-root.open')) render(); };
+cleanups.push(() => { delete globalThis.__zkHistChanged; });
 function historyFold(d) {
+    if (!pcHist.loaded()) { void pcHist.load().then(() => { if (DOC.querySelector('#pc-root.open')) render(); }).catch(e => console.warn('[智库] 历史读取失败', e)); return ''; }
     const hist = histList();
-    if (!hist.length) return '';
     const h = ui.hist ||= { select: false, picked: [], show: 60 };
     const shown = hist.slice(0, h.show);
     setTimeout(() => pcHydrate(), 0);
@@ -6888,7 +6978,8 @@ function historyFold(d) {
         <button class="pc-pill dashed tiny" data-act="histdownload" ${h.picked.length ? '' : 'disabled'}>下载选中（${h.picked.length}）</button>
         <button class="pc-pill dashed tiny danger" data-act="histdelete" ${h.picked.length ? '' : 'disabled'}>删除选中</button>` : `
         <button class="pc-pill dashed tiny" data-act="histclean" data-days="7">清理 7 天前</button>
-        <button class="pc-pill dashed tiny" data-act="histclean" data-days="30">清理 30 天前</button>`}
+        <button class="pc-pill dashed tiny" data-act="histclean" data-days="30">清理 30 天前</button>
+        <span class="pc-dim small" style="align-self:center;margin-left:4px">历史记录存在这台设备 · 最多记</span>${[[500, '500'], [2000, '2000'], [5000, '5000'], [-1, '不限']].map(([n, t]) => `<button class="pc-pill tiny ${(Number(d.options.histMax) || 2000) === n ? 'on' : 'dashed'}" data-act="histmax" data-n="${n}">${t}</button>`).join('')}`}
       </div>
       <div class="pc-hist pc-mt-s">${shown.map(x => `<button class="pc-hist-item ${h.picked.includes(x.id || x.url) ? 'sel' : ''}" data-act="histopen" data-id="${esc(x.id || x.url)}"><img data-pc-src="${esc(x.thumb || x.url)}" alt=""><i>${x.from === 'chat' ? '聊天' : '生图'}</i>${h.select ? `<b>${h.picked.includes(x.id || x.url) ? '✓' : ''}</b>` : ''}</button>`).join('')}</div>
       ${hist.length > shown.length ? `<div class="pc-center pc-mt-s"><button class="pc-pill dashed tiny" data-act="histmore">再显示 60 张（还有 ${hist.length - shown.length} 张）</button></div>` : ''}
@@ -6896,12 +6987,11 @@ function historyFold(d) {
 }
 const histFind = id => histList().find(x => (x.id || x.url) === id);
 /** 删掉记录和文件（原图 + 缩略图） */
-function histRemove(entries) {
+async function histRemove(entries) {
     const gone = new Set(entries.map(x => x.id || x.url));
-    for (const x of entries) for (const u of [x.url, x.thumb]) pcDropImage(u);
-    getData().history = histList().filter(x => !gone.has(x.id || x.url));
+    await pcHist.remove([...gone]);
+    for (const x of entries) for (const u of new Set([x.url, x.thumb])) pcDropImage(u);
     if (ui.hist) ui.hist.picked = ui.hist.picked.filter(id => !gone.has(id));
-    commit();
 }
 function histDownload(entries) {
     entries.forEach((x, i) => setTimeout(async () => { const a = DOC.createElement('a'); a.href = await pcLocal.url(x.url); if (!a.href) return; a.download = `zhiku_${new Date(x.at).toISOString().slice(0, 19).replace(/[:T]/g, '-')}_${i + 1}.png`; pcMount(a); a.click(); a.remove(); }, i * 400));
@@ -6929,7 +7019,7 @@ function histDetail(x) {
             box.closeModal();
             openSharedUpload({ artistString: x.prompt || x.raw || '', negative: x.negative || '', image: await pcLocal.url(x.url), params: shareImageParams(x) });
         }
-        if (act === 'delete') { if (!(await confirmBox('删掉这张图？图片也会删掉。', { ok: '删除', cancel: '算了' }))) return; histRemove([x]); box.closeModal(); render(); }
+        if (act === 'delete') { if (!(await confirmBox('删掉这张图？图片也会删掉。', { ok: '删除', cancel: '算了' }))) return; await histRemove([x]); box.closeModal(); render(); }
         if (act === 'reuse') {
             const st = ui.studio, n = N.settings();
             st.pos = x.raw || x.prompt || st.pos;
@@ -9653,14 +9743,19 @@ async function onClick(ev, outside = false) {
             case 'histdelete': {
                 const list = ui.hist.picked.map(histFind).filter(Boolean);
                 if (!list.length || !(await confirmBox(`删掉选中的 ${list.length} 张？图片文件也会删掉，聊天里用到的地方会显示不出来。`, { ok: '删除', cancel: '算了' }))) break;
-                histRemove(list); ui.hist.select = false; render(); break;
+                await histRemove(list); ui.hist.select = false; render(); break;
+            }
+            case 'histmax': {
+                const n = Number(el.dataset.n), now = histList().length;
+                if (n > 0 && now > n && !(await confirmBox(`现在有 ${now} 张，改成最多 ${n} 张会去掉最旧的 ${now - n} 张记录（原图不删）。`, { ok: '改', cancel: '算了' }))) break;
+                d.options.histMax = n; commit(); await pcHist.trim(); render(); break;
             }
             case 'histclean': {
                 const days = Number(el.dataset.days), before = Date.now() - days * 86400000;
                 const list = histList().filter(x => (x.at || 0) < before);
                 if (!list.length) { toastr.info(`没有 ${days} 天前的图`, '历史生图'); break; }
                 if (!(await confirmBox(`删掉 ${days} 天前的 ${list.length} 张图？图片文件也会删掉，聊天里用到的地方会显示不出来。`, { ok: '删除', cancel: '算了' }))) break;
-                histRemove(list); render(); break;
+                await histRemove(list); render(); break;
             }
             case 'strtoggle': ui.strOpen[el.dataset.key] = !ui.strOpen[el.dataset.key]; render(); break;
             case 'addprefix': {
@@ -11758,7 +11853,26 @@ async function shareToLobby(ref) {
         if (!n) return;
         d.lobby.nickname = n.slice(0, 24); commit();
     }
+    {
+        const st = ui.studio;
+        // 生图页正开着这串、而且改过没保存（例图多半是用改过的画的）
+        if (ref?.type === 'group' && st && M.sameRef(st.sourceRef, ref) && String(st.pos || '').trim() && !studioSavedRef(d)) {
+            const pos = st.pos, neg = st.neg, original = M.resolveTicket(d, ref)?.item;
+            const signature = JSON.stringify(original);
+            const i = await chooseBox(`「${M.ticketName(d, ref)}」在生图页改过，还没保存。分享哪个版本？`, ['先保存改过的，再分享改过的', '分享保存着的旧版']);
+            if (i == null || i < 0) return;
+            if (getData() !== d || ui.studio !== st || !M.sameRef(st.sourceRef, ref) || st.pos !== pos || st.neg !== neg || M.resolveTicket(d, ref)?.item !== original || JSON.stringify(original) !== signature) { toastr.info('画师串或草稿已变化，请重新分享', '共享'); return; }
+            if (i === 0) {
+                const saved = M.overwriteGroup(d, ref, st.pos, st.neg);
+                if (!saved) return;
+                st.sourceRef = saved; st.lastExtra = d.groups[saved.id]?.extra || ''; st.lastNeg = st.neg; st.clearUndo = null;
+                saveStudio(); await __mod_store.commit({ immediate: true, silent: true });
+                toastr.success('改过的已经保存进这串', '共享', { timeOut: 1800 });
+            }
+        }
+    }
     const t = M.resolveTicket(d, ref);
+    if (!t) { toastr.info('这条画师串已删除', '共享'); return; }
     const nsfwImgs = t.item.images.slice(0, 6).some(img => img.nsfw);
     const form = await shareDetails({ name: M.ticketName(d, ref), note: t.item.note || '', nsfw: nsfwImgs });
     if (!form) return;
