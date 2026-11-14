@@ -1,3 +1,6 @@
+import {applyMetaReviewCompatibility} from './meta-review-compat.mjs';
+import {applySceneNameCompatibility} from './scene-name-compat.mjs';
+import {applySceneAiNameCompatibility} from './scene-ainame-compat.mjs';
 import {applyStudioModelCompatibility} from './studio-model-compat.mjs';
 import {applySiteCompatibility} from './site-compat.mjs';
 import {applyNaiRequestCompatibility} from './nai-request-compat.mjs';
@@ -5328,8 +5331,11 @@ patch(`- 左右手分别写：hand on own cheek / chest / hip / knee、hand up�
 s=applyHandZoomCompatibility(s);
 // 0.8.59：先认这张图特别在哪（大小反差、POV 拿手机拍、被书压着…），单独一组「特殊构图」
 s=applyConceptCompatibility(s);
+s=applyMetaReviewCompatibility(s);
 // 0.8.59：生图页直接换模型
 s=applyStudioModelCompatibility(s);
+s=applySceneNameCompatibility(s);
+s=applySceneAiNameCompatibility(s);
 s=applySiteCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
