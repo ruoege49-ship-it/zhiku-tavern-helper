@@ -26,7 +26,8 @@ export function applyHistoryStoreCompatibility(s) {
     patch("    for (const x of entries) for (const u of [x.url, x.thumb]) pcDropImage(u);\n    pcHist.remove([...gone]);", "    await pcHist.remove([...gone]);\n    for (const x of entries) for (const u of new Set([x.url, x.thumb])) pcDropImage(u);");
     patch("    if (ui.hist) ui.hist.picked = ui.hist.picked.filter(id => !gone.has(id));\n    commit();", "    if (ui.hist) ui.hist.picked = ui.hist.picked.filter(id => !gone.has(id));");
     for (const call of ['histRemove([x]);', 'histRemove(list); ui.hist.select', 'histRemove(list); render()']) patch(call, 'await ' + call);
-    patch("globalThis.__zkHistChanged = () => { if (DOC.querySelector('#pc-root.open')) render(); };", "globalThis.__zkHistChanged = () => { if (DOC.querySelector('#pc-root.open')) render(); };\ncleanups.push(() => { delete globalThis.__zkHistChanged; });");
+    // cleanups 属于脚本入口 IIFE，界面 IIFE 无法访问；清理必须在入口内部注册
+    patch("const cleanups = [];", "const cleanups = [];\ncleanups.push(() => { delete globalThis.__zkHistChanged; });");
     patch("    if (!pcHist.loaded()) { void pcHist.load().then(() => render()); return ''; }", "    if (!pcHist.loaded()) { void pcHist.load().then(() => { if (DOC.querySelector('#pc-root.open')) render(); }).catch(e => console.warn('[智库] 历史读取失败', e)); return ''; }");
     patch('最多记</span>', '历史记录存在这台设备 · 最多记</span>');
     return s;
