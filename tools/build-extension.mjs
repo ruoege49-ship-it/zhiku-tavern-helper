@@ -12,6 +12,8 @@ import {applyWardrobeCanonCompatibility} from './wardrobe-canon-compat.mjs';
 import {applyImg2imgCompatibility} from './img2img-compat.mjs';
 import {applyTauriFetchCompatibility} from './tauri-fetch-compat.mjs';
 import {applyPoseInputCompatibility} from './pose-input-compat.mjs';
+import {applyHandZoomCompatibility} from './hand-zoom-compat.mjs';
+import {applyConceptCompatibility} from './concept-compat.mjs';
 import {applySharingWardrobeCompatibility} from './sharing-wardrobe-compat.mjs';
 import {applyComfyCompatibility} from './comfy-compat.mjs';
 import fs from 'node:fs';
@@ -27,8 +29,8 @@ process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.58';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.58');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.59';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.59');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -5321,6 +5323,10 @@ patch(`- 左右手分别写：hand on own cheek / chest / hip / knee、hand up�
 - 手势要认出来、写准（先放大看手指：哪根伸直、哪根弯、有没有交叉、两只手是不是合在一起），认出来就写专门的标签，不要只写 hand near face / hand on own cheek：finger heart（拇指和食指交叉的单手比心）、heart hands（双手合成心形）、heart hands duo（两个人一起比）、v sign / double v / v over eye、ok sign、thumbs up、pointing at viewer / pointing up、index finger raised、finger to mouth / shushing、finger gun、claw pose、paw pose、fox shadow puppet、\\\\m/（horns）、waving、salute、fist、open hand、reaching towards viewer。手势放在哪也写上，比如 finger heart + hand on own cheek。拿着手机伸手自拍写 selfie、arm up / outstretched arm、holding phone（手机在画面外就不写 holding phone）。`,`- 左右手分别写：hand on own cheek / chest / hip / knee、hand up、hands together、arms behind back、arms crossed、arm support、reaching、holding xx（写清拿着什么）、hand in pocket、hand in hair、v sign、pointing、covering mouth、hugging own legs。
 - 手势要认出来、写准（先放大看手指：哪根伸直、哪根弯、有没有交叉、两只手是不是合在一起），认出来就写专门的标签，不要只写 hand near face / hand on own cheek：finger heart（拇指和食指交叉的单手比心）、heart hands（双手合成心形）、heart hands duo（两个人一起比）、v sign / double v / v over eye、ok sign、thumbs up、pointing at viewer / pointing up、index finger raised、finger to mouth / shushing、finger gun、claw pose、paw pose、fox shadow puppet、\\\\m/（horns）、waving、salute、fist、open hand、reaching towards viewer。手势放在哪也写上，比如 finger heart + hand on own cheek。拿着手机伸手自拍写 selfie、arm up / outstretched arm、holding phone（手机在画面外就不写 holding phone）。
 - 画面外的人也要找：图边上伸进来的手、手臂、腿（常见是镜头前的人 / 看图的人，也就是 POV），哪怕只露一只手也算一个人。写 pov、pov hands（镜头前的人的手）或 disembodied hand / out of frame，再写清他和画里的人怎么互动、谁抓着谁：holding another's wrist、holding another's hand、hand on another's face / cheek / chin、hand on another's head（摸头）、pulling another's tie、kissing hand、kissing another's fingers、finger to another's mouth、finger in another's mouth、licking another's fingers、biting another's finger、hand on another's chest、grabbing another's collar、reaching towards viewer、holding hands with viewer。分清是「自己的手」（hand on own chin）还是「别人的手」（another's hand on face），手臂从哪边伸进来（from below / from left / from right）也写上。人数照算，比如 1boy, pov。`);
+// 0.8.59：看图读姿势——手裁出来放大再认手势（比心），自拍那只手在画面外
+s=applyHandZoomCompatibility(s);
+// 0.8.59：先认这张图特别在哪（大小反差、POV 拿手机拍、被书压着…），单独一组「特殊构图」
+s=applyConceptCompatibility(s);
 s=applySiteCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
@@ -5335,9 +5341,9 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',(prefix+s+'\n}\n').replace(/\r\n/g, '\n'));
 fs.copyFileSync('src/index.js',dir+'/index.js');
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.58',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.58',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.59',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.59',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.8.58 built; storage keys and shared upload preserved.');
+console.log('Extension 0.8.59 built; storage keys and shared upload preserved.');

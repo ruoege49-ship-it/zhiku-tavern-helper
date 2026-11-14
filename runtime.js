@@ -1688,7 +1688,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.58（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.59（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1737,7 +1737,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.58';
+globalThis.__PC_VERSION = '0.8.59';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -5013,7 +5013,7 @@ async function imageToPrompt(imageDataUrl) {
    - 全身姿势：standing、sitting、kneeling、squatting、lying on back、lying on side、on stomach、all fours、leaning forward、leaning back、bent over、arched back、crossed legs、spread legs、walking、running、jumping。
    - 身体朝向：facing viewer、facing away、turning around、looking back、profile。
    - 手和手臂：每只手在做什么（hand on own chest、hand on hip、hands up、arms behind back、arm support、reaching towards viewer、holding xx、covering mouth、v sign、hand in hair）。
-   - 手势要认出来、写准（先放大看手指：哪根伸直、哪根弯、有没有交叉、两只手是不是合在一起），认出来就写专门的标签，不要只写 hand near face / hand on own cheek：finger heart（拇指和食指交叉的单手比心）、heart hands（双手合成心形）、heart hands duo（两个人一起比）、v sign / double v / v over eye、ok sign、thumbs up、pointing at viewer / pointing up、index finger raised、finger to mouth / shushing、finger gun、claw pose、paw pose、fox shadow puppet、\\m/（horns）、waving、salute、fist、open hand、reaching towards viewer。手势放在哪也写上，比如 finger heart + hand on own cheek。拿着手机伸手自拍写 selfie、arm up / outstretched arm、holding phone（手机在画面外就不写 holding phone）。
+   - 手势要认出来、写准（先放大看手指：哪根伸直、哪根弯、有没有交叉、两只手是不是合在一起），认出来就写专门的标签，不要只写 hand near face / hand on own cheek：finger heart（拇指和食指交叉的单手比心）、heart hands（双手合成心形）、heart hands duo（两个人一起比）、v sign / double v / v over eye、ok sign、thumbs up、pointing at viewer / pointing up、index finger raised、finger to mouth / shushing、finger gun、claw pose、paw pose、fox shadow puppet、\\m/（horns）、waving、salute、fist、open hand、reaching towards viewer。手势放在哪也写上，比如 finger heart + hand on own cheek。自拍：拿手机的那只手通常伸向镜头、伸出画面外，写 selfie、outstretched arm、arm out of frame（看不到手机就不写 holding phone），不要把这只手写成 arm up / hand up；另一只手照常单独写它在做什么、比什么手势。
    - 画面外的人也要找：图边上伸进来的手、手臂、腿（常见是镜头前的人 / 看图的人，也就是 POV），哪怕只露一只手也算一个人。写 pov、pov hands（镜头前的人的手）或 disembodied hand / out of frame，再写清他和画里的人怎么互动、谁抓着谁：holding another's wrist、holding another's hand、hand on another's face / cheek / chin、hand on another's head（摸头）、pulling another's tie、kissing hand、kissing another's fingers、finger to another's mouth、finger in another's mouth、licking another's fingers、biting another's finger、hand on another's chest、grabbing another's collar、reaching towards viewer、holding hands with viewer。分清是「自己的手」（hand on own chin）还是「别人的手」（another's hand on face），手臂从哪边伸进来（from below / from left / from right）也写上。人数照算，比如 1boy, pov。
    - 腿和脚：knees up、legs together、one knee up、feet up、standing on one leg。
    - 头：head tilt、chin rest、looking down、looking up。
@@ -5050,17 +5050,110 @@ async function imageToPrompt(imageDataUrl) {
     return { positive: tags, negative: '', zh: String(j.zh || '').trim(), camera: arr(j.camera).join(', ') };
 }
 
+// 0.8.59：手势放大再认。手在整张图里只占一小块，识图模型经常把比心看成 hand near face。
+// 第一遍让 AI 给出每只手的位置框，这里把手裁出来放大拼成一张图，再单独问一次。
+const GESTURE_ZH = {
+    'finger heart': '单手比心', 'heart hands': '双手比心', 'v sign': '比耶', 'double v': '双手比耶', 'v over eye': '眼前比耶',
+    'ok sign': 'OK 手势', 'thumbs up': '竖大拇指', 'index finger raised': '竖食指', 'pointing': '指着', 'pointing at viewer': '指镜头',
+    'shushing': '嘘', 'finger to mouth': '手指抵嘴', 'finger gun': '手枪手势', 'claw pose': '爪子手势', 'paw pose': '猫爪手势',
+    'fox shadow puppet': '狐狸手势', 'waving': '挥手', 'salute': '敬礼', 'fist': '握拳', 'open hand': '张开手',
+};
+const handOut = h => /^(out|画面外|在画面外)(?:$|\s|[（(])/i.test(String(h?.visible || '').trim());
+function handBox(h, W, H) {
+    if (!Array.isArray(h?.box) || h.box.length !== 4) return null;
+    let [x1, y1, x2, y2] = h.box.map(Number);
+    if (![x1, y1, x2, y2].every(Number.isFinite)) return null;
+    // 有的模型给 0–1000 或像素坐标
+    const big = Math.max(x1, y1, x2, y2);
+    if (big > 1.5) { const sx = big > 1000 ? W : 1000, sy = big > 1000 ? H : 1000; x1 /= sx; x2 /= sx; y1 /= sy; y2 /= sy; }
+    if (x2 < x1) [x1, x2] = [x2, x1];
+    if (y2 < y1) [y1, y2] = [y2, y1];
+    [x1, y1, x2, y2] = [x1, y1, x2, y2].map(v => Math.max(0, Math.min(1, v)));
+    if (x2 - x1 < 0.01 || y2 - y1 < 0.01) return null;
+    // 往外放 40%，裁成正方形，免得手指被切掉
+    const cx = (x1 + x2) / 2 * W, cy = (y1 + y2) / 2 * H;
+    const side = Math.min(Math.max(W, H), Math.max((x2 - x1) * W, (y2 - y1) * H) * 1.8);
+    const sx = Math.max(0, Math.min(W - side, cx - side / 2)), sy = Math.max(0, Math.min(H - side, cy - side / 2));
+    return [sx, sy, Math.min(side, W), Math.min(side, H)];
+}
+async function zoomHands(imageDataUrl, hands) {
+    if (!hands.some(h => !handOut(h) && Array.isArray(h.box) && h.box.length === 4)) return [];
+    const img = await new Promise((resolve, reject) => { const i = new Image(); i.onload = () => resolve(i); i.onerror = reject; i.src = imageDataUrl; });
+    const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
+    const tiles = hands.map((h, i) => ({ i, r: handOut(h) ? null : handBox(h, W, H) })).filter(t => t.r).slice(0, 4);
+    if (!tiles.length) return [];
+    const S = 512, GAP = 12, TOP = 44;
+    const c = DOC.createElement('canvas');
+    c.width = tiles.length * S + (tiles.length - 1) * GAP; c.height = S + TOP;
+    const g = c.getContext('2d');
+    g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+    g.fillStyle = '#e00'; g.font = 'bold 36px sans-serif'; g.textBaseline = 'top';
+    tiles.forEach((t, k) => { const x = k * (S + GAP); g.drawImage(img, ...t.r, x, TOP, S, S); g.fillText(String(k + 1), x + 8, 4); });
+    const sys = `你只看手。这张图是从一张照片里裁下来、放大的 ${tiles.length} 只手，从左到右，上面标了红色编号。逐只判断手势。
+先逐根手指看：拇指、食指、中指、无名指、小指，各是伸直、弯曲还是握起；拇指和食指的指尖有没有交叉、有没有捏在一起。再定手势：
+- finger heart（单手比心）：拇指和食指指尖交叉或捏在一起，形成一个小心形，中指、无名指、小指弯起或握起。从侧面看，常常只看到拇指压在弯起的食指上，也算 finger heart；它和随手托脸的区别就是拇指和食指是不是交叉 / 捏着。
+- v sign：食指和中指伸直分开，其余握起。
+- ok sign：拇指和食指圈成圆，其余三指伸直。
+- index finger raised、pointing、finger to mouth、finger gun、thumbs up、fist、open hand、claw pose、paw pose、waving 等。
+- 两只手合成一个心形是 heart hands。
+看不清或没有特别手势写 none，不要编。
+只输出 JSON：{"hands": [{"n": 1, "fingers": "逐根手指的中文描述", "gesture": "英文 Danbooru 标签或 none"}]}`;
+    const j = pickJson(await askVision(sys, '逐只认这些手的手势，先看手指再下结论。', c.toDataURL('image/jpeg', 0.92), { maxTokens: 1200, fn: 'pose' }));
+    const out = [];
+    for (const r of Array.isArray(j?.hands) ? j.hands : []) {
+        const t = tiles[Number(r?.n) - 1];
+        const gest = String(r?.gesture || '').trim().toLowerCase().replace(/_/g, ' ');
+        if (t && gest && !hasChinese(gest)) out[t.i] = { gesture: gest, fingers: String(r?.fingers || '').trim() };
+    }
+    return out;
+}
+/** 把每只手的结论变成标签：放大认出的手势优先；自拍拿手机那只手在画面外 */
+async function handTags(imageDataUrl, j, look, pose, composition) {
+    const hands = (Array.isArray(j?.hands) ? j.hands : []).filter(h => h && typeof h === 'object');
+    let zoomed = [];
+    try { zoomed = await zoomHands(imageDataUrl, hands); } catch (e) { if (e?.name === 'AbortError') throw e; console.warn('[智库] 放大认手势没成功，用第一遍的结果', e); }
+    const tags = new Map();
+    const add = (en, zh = '') => { en = String(en || '').trim().toLowerCase().replace(/_/g, ' '); if (en && en !== 'none' && !hasChinese(en) && !tags.has(en)) tags.set(en, { en, zh: zh || GESTURE_ZH[en] || '' }); };
+    hands.forEach((h, i) => add(zoomed[i] ? zoomed[i].gesture : h.gesture));
+    // 中文里已经说了比心，标签却漏了（只在没放大成功时兜底）
+    if (!zoomed.some(Boolean)) {
+        const notes = [look, ...hands.map(h => h.fingers || '')].join(' ');
+        if (/双手(?:合成心形|比心)|两只手合成[一个]*心形/.test(notes)) add('heart hands');
+        else if (/单手比心|拇指和食指(?:指尖)?(?:交叉|捏)/.test(notes)) add('finger heart');
+    }
+    // 二次识别纠正了某只手时，移除第一遍遗留的同一手势；其他手仍采用的标签保留。
+    const replaced = new Set();
+    hands.forEach((h, i) => {
+        const old = String(h.gesture || '').trim().toLowerCase().replace(/_/g, ' ');
+        if (zoomed[i] && old && old !== 'none' && old !== zoomed[i].gesture && !tags.has(old)) replaced.add(old);
+    });
+    const selfie = [...pose, ...composition].some(p => /\bselfie\b/i.test(p.en)) || /自拍/.test(look);
+    if (selfie && hands.some(handOut)) { add('outstretched arm', '自拍那只手伸向镜头'); add('arm out of frame', '那只手在画面外'); }
+    const zoomNotes = zoomed.map((z, i) => z && z.fingers ? `第 ${i + 1} 只手放大看：${z.fingers}（${z.gesture}）` : '').filter(Boolean).join('\n');
+    return { tags: [...tags.values()], hands, zoomNotes, replaced };
+}
+
 /** 看图只读姿势和构图（带中文） */
 async function imagePose(imageDataUrl) {
     const sys = `你是给 NovelAI / Danbooru 反推提示词的标注员。目标：用你写的标签重新生成，能得到「人摆放位置、姿势、镜头、构图、背景布局」和原图几乎一样的画面。宁可多写不要少写，每个看得到的细节都写成标签。
-先在 look 里用中文把画面从上到下、从左到右仔细描述一遍（人在画面哪个位置、身体每一部分怎么摆、镜头从哪拍、背景有什么、东西放在哪），再照着描述写标签。
+先在 look 里用中文说这张图特别在哪（创意、梗、和普通构图不一样的地方），再把画面从上到下、从左到右仔细描述一遍（人在画面哪个位置、身体每一部分怎么摆、镜头从哪拍、背景有什么、东西放在哪），再照着描述写标签。
+concept（特殊构图，最重要，先想清楚再写）：先问自己「这张图和普通的人物站着 / 坐着有什么不一样，换成普通构图哪里就没了」，把这个点写进 idea（一句中文），再把它拆成标签放进 concept。没有特别的就写 []，不要硬凑。常见的几类（只是例子，图里是别的就照实写）：
+- 大小反差：巨大的手 / 人和很小的人放在一起（size difference、giant、giant male / giantess、minigirl、mini person、tiny、in palm、hand over another、looking up at another），再写谁大谁小、大的那个是不是只露手（disembodied hand、hands、out of frame）。
+- 镜头前的人在拍 / 在看：画面里是手机或相机的取景框，镜头前的人拿着手机拍画里的人（pov、pov hands、holding phone、taking picture、viewfinder、phone screen、camera ui、frame within a frame、through screen、recording）。画里的人是在屏幕里面，要写出来。
+- 镜头前的人和画里的人互动：从画外伸进来的手捏下巴、捂嘴、抓手腕、按着东西（pov、pov hands、hand on another's chin / face / mouth、holding another's wrist、grabbing、reaching towards viewer）。
+- 被东西压着 / 夹着 / 关着：人被书、手、门、盒子压住或夹在中间（under book、between pages、trapped、pinned down、squished、in container、in box、in jar），东西比人大很多也算大小反差。
+- 透过东西看、画中画：镜子、窗、门缝、屏幕、照片里的画面（reflection、mirror、through window、peeking、door gap、photo (object)、frame within a frame）。
+- 特别的机位和画面处理：倒过来、斜着、鱼眼、俯拍很远很小（upside-down、rotated、dutch angle、fisheye、from above、bird's-eye view、extreme perspective、foreshortening），故障、色差、扫描线、胶片、模糊（glitch、chromatic aberration、scanlines、vhs artifacts、film grain、motion blur），画上的字（vertical text、speech text、background text）。
+- 前景挡着：前景有手、物件、玻璃挡住一部分（foreground、blurry foreground、partially obscured、glass）。
+concept 里的标签不用在 pose / composition 里再写一遍。
+hands（先写这个再写 pose）：画里每个人的每只手各写一条，画面外伸进来的手、自拍拿手机那只看不到的手也写。每条是 {"who": "谁的手", "side": "画面左边 / 画面右边", "visible": "in（完整在画面里）/ part（露一部分）/ out（在画面外）", "where": "手在哪、在干什么（中文）", "fingers": "逐根手指写：拇指、食指、中指、无名指、小指各是伸直 / 弯曲 / 握起，拇指和食指有没有交叉或捏在一起", "gesture": "认出来的手势英文标签，没有写 none", "box": [x1, y1, x2, y2]（这只手在图里的范围，0 到 1，左上角是 0,0；out 的写 null）}。
 people：人数和性别（1girl、1boy、2girls、1boy 1girl、no humans 等），看不清就按体型判断，不能空。
 pose（姿势，至少 12 个，越细越好）：
 - 全身：standing、sitting、sitting on xx、kneeling、seiza、squatting、lying on back / side / stomach、all fours、leaning forward / back / against xx、bent over、arched back、curled up、walking、running、jumping。
 - 朝向：facing viewer、facing away、facing to the side、turning around、looking back、profile、three-quarter view。
 - 头和视线：head tilt、head down、chin rest、head on hand、looking at viewer / away / down / up / to the side / at another、eyes closed、half-closed eyes。
 - 左右手分别写：hand on own cheek / chest / hip / knee、hand up、hands together、arms behind back、arms crossed、arm support、reaching、holding xx（写清拿着什么）、hand in pocket、hand in hair、v sign、pointing、covering mouth、hugging own legs。
-- 手势要认出来、写准（先放大看手指：哪根伸直、哪根弯、有没有交叉、两只手是不是合在一起），认出来就写专门的标签，不要只写 hand near face / hand on own cheek：finger heart（拇指和食指交叉的单手比心）、heart hands（双手合成心形）、heart hands duo（两个人一起比）、v sign / double v / v over eye、ok sign、thumbs up、pointing at viewer / pointing up、index finger raised、finger to mouth / shushing、finger gun、claw pose、paw pose、fox shadow puppet、\\m/（horns）、waving、salute、fist、open hand、reaching towards viewer。手势放在哪也写上，比如 finger heart + hand on own cheek。拿着手机伸手自拍写 selfie、arm up / outstretched arm、holding phone（手机在画面外就不写 holding phone）。
+- 手势要认出来、写准（先放大看手指：哪根伸直、哪根弯、有没有交叉、两只手是不是合在一起），认出来就写专门的标签，不要只写 hand near face / hand on own cheek：finger heart（拇指和食指交叉的单手比心）、heart hands（双手合成心形）、heart hands duo（两个人一起比）、v sign / double v / v over eye、ok sign、thumbs up、pointing at viewer / pointing up、index finger raised、finger to mouth / shushing、finger gun、claw pose、paw pose、fox shadow puppet、\\m/（horns）、waving、salute、fist、open hand、reaching towards viewer。手势放在哪也写上，比如 finger heart + hand on own cheek。自拍：拿手机的那只手通常伸向镜头、伸出画面外，写 selfie、outstretched arm、arm out of frame（看不到手机就不写 holding phone），不要把这只手写成 arm up / hand up；另一只手照常单独写它在做什么、比什么手势。
 - 画面外的人也要找：图边上伸进来的手、手臂、腿（常见是镜头前的人 / 看图的人，也就是 POV），哪怕只露一只手也算一个人。写 pov、pov hands（镜头前的人的手）或 disembodied hand / out of frame，再写清他和画里的人怎么互动、谁抓着谁：holding another's wrist、holding another's hand、hand on another's face / cheek / chin、hand on another's head（摸头）、pulling another's tie、kissing hand、kissing another's fingers、finger to another's mouth、finger in another's mouth、licking another's fingers、biting another's finger、hand on another's chest、grabbing another's collar、reaching towards viewer、holding hands with viewer。分清是「自己的手」（hand on own chin）还是「别人的手」（another's hand on face），手臂从哪边伸进来（from below / from left / from right）也写上。人数照算，比如 1boy, pov。
 - 腿和脚：knees up、knees together、legs apart、crossed legs、one knee up、legs folded、legs to the side、feet together、feet up、barefoot、foot out of frame。
 - 多人：谁在谁的哪边（on left、on right、in front、behind）、hug、hug from behind、holding hands、lap pillow、carrying、face-to-face、back-to-back、leaning on another、eye contact 等。
@@ -5081,18 +5174,25 @@ NSFW 图（有裸露或性行为）额外写细，全部放进 nsfw：
 - 镜头焦点：pussy focus、ass focus、penis focus、close-up on genitals 这类写进构图或 nsfw。
 看起来是未成年或年龄不明的人，不写任何 NSFW 标签。只写图里看得到的。
 ${PAIRS}
-只输出 JSON：{"look": "中文的详细描述", "people": [...], "pose": [...], "composition": [...], "props": [...], "background": [...], "nsfw": [...]}`;
+只输出 JSON：{"look": "中文的详细描述", "idea": "这张图特别在哪，一句话", "concept": [...], "hands": [...], "people": [...], "pose": [...], "composition": [...], "props": [...], "background": [...], "nsfw": [...]}`;
     const j = pickJson(await askVision(sys, '反推这张图：姿势、构图、物件、背景都写细，要能照着重画出几乎一样的画面。', imageDataUrl, { maxTokens: 4000, fn: 'pose' }));
     const NSFW_RE = /\b(nsfw|sex|penis|vagina|pussy|nipples?|areolae|clitoris|testicles|anus|cum|creampie|ejaculation|saliva|spread legs|presenting|masturbation|fellatio|cunnilingus|irrumatio|paizuri|handjob|footjob|fingering|orgasm|ahegao|nude|naked|bdsm|bondage|groping|panties aside|after sex|rape|missionary|cowgirl position|doggystyle|prone bone|mating press|pussy juice|x-ray|cross-section)\b/i;
     let pose = normPairs(j.pose), composition = normPairs(j.composition), nsfw = normPairs(j.nsfw);
-    const people = normPairs(j.people), props = normPairs(j.props), background = normPairs(j.background), look = String(j.look || '').trim();
+    const people = normPairs(j.people), props = normPairs(j.props), background = normPairs(j.background);
+    const ht = await handTags(imageDataUrl, j, String(j.look || '').trim(), pose, composition);
+    const look = [String(j.look || '').trim(), ht.zoomNotes].filter(Boolean).join('\n');
+    // 手势放最前面，权重高；和 AI 原来写的重复的去掉
+    { const key = p => p.en.replace(/_/g, ' ').trim().toLowerCase(); const seen = new Set(ht.tags.map(key)); pose = [...ht.tags, ...pose.filter(p => !seen.has(key(p)) && !ht.replaced.has(key(p)))]; composition = composition.filter(p => !ht.replaced.has(key(p))); }
     // AI 偶尔还是放错栏：明显的挪到 NSFW
     const restricted = p => NSFW_RE.test(p.en.replace(/_/g, ' '));
-    const moved = [...pose, ...composition].filter(restricted);
+    const moved = [...pose, ...composition, ...normPairs(j.concept)].filter(restricted);
     pose = pose.filter(p => !restricted(p)); composition = composition.filter(p => !restricted(p));
     nsfw = [...new Map([...nsfw, ...moved].map(p => [p.en.replace(/_/g, ' ').trim().toLowerCase(), p])).values()];
-    if (!pose.length && !composition.length && !nsfw.length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
-    return { people, pose, composition, props, background, nsfw, look };
+    if (!pose.length && !composition.length && !nsfw.length && !normPairs(j.concept).length) throw new Error('AI 没读出姿势和构图，换个能识图的模型试试');
+    const idea = String(j.idea || '').trim();
+    let concept = normPairs(j.concept).filter(p => !restricted(p) && !ht.replaced.has(p.en.replace(/_/g, ' ').trim().toLowerCase()));
+    { const key = p => p.en.replace(/_/g, ' ').trim().toLowerCase(); const seen = new Set(concept.map(key)); concept = [...new Map(concept.map(p => [key(p), p])).values()]; pose = pose.filter(p => !seen.has(key(p))); composition = composition.filter(p => !seen.has(key(p))); }
+    return { people, concept, idea, pose, composition, props, background, nsfw, look };
 }
 return { AI_FNS, stopFetch, extractCastFromChat, identifyCanon, apiFor, aiSeen, aiCfg, splitFormat, stToEntries, tavernPresets, entriesFor, currentTavernPreset, imagePose, imageToPrompt, zhForTags, extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
 })();
@@ -11124,7 +11224,7 @@ function showImg2Prompt(r, from) {
 /** 看图读出的姿势和构图：挑着用，带中文 */
 function showPose(r) {
     const st = ui.studio;
-    const all = [...(r.people || []).map(p => ({ ...p, g: '人数性别' })), ...r.pose.map(p => ({ ...p, g: '姿势' })), ...r.composition.map(p => ({ ...p, g: '构图' })), ...(r.props || []).map(p => ({ ...p, g: '物件' })), ...(r.background || []).map(p => ({ ...p, g: '背景' })), ...(r.nsfw || []).map(p => ({ ...p, g: 'NSFW' }))];
+    const all = [...(r.people || []).map(p => ({ ...p, g: '人数性别' })), ...(r.concept || []).map(p => ({ ...p, g: '特殊构图' })), ...r.pose.map(p => ({ ...p, g: '姿势' })), ...r.composition.map(p => ({ ...p, g: '构图' })), ...(r.props || []).map(p => ({ ...p, g: '物件' })), ...(r.background || []).map(p => ({ ...p, g: '背景' })), ...(r.nsfw || []).map(p => ({ ...p, g: 'NSFW' }))];
     const picked = new Set(all.map((_, i) => i));
     const box = modal('<div data-pose></div>');
     const draw = () => {
@@ -11132,6 +11232,7 @@ function showPose(r) {
         box.querySelector('[data-pose]').innerHTML = `<style>.pc-pair-pick{display:inline-flex;align-items:baseline;gap:6px;margin:0 6px 6px 0;padding:6px 11px;border-radius:999px;border:1.5px dashed var(--pc-dash);background:transparent;color:var(--pc-ink);font-family:var(--pc-font);font-size:13px;cursor:pointer}.pc-pair-pick em{font-style:normal;font-size:12px;color:var(--pc-ink-soft)}.pc-pair-pick.on{border-style:solid;border-color:var(--pc-ink);background:var(--pc-paper-2)}</style>
           <h3 class="pc-h3">图里的姿势和构图</h3>${r.look ? `<details class="pc-details"><summary class="pc-dim small">AI 看到的画面（中文）</summary><div class="small" style="line-height:1.7">${esc(r.look)}</div></details>` : ''}<div class="pc-dim small">点标签选上 / 取消，选上的才会用。不想要背景就把「背景」那组点掉。</div>
           ${all.some(p => p.g === '人数性别') ? `<div class="pc-label">人数性别</div><div>${grp('人数性别')}</div>` : ''}
+          ${r.idea || all.some(p => p.g === '特殊构图') ? `<div class="pc-label">特殊构图</div>${r.idea ? `<div class="pc-dim small" style="margin-bottom:6px">${esc(r.idea)}</div>` : ''}<div>${grp('特殊构图')}</div>` : ''}
           <div class="pc-label">姿势</div><div>${grp('姿势')}</div>
           <div class="pc-label">构图</div><div>${grp('构图')}</div>
           ${all.some(p => p.g === '物件') ? `<div class="pc-label">物件</div><div>${grp('物件')}</div>` : ''}
