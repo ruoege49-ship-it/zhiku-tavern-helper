@@ -1688,7 +1688,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.46（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.53（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1737,7 +1737,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.46';
+globalThis.__PC_VERSION = '0.8.53';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -2924,16 +2924,17 @@ function buildParameters({ positive, negative, width, height, seed, chars = [], 
         p.characterPrompts = chars.map(c => ({ enabled: true, prompt: c.prompt, uc: c.uc || '', center: c.center || { x: 0.5, y: 0.5 } }));
         p.v4_prompt = { caption: { base_caption: positive, char_captions: chars.map(c => ({ char_caption: c.prompt, centers: [c.center || { x: 0.5, y: 0.5 }] })) }, use_coords: useCoords, use_order: true };
         p.v4_negative_prompt = { caption: { base_caption: negative, char_captions: chars.map(c => ({ char_caption: c.uc || '', centers: [c.center || { x: 0.5, y: 0.5 }] })) }, legacy_uc: false };
-        if (isV5) {
-            delete p.reference_image_multiple; delete p.reference_information_extracted_multiple;
-        } else {
-            p.autoSmea = false; p.inpaintImg2ImgStrength = 1;
-        }
+        delete p.reference_image_multiple; delete p.reference_information_extracted_multiple;
+        p.autoSmea=false; p.inpaintImg2ImgStrength=1;
+        p.qualityToggle=chars.length>0; p.normalize_reference_strength_multiple=!!refs?.normalize;
+        p.stream='msgpack';
+        if(s.naiMode==='site'){p.use_coords=false;p.v4_prompt.use_coords=false;}
     }
     if (isV5) {
         const k = ucpValue(s).toLowerCase();
         p.tag_hint_uc_preset = comic ? 0 : { heavy: 1, furryfocus: 2, light: 3, humanfocus: 4 }[k] ?? 0;
         p.tag_hint_qt = 1;
+        p.straight_alpha = false;
         delete p.skip_cfg_above_sigma;
         delete p.noise_schedule;
         if (p.sampler === 'ddim_v3') p.sampler = 'k_euler_ancestral';
@@ -2975,6 +2976,45 @@ function siteUrl(path) {
     }
     return 'https://image.novelai.net' + path;
 }
+const __siteOk = new Map();
+let siteStopped = false;
+function siteCandidates(path) {
+    const s=settings();
+    if(s.naiMode!=='site')return {list:['https://image.novelai.net'+path],raw:''};
+    const raw=s.naiSite.trim().replace(/\/+$/,'');
+    if(!raw)throw new Error('选了第三方站点，但没填地址');
+    const list=raw.endsWith(path)||raw.includes(path.replace(/^\/+/,''))?[raw]:[raw+path,raw];
+    const hit=__siteOk.get(raw+'|'+path);
+    return {list:hit&&list.includes(hit)?[hit,...list.filter(u=>u!==hit)]:list,raw};
+}
+function siteForget(path){try{const {raw}=siteCandidates(path);if(raw)__siteOk.delete(raw+'|'+path);}catch{}}
+async function sitePost(path,init,info={}) {
+    const {list,raw}=siteCandidates(path),tried=[];
+    for(let i=0;i<list.length;i++){
+        if(siteStopped||init.signal?.aborted)throw Object.assign(new Error('生图已停止'),{name:'AbortError'});
+        const url=list[i],more=i<list.length-1;let r;
+        try{r=await http(url,init);}catch(e){
+            if(siteStopped||e?.name==='AbortError'||init.signal?.aborted||!more)throw e;
+            tried.push(url+' 连不上');continue;
+        }
+        const type=(r.headers?.get?.('content-type')||'').toLowerCase();
+        Object.assign(info,{url,status:r.status,type,tried:[...tried]});
+        // Address fallback is for a missing endpoint or an HTML landing page.
+        // Auth, rate limits and server failures retain their own bounded queue handling.
+        if(more&&((r.ok&&type.includes('text/html'))||[404,405].includes(r.status))){
+            tried.push(url+(r.ok?' 返回网页':' HTTP '+r.status));
+            try{await r.body?.cancel?.();}catch{}
+            continue;
+        }
+        if(r.ok&&raw&&!type.includes('text/html'))__siteOk.set(raw+'|'+path,url);
+        return r;
+    }
+    throw new Error('站点连不上');
+}
+function siteResponseText(r) {
+    return [r.url,r.status?'HTTP '+r.status:'',r.type||'',r.size?(r.size>=1024?Math.round(r.size/1024)+'KB':r.size+' 字节'):'',r.format||'',r.entries?.length?'包里：'+r.entries.join('、'):'',r.tried?.length?'先试过：'+r.tried.join('；'):''].filter(Boolean).join(' · ');
+}
+
 function authKey() {
     const s = settings();
     const k = (s.naiMode === 'site' ? s.naiSiteKey : s.naiKey).trim();
@@ -3385,6 +3425,7 @@ async function comfyUseWorkflow(kind, name = '', raw = null) {
 async function generateRequest(opts) {
     const t0 = Date.now(), s0 = settings(), logSource = opts.src || "其他生图入口";
     const brief = () => ({
+        返回: siteResponseText(responseInfo),
         通道: opts.backend === 'comfy' ? 'ComfyUI' : { key: 'NovelAI 自己的 key', tavern: '酒馆里的 key', site: '第三方站点', gpt: 'OpenAI 兼容' }[s0.naiMode] || s0.naiMode,
         模型: opts.comic ? 'nai-diffusion-5-full（漫画）' : s0.novelaimode, 尺寸: `${opts.width || s0.novelai_width}×${opts.height || s0.novelai_height}`,
         来源: logSource,
@@ -3392,20 +3433,20 @@ async function generateRequest(opts) {
         分人物: (opts.chars || []).map((c, i) => `${i + 1}. ${c.prompt}${c.center ? ` @${c.center.x},${c.center.y}` : ''}`),
         角色参考: opts.director?.length || 0, 氛围: opts.refs?.images?.length || 0, 垫图: !!opts.i2i?.image,
     });
-    let naiSent=null;
+    let naiSent=null;const responseInfo={};
     try {
-        const r = await generateRequestInner(opts, body=>{try{naiSent=naiRequestSnapshot(body);}catch{}});
+        const r = await generateRequestInner(opts, body=>{try{naiSent=naiRequestSnapshot(body);}catch{}},responseInfo);
         globalThis.__zkLog?.('生图', `成功 · ${((Date.now() - t0) / 1000).toFixed(1)} 秒 · ${(opts.chars || []).length ? (opts.chars.length + ' 个人物') : '没分人物'}${opts.director?.length ? ' · 带角色参考 ' + opts.director.length + ' 张' : ''}`, brief());
         return r;
     } catch (e) {
         const b=brief();
         const json=naiSent?JSON.stringify(naiSent,null,1):'';
-        const detail=json?'实际发送的 NovelAI 请求（图片与缓存凭据已省略）：\n'+json.slice(0,10000)+(json.length>10000?'\n[参数记录超过 10000 字，已截断]':'')+'\n来源：'+logSource:b;
+        const detail=json?'实际发送的 NovelAI 请求（图片与缓存凭据已省略）：\n'+json.slice(0,10000)+(json.length>10000?'\n[参数记录超过 10000 字，已截断]':'')+'\n来源：'+logSource+'\n返回：'+siteResponseText(responseInfo):b;
         globalThis.__zkLog?.('生图失败',(e.message || String(e))+(e.status?' · HTTP '+e.status:''),detail);
         throw e;
     }
 }
-async function generateRequestInner(opts, recordNai = () => {}) {
+async function generateRequestInner(opts, recordNai = () => {}, responseInfo = {}) {
     const s = settings();
     if (opts.backend === 'comfy') {
         if (opts.i2i?.image) throw new Error('ComfyUI 通道暂不支持这里的垫图，请使用 NovelAI 通道');
@@ -3459,14 +3500,14 @@ async function generateRequestInner(opts, recordNai = () => {}) {
     const key = authKey();
     const body={ input: opts.positive, model, action: opts.i2i?.image ? 'img2img' : 'generate', parameters: params, use_new_shared_trial: true };
     recordNai(body);
-    const r = await http(siteUrl('/ai/generate-image'), {
+    const r = await sitePost('/ai/generate-image', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: '*/*', ...(key ? { Authorization: 'Bearer ' + key } : {}) },
         body: JSON.stringify(body),
-    });
+    },responseInfo);
     const buf = new Uint8Array(await r.arrayBuffer());
     if (!r.ok) throw Object.assign(new Error(explain(r.status, new TextDecoder().decode(buf))),{status:r.status,retryAfter:r.headers?.get('Retry-After')});
-    return { image: await imageFromResponse(buf), sent };
+    try{return {image:await imageFromResponse(buf,responseInfo),sent};}catch(e){siteForget('/ai/generate-image');throw e;}
 }
 
 function toDataUrl(b64) {
@@ -3490,19 +3531,103 @@ function explain(status, text, viaTavern = false) {
 
 // ───────────── 解压返回的 zip ─────────────
 
-async function imageFromResponse(u8) {
-    const isZip = u8[0] === 0x50 && u8[1] === 0x4b;
-    const isPng = u8[0] === 0x89 && u8[1] === 0x50;
-    if (isPng) return 'data:image/png;base64,' + toB64(u8);
-    if (!isZip) {
-        const t = new TextDecoder().decode(u8.slice(0, 2000)).trim();
-        if (t.startsWith('{')) { try { const j = JSON.parse(t); if (j.images?.[0]) return toDataUrl(j.images[0]); throw new Error(j.message || j.error?.message || (typeof j.error === 'string' ? j.error : JSON.stringify(j.error)) || t.slice(0, 150)); } catch (e) { throw e; } }
-        if (t.startsWith('iVBOR')) return toDataUrl(t);
-        if (/^<|<html/i.test(t)) throw new Error('站点返回的是网页，不是图片。检查一下地址对不对');
-        throw new Error('返回的不是图片：' + t.slice(0, 120));
+/** 看字节认图片格式 */
+function imgMime(u8) {
+    if (u8[0] === 0x89 && u8[1] === 0x50) return 'image/png';
+    if (u8[0] === 0xff && u8[1] === 0xd8) return 'image/jpeg';
+    if (u8[0] === 0x52 && u8[1] === 0x49 && u8[8] === 0x57 && u8[9] === 0x45) return 'image/webp';
+    return '';
+}
+/** 在一段二进制里找出所有完整的 PNG（有的站点回 msgpack 流：中间预览 + 最终图） */
+function findPngs(u8) {
+    const out=[],sig=[137,80,78,71,13,10,26,10],dv=new DataView(u8.buffer,u8.byteOffset,u8.byteLength);
+    for(let i=0;i+8<=u8.length;i++){
+        if(!sig.every((v,n)=>u8[i+n]===v))continue;
+        let pos=i+8;
+        if(pos+25>u8.length||dv.getUint32(pos)!==13||u8[pos+4]!==73||u8[pos+5]!==72||u8[pos+6]!==68||u8[pos+7]!==82)continue;
+        while(pos+12<=u8.length){
+            const len=dv.getUint32(pos),next=pos+12+len;
+            if(next>u8.length)break;
+            if(!Array.from(u8.subarray(pos+4,pos+8)).every(c=>(c>=65&&c<=90)||(c>=97&&c<=122)))break;
+            if(pos!==i+8&&u8[pos+4]===73&&u8[pos+5]===72&&u8[pos+6]===68&&u8[pos+7]===82)break;
+            if(len===0&&u8[pos+4]===73&&u8[pos+5]===69&&u8[pos+6]===78&&u8[pos+7]===68){out.push(u8.subarray(i,next));i=next-1;break;}
+            pos=next;
+        }
     }
-    const file = await unzipFirstImage(u8);
-    return 'data:image/png;base64,' + toB64(file);
+    return out;
+}
+/**
+ * 解析站点返回的图。返回里有好几张（中间预览 + 最终图）时取最后一张。
+ * 把返回格式记在当前请求里，写进问题记录
+ */
+async function imageFromResponse(u8, info = {}) {
+    info.size = u8.length;
+    const pick = (list, what) => { info.format = list.length > 1 ? `${what}，里面 ${list.length} 张图，用了最后一张` : what; return list[list.length - 1]; };
+    const asUrl = file => `data:${imgMime(file) || 'image/png'};base64,` + toB64(file);
+    const mime = imgMime(u8);
+    if (mime) {
+        const more = mime === 'image/png' ? findPngs(u8) : [];
+        if (more.length) return asUrl(pick(more, 'PNG 图片'));
+        info.format = mime.replace('image/', '').toUpperCase() + ' 图片';
+        return asUrl(u8);
+    }
+    const isZip = u8[0] === 0x50 && u8[1] === 0x4b;
+    if (isZip) {
+        const entries = await unzipImages(u8);
+        info.entries = entries.map(e => e.name);
+        if (!entries.length) { info.format = 'zip 压缩包（里面没有图）'; throw new Error('压缩包里没有图片'); }
+        const e = pick(entries, 'zip 压缩包');
+        return asUrl(await e.read());
+    }
+    const t = new TextDecoder().decode(u8).trim();
+    if (t.startsWith('{')) {
+        let j = null;
+        try { j = JSON.parse(t); } catch { info.format = 'JSON（解析不了）'; throw new Error('站点返回的 JSON 坏了：' + t.slice(0, 120)); }
+        const imgs = Array.isArray(j.images) ? j.images.filter(Boolean) : j.image ? [j.image] : [];
+        if (imgs.length) return toDataUrl(pick(imgs, 'JSON'));
+        info.format = 'JSON（没有图）';
+        throw new Error(j.message || j.error?.message || (typeof j.error === 'string' ? j.error : JSON.stringify(j.error)) || t.slice(0, 150));
+    }
+    if (t.startsWith('data:image/')) { info.format = 'data URL 文本'; return t; }
+    if (t.startsWith('iVBOR')) { info.format = 'base64 PNG 文本'; return toDataUrl(t); }
+    if (t.startsWith('UEsDB')) {
+        const bin = Uint8Array.from(atob(t.replace(/\s+/g, '')), c => c.charCodeAt(0));
+        const r = await imageFromResponse(bin, info);
+        info.format = 'base64 文本里的' + (info.format || 'zip');
+        return r;
+    }
+    if (/^<|<html/i.test(t)) { info.format = '网页'; throw new Error('站点返回的是网页，不是图片。检查一下地址对不对'); }
+    const pngs = findPngs(u8);
+    if (pngs.length) return asUrl(pick(pngs, '不认识的格式（像 msgpack 流）'));
+    info.format = '不认识的格式，开头字节 ' + Array.from(u8.slice(0, 4)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+    throw new Error('返回的不是图片：' + t.slice(0, 120));
+}
+/** 压缩包里所有图片：[{ name, read() }]，按包里的顺序 */
+async function unzipImages(u8) {
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    let eocd = -1;
+    for (let i = u8.length - 22; i >= Math.max(0, u8.length - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    if (eocd < 0) throw new Error('图片压缩包坏了');
+    const count = dv.getUint16(eocd + 10, true);
+    let p = dv.getUint32(eocd + 16, true);
+    const out = [];
+    for (let n = 0; n < count; n++) {
+        if (dv.getUint32(p, true) !== 0x02014b50) break;
+        const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true);
+        const nameLen = dv.getUint16(p + 28, true), extraLen = dv.getUint16(p + 30, true), commentLen = dv.getUint16(p + 32, true);
+        const local = dv.getUint32(p + 42, true);
+        const name = new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nameLen));
+        p += 46 + nameLen + extraLen + commentLen;
+        if (!/\.(png|jpe?g|webp)$/i.test(name)) continue;
+        out.push({ name, read: async () => {
+            const lName = dv.getUint16(local + 26, true), lExtra = dv.getUint16(local + 28, true);
+            const start = local + 30 + lName + lExtra, data = u8.subarray(start, start + csize);
+            if (method === 0) return data;
+            if (method === 8) return new Uint8Array(await new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer());
+            throw new Error('不认识的压缩方式 ' + method);
+        } });
+    }
+    return out;
 }
 
 function toB64(u8) {
@@ -3637,7 +3762,7 @@ async function vibePng(b64) {
 async function encodeVibeRequest(imageB64, infoExtracted = 1, model = settings().novelaimode) {
     const key = authKey();
     const image = await vibePng(imageB64);
-    const send = () => http(siteUrl('/ai/encode-vibe'), {
+    const send = () => sitePost('/ai/encode-vibe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(key ? { Authorization: 'Bearer ' + key } : {}) },
         body: JSON.stringify({ image, information_extracted: infoExtracted, model }),
@@ -3703,7 +3828,7 @@ async function inpaintRequest({ image, mask, prompt, negative, width, height, st
         v4_negative_prompt: { caption: { base_caption: negative, char_captions: [] }, use_coords: false, use_order: true },
     };
     if (isV5) delete parameters.noise_schedule;
-    const r = await http(siteUrl('/ai/generate-image'), {
+    const r = await sitePost('/ai/generate-image', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: '*/*', ...(key ? { Authorization: 'Bearer ' + key } : {}) },
         body: JSON.stringify({ action: 'infill', input: prompt, model, parameters, use_new_shared_trial: true }),
@@ -3713,7 +3838,7 @@ async function inpaintRequest({ image, mask, prompt, negative, width, height, st
     return imageFromResponse(buf);
 }
 
-return { comfyReady, chatBackend, comfyAutoConfig, comfyConnect, comfyUseWorkflow, naiToSd, uiToApi, fillWorkflow, COMFY_Q, COMFY_UC, stopQueue:()=>{__naiGate.stop();stopGpt();}, MODELS, SAMPLERS, SCHEDULES, settings, save, isReady, ucpValue, buildParameters, generate, unzipFirstImage, testConnection, importFromZhihuiji, encKey, vibeSupported, encodeVibe, parseVibeFile, charRefSupported, inpaintModel, inpaint };
+return { comfyReady, chatBackend, comfyAutoConfig, comfyConnect, comfyUseWorkflow, naiToSd, uiToApi, fillWorkflow, COMFY_Q, COMFY_UC, stopQueue:()=>{siteStopped=true;__naiGate.stop();stopGpt();}, MODELS, SAMPLERS, SCHEDULES, settings, save, isReady, ucpValue, buildParameters, generate, unzipFirstImage, testConnection, importFromZhihuiji, encKey, vibeSupported, encodeVibe, parseVibeFile, charRefSupported, inpaintModel, inpaint };
 })();
 
 // ───── engine.js ─────
@@ -6360,9 +6485,9 @@ function sceneRow(p, i, kind) {
     const cur = sceneSig(p) === sceneSig(sceneSnapshot());
     const title = kind === 'saved' ? p.name || '没起名' : new Date(p.at).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
     return `<div class="pc-promptrow ${cur ? 'cur' : ''}">
-      <div class="pc-grow"><b>${esc(title)}${cur ? ' <em>在用</em>' : ''}</b>${kind === 'saved' && p.tags?.length ? `<span class="pc-scenetags">${p.tags.map(t => `<i>${esc(t)}</i>`).join('')}</span>` : ''}<small class="mono">${esc(p.scene)}</small></div>
+      <div class="pc-grow"><b>${esc(title)}${cur ? ' <em>在用</em>' : ''}</b>${kind === 'saved' && p.tags?.length ? `<span class="pc-scenetags">${p.tags.map(t => `<i>${esc(t)}</i>`).join('')}</span>` : ''}<small class="mono" ${kind === 'saved' ? `data-act="sceneedit" data-i="${i}" style="cursor:pointer" title="点一下修改"` : ''}>${esc(p.scene)}</small></div>
       <div class="pc-promptacts">${cur ? '' : `<button class="pc-pill tiny on" data-act="sceneuse" data-kind="${kind}" data-i="${i}">换上</button>`}
-        ${kind === 'recent' ? `<button class="pc-pill tiny dashed" data-act="scenekeep" data-i="${i}">存下</button>` : `<button class="pc-pill tiny dashed" data-act="scenerename" data-i="${i}">改名</button><button class="pc-pill tiny dashed" data-act="scenetags" data-i="${i}">标签</button>`}
+        ${kind === 'recent' ? `<button class="pc-pill tiny dashed" data-act="scenekeep" data-i="${i}">存下</button>` : `<button class="pc-pill tiny dashed" data-act="sceneedit" data-i="${i}">修改</button>`}
         <button class="pc-x" data-act="scenedel" data-kind="${kind}" data-i="${i}" aria-label="删掉">×</button></div></div>`;
 }
 function sceneLibrary() {
@@ -6396,7 +6521,7 @@ function sceneLibrary() {
         const chip = (v, t) => `<button class="pc-pill tiny ${f === v ? 'on' : 'dashed'}" data-act="scenetag" data-v="${esc(v)}">${esc(t)}</button>`;
         return `<details class="pc-recent-scenes pc-saved-scenes" ${st.open.savedScenes ? 'open' : ''} data-fold="savedScenes"><summary>存下的固定提示词 ${saved.length} 条${curP ? ` · 在用「${esc(curP.name || '没起名')}」` : ''} ▸</summary>
           ${saved.length > 0 ? `<label class="pc-search pc-mt-s"><span class="pc-sr">搜固定提示词</span>${ICON.search}<input data-bind="studio.sceneQ" value="${esc(st.sceneQ || '')}" placeholder="搜名字、标签、提示词"></label>` : ''}
-          ${all.length ? `<div class="pc-chips wrap" style="margin-top:8px">${chip('', '全部')}${all.map(t => chip(t, t)).join('')}${saved.some(p => !tagsOf(p).length) ? chip('__none', '没标签') : ''}</div>` : '<div class="pc-dim small" style="margin-top:6px">点每条的「标签」可以分类，比如 证件照、NSFW、双人</div>'}
+          ${all.length ? `<div class="pc-chips wrap" style="margin-top:8px">${chip('', '全部')}${all.map(t => chip(t, t)).join('')}${saved.some(p => !tagsOf(p).length) ? chip('__none', '没标签') : ''}</div>` : '<div class="pc-dim small" style="margin-top:6px">点每条的「修改」可以编辑内容和标签，比如 证件照、NSFW、双人</div>'}
           ${rows.map(([p, i]) => sceneRow(p, i, 'saved')).join('') || '<div class="pc-dim small" style="margin-top:8px">没有对得上的</div>'}</details>`;
       })() : ''}
       ${recent.length ? `<details class="pc-recent-scenes" ${ui.studio.open.recentScenes ? 'open' : ''} data-fold="recentScenes"><summary>最近用过 ${recent.length} 条（生成时自动记）▸</summary>${recent.map((p, i) => sceneRow(p, i, 'recent')).join('')}<div class="pc-actions" style="margin-top:6px"><button class="pc-pill tiny dashed" data-act="sceneclear">清空最近</button></div></details>` : ''}`;
@@ -9580,6 +9705,35 @@ async function onClick(ev, outside = false) {
                 if (t == null) break;
                 p.tags = [...new Set(t.split(/[,，、;；\n]+/).map(x => x.trim()).filter(Boolean))].slice(0, 8);
                 saveStudio(); render(); break;
+            }
+            case 'sceneedit': {
+                const st = ui.studio, p = st.scenes?.[Number(el.dataset.i)];
+                if (!p) break;
+                const oldSig = sceneSig(p), wasCur = oldSig === sceneSig(sceneSnapshot());
+                const had = [...new Set((st.scenes || []).flatMap(x => x.tags || []))];
+                const box = modal(`<h3 class="pc-h3">修改固定提示词</h3>
+                  <label class="pc-label">名字</label><input class="pc-input" data-f="name" value="${esc(p.name || '')}" placeholder="没起名">
+                  <label class="pc-label">内容（英文标签，会发出去）</label><textarea class="pc-textarea mono" data-f="scene" style="min-height:150px">${esc(p.scene || '')}</textarea>
+                  <label class="pc-label">标签（逗号隔开）${had.length ? `<span class="pc-dim small"> · 已有：${esc(had.join('、'))}</span>` : ''}</label><input class="pc-input" data-f="tags" value="${esc((p.tags || []).join('，'))}" placeholder="比如 证件照，NSFW，双人">
+                  ${wasCur ? '<div class="pc-hint">这一条正在用，改完框里的固定提示词也跟着换。</div>' : ''}
+                  <div class="pc-actions"><button class="pc-btn" data-m="no">算了</button><button class="pc-btn dark" data-m="ok">保存</button></div>`);
+                box.addEventListener('click', ev => {
+                    const m = ev.target.closest('[data-m]')?.dataset.m;
+                    if (m === 'no') box.closeModal();
+                    if (m !== 'ok') return;
+                    if (ui.studio !== st || !st.scenes?.includes(p)) { toastr.warning('这条固定提示词已变化，请重新打开', '固定提示词'); box.closeModal(); return; }
+                    const f = k => box.querySelector(`[data-f="${k}"]`).value;
+                    const scene = f('scene').trim();
+                    if (!scene) { toastr.warning('内容不能是空的，不要了就点 × 删掉', '固定提示词'); return; }
+                    p.name = f('name').trim() || p.name || sceneName(scene);
+                    if (scene !== p.scene) { p.scene = scene; p.sceneEn = ''; p.sceneSrc = ''; }
+                    p.tags = [...new Set(f('tags').split(/[,，、;；\n]+/).map(x => x.trim()).filter(Boolean))].slice(0, 8);
+                    if (ui.batch?.sceneSig === oldSig) ui.batch.sceneSig = sceneSig(p);
+                    if (wasCur && sceneSig(sceneSnapshot()) === oldSig) { const enabled=st.sceneOn; applyScene(p); st.sceneOn=enabled; }
+                    saveStudio(); box.closeModal(); render();
+                    toastr.success('改好了', '固定提示词', { timeOut: 1200 });
+                });
+                break;
             }
             case 'scenerename': {
                 const p = ui.studio.scenes?.[Number(el.dataset.i)];

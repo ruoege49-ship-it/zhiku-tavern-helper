@@ -16,11 +16,11 @@ const original=JSON.stringify(chars);
 let p=N.buildParameters({positive:'3girls, 3boys, library',negative:'blur',chars});
 assert.equal(p.characterPrompts.length,6);assert.equal(p.characterPrompts[0].center.x,.7);assert.equal(p.characterPrompts[0].center.y,.5);assert.match(p.characterPrompts[0].prompt,/^girl,/);
 assert.match(p.v4_prompt.caption.base_caption,/3girls/);assert.equal(p.v4_prompt.caption.char_captions.length,6);assert.equal(p.v4_negative_prompt.caption.char_captions.length,6);assert.equal(JSON.stringify(chars),original);
-for(const key of ['reference_image_multiple','reference_information_extracted_multiple','reference_strength_multiple','reference_image_multiple_cached'])assert(Array.isArray(p[key]));assert.equal(p.autoSmea,false);assert.equal(p.inpaintImg2ImgStrength,1);
+for(const key of ['reference_image_multiple','reference_information_extracted_multiple'])assert.equal(p[key],undefined);for(const key of ['reference_strength_multiple','reference_image_multiple_cached'])assert(Array.isArray(p[key]));assert.equal(p.autoSmea,false);assert.equal(p.inpaintImg2ImgStrength,1);
 for(const model of ['nai-diffusion-4-full','nai-diffusion-4-5-full','nai-diffusion-5-full','nai-diffusion-3']){
  config.novelaimode=model;p=N.buildParameters({positive:'one',chars:[{prompt:'1girl',center:{x:Infinity,y:-1}}]});
  if(model==='nai-diffusion-3'){assert(!p.characterPrompts);assert.equal(p.sm,false);}else{assert.equal(p.characterPrompts[0].center.x,.5);assert.equal(p.characterPrompts[0].center.y,.1);}
- if(model.includes('5-full')&&!model.includes('4-5')){assert.equal(p.autoSmea,undefined);assert.equal(p.reference_image_multiple,undefined);}
+ if(model.includes('5-full')&&!model.includes('4-5')){assert.equal(p.autoSmea,false);assert.equal(p.reference_image_multiple,undefined);}
 }
 config.novelaimode='nai-diffusion-4-5-full';
 await N.generate({positive:'many people',chars});assert.equal(calls.at(-1).body.parameters.characterPrompts.length,6);calls.length=0;logs.length=0;
@@ -31,8 +31,10 @@ const failures=logs.filter(l=>l[0]==='生图失败');assert.equal(failures.lengt
 assert(failures[0][2].includes('"strength": 0'));assert(failures[0][2].includes('"x": 0.7'));assert(failures[0][2].includes('coat '.repeat(80)),'long readable prompts are retained');
 for(const secret of ['secret-api-key','cache-secret','image-fixture','binary-fixture'])assert(!JSON.stringify(logs).includes(secret));assert(!source.includes('__zkLastNai'));
 let before=calls.length;responses=Array.from({length:6},()=>({status:500}));await assert.rejects(()=>N.generate(opts),/HTTP|500/);assert.equal(calls.length-before,6,'at most three original and three flattened attempts');
-for(const status of [400,401,402,404]){before=calls.length;responses=[{status}];await assert.rejects(()=>N.generate(opts));assert.equal(calls.length-before,1);}
-before=calls.length;responses=[new TypeError('network failed')];await assert.rejects(()=>N.generate(opts));assert.equal(calls.length-before,1);
+for(const status of [400,401,402]){before=calls.length;responses=[{status}];await assert.rejects(()=>N.generate(opts));assert.equal(calls.length-before,1);}
+for(const status of [404,405]){before=calls.length;responses=[{status},{status}];await assert.rejects(()=>N.generate(opts));assert.equal(calls.length-before,2);}
+before=calls.length;responses=[new TypeError('network failed'),new TypeError('network failed')];await assert.rejects(()=>N.generate(opts));assert.equal(calls.length-before,2);
+config.naiMode='key';config.naiKey='fixture-key';before=calls.length;responses=[new TypeError('network failed')];await assert.rejects(()=>N.generate(opts));assert.equal(calls.length-before,1);config.naiMode='site';
 before=calls.length;responses=[{status:504},{status:504},{status:504}];await assert.rejects(()=>N.generate({...opts,chars:[]}));assert.equal(calls.length-before,3);
 // Tavern transport logs its own body, which does not contain divided-character parameters.
 config.naiMode='tavern';before=calls.length;responses=[{status:500},{status:500},{status:500}];await assert.rejects(()=>N.generate({positive:'tavern input',chars:opts.chars}));assert.equal(calls.length-before,3);assert.equal(calls.at(-1).body.parameters,undefined);assert(logs.filter(l=>l[0]==='生图失败').at(-1)[2].includes('"prompt": "tavern input"'));
