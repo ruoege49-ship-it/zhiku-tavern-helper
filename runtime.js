@@ -1688,7 +1688,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.59（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.60（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1737,7 +1737,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.59';
+globalThis.__PC_VERSION = '0.8.60';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -3479,6 +3479,7 @@ async function generateRequestInner(opts, recordNai = () => {}, responseInfo = {
         chars: s.naiMode==='tavern'?[]:(params.characterPrompts || []).map(c => c.prompt),
         seed: params.seed,
         model,
+        params: { model, sampler: params.sampler, steps: params.steps, cfg: params.scale, ...(s.naiMode !== 'tavern' ? { rescale: params.cfg_rescale } : {}), ...(!model.includes('nai-diffusion-5') || s.naiMode !== 'tavern' ? { schedule: params.noise_schedule } : {}), width: params.width, height: params.height },
         director: params.director_reference_images_cached?.length || 0,
         ...(opts.i2i?.image ? { i2i: { strength: params.strength, noise: params.noise } } : {}),
     };
@@ -6199,7 +6200,7 @@ async function pcRecordImage({ dataUrl, url, raw = '', sent = null, from }) {
     try { thumb = await pcLocal.put(await pcMakeThumb(dataUrl)); } catch (e) { console.warn('[智库] 缩略图没存上', e); }
     const d = __mod_store.getData();
     const cut = (v, n) => String(v || '').slice(0, n);
-    const entry = { id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), url: String(url), thumb, raw: String(raw ?? ''), prompt: String(sent?.prompt ?? ''), negative: String(sent?.negative ?? ''), chars: (sent?.chars || []).map(c => String(typeof c === 'string' ? c : c?.prompt ?? '')).filter(Boolean), seed: sent?.seed ?? '', size: cut(sent?.size, 20), model: cut(sent?.model, 40), from, at: Date.now() };
+    const entry = { id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), url: String(url), thumb, raw: String(raw ?? ''), prompt: String(sent?.prompt ?? ''), negative: String(sent?.negative ?? ''), chars: (sent?.chars || []).map(c => String(typeof c === 'string' ? c : c?.prompt ?? '')).filter(Boolean), seed: sent?.seed ?? '', size: cut(sent?.size, 20), model: cut(sent?.model, 40), ...(sent?.params ? { params: { ...sent.params } } : {}), from, at: Date.now() };
     d.history = [entry, ...(Array.isArray(d.history) ? d.history : []).filter(h => h.url !== entry.url)].slice(0, 300);
     __mod_store.commit({ silent: !DOC.querySelector('#pc-root.open') });
 }
@@ -6210,8 +6211,19 @@ const __mod_marker=createMarkerController({
             // 外貌、负面词和参考图都来自这一张图的角色标记
             const hit=__mod_chars.markerPrompt(prompt,where);
             const {positive,negative,chars}=hit||__mod_engine.composeStudio({pos:__mod_model.mergeTags(d.active?__mod_model.ticketString(d,d.active):'',prompt,d.options.chatPositive||''),neg:[d.active?__mod_model.ticketNeg(d,d.active):'',d.options.chatNegative||''].filter(Boolean).join(', ')});
+            // 正文画师串：没选就警告；选了但画师没进正面就报错，不画
+            const tkName=d.active?__mod_model.ticketName(d,d.active):'',tkStr=d.active?__mod_model.ticketString(d,d.active):'';
+            const artKey=t=>String(t.text||'').replace(/^artist\s*:\s*/i,'').replace(/[_\s]+/g,' ').trim().toLowerCase();
+            const artists=text=>__mod_model.tokenize(text).flatMap(t=>__mod_model.tokenize(t.text)).filter(t=>t.isArtist).map(artKey).filter(Boolean);
+            const want=[...new Set(artists(tkStr))];
+            const have=new Set(artists([positive,...(chars||[]).map(c=>c.prompt)].join(', ')));
+            const lost=want.filter(a=>!have.has(a));
+            if(!d.active){toastr.warning('正文没选画师串，这张按当前提示词生图。到智库顶上「正文画师串」选一个','智库 · 标记生图',{timeOut:5000});globalThis.__zkLog?.('生图警告','正文出图没选正文画师串',{来源:where?.src||'正文插图',正面:positive});}
+            else if(want.length&&lost.length===want.length){globalThis.__zkLog?.('生图失败',`正文画师串「${tkName}」的画师一个都没进提示词`,{画师串:tkStr,正面:positive});throw new Error(`正文画师串「${tkName}」没进提示词，这张没画。把问题记录发给作者`);}
+            else if(lost.length){toastr.warning(`正文画师串「${tkName}」里有 ${lost.length} 个画师没进提示词：${lost.join('、')}`,'智库 · 标记生图',{timeOut:6000});}
+            const srcNote=(where?.src||'正文插图')+(d.active?` · 画师串「${tkName}」${lost.length?`（缺 ${lost.length} 个画师）`:'（已带上）'}`:' · 没选画师串');
             const bound=[...new Set((hit?.cast||[]).map(ch=>ch.charRef).filter(id=>id&&d.charRefGroups?.[id]))];
-            const image=await __mod_engine.generateFull({src:where?.src,positive,negative,...(chars?.length?{chars}:{}),backend:(typeof __mod_nai!=='undefined'&&__mod_nai.chatBackend?.()||'nai'),director:__mod_nai.chatBackend?.()!=='comfy'&&bound.length?await __mod_engine.charRefs(bound):null});__mod_engine.afterChatImage();return image;},
+            const image=await __mod_engine.generateFull({src:srcNote,positive,negative,...(chars?.length?{chars}:{}),backend:(typeof __mod_nai!=='undefined'&&__mod_nai.chatBackend?.()||'nai'),director:__mod_nai.chatBackend?.()!=='comfy'&&bound.length?await __mod_engine.charRefs(bound):null});__mod_engine.afterChatImage();return image;},
         resolveUrl:u=>pcLocal.url(u),upload:async(image,name)=>{const r=await pcStoreImage(image,name);void pcRecordImage({dataUrl:image,url:r?.url,raw:pcMarkerRaw,sent:__mod_engine.runtime.lastSent,from:'chat'}).catch(e=>console.warn('[智库] 历史生图没存上',e));return r;},notify:(message,level)=>toastr[level]?.(message,'智库 · 标记生图')
     });
 const __mod_ui = (() => {
@@ -6915,7 +6927,7 @@ function histDetail(x) {
         if (act === 'share') {
             if (!L.serverBase()) { toastr.warning('先到「设置」里填共享服务器地址', '共享'); return; }
             box.closeModal();
-            openSharedUpload({ artistString: x.prompt || x.raw || '', negative: x.negative || '', image: await pcLocal.url(x.url) });
+            openSharedUpload({ artistString: x.prompt || x.raw || '', negative: x.negative || '', image: await pcLocal.url(x.url), params: shareImageParams(x) });
         }
         if (act === 'delete') { if (!(await confirmBox('删掉这张图？图片也会删掉。', { ok: '删除', cancel: '算了' }))) return; histRemove([x]); box.closeModal(); render(); }
         if (act === 'reuse') {
@@ -9036,6 +9048,7 @@ function postWho(p) {
     const t = new Set(p.tags || []), who = new Set();
     if (t.has('男性裸体')) who.add('male');
     if (t.has('女性裸体')) who.add('female');
+    if (!who.size) { if (t.has('BL')) who.add('male'); if (t.has('GL')) who.add('female'); if (t.has('BG') || t.has('GB')) { who.add('male'); who.add('female'); } }
     return who;
 }
 const postHasNsfw = p => !!(p.nsfw || (p.images || []).some(i => i.nsfw));
@@ -9099,7 +9112,7 @@ function viewLobby(d) {
     const nm = lobbyNsfwMode();
     // 只看男性 / 女性的 NSFW：带 NSFW 的分享只留对得上的；没有 NSFW 的照常显示
     // 只有男性裸体 / 只有女性裸体：带裸体的分享只留只有这一种的；没有裸体的照常显示。R18G 没打开就不显示
-    const whoOk = p => p.mine || ((nm === 'all' || !postHasNsfw(p) || (postWho(p).has(nm) && postWho(p).size === 1)) && (d.options.lobbyR18g || !(p.tags || []).includes('R18G')));
+    const whoOk = p => p.mine || ((nm === 'all' || !(postHasNsfw(p) || (p.tags || []).some(t => t === 'NSFW' || NSFW_WHO.includes(t))) || (postWho(p).has(nm) && postWho(p).size === 1)) && (d.options.lobbyR18g || !(p.tags || []).includes('R18G')));
     const items = lb.items.filter(p => (p.mine || (!p.tags.some(t => blocked.has(t)) && !blk.users.includes(p.nickname) && !blk.posts.includes(p.id))) && (!lb.tag2 || p.tags.includes(lb.tag2)) && whoOk(p));
     const tags = lb.tags.map(t => t.tag).filter(t => t !== 'NSFW' && !AUD.includes(t) && !ORIENT.includes(t));
     for (const t of blocked) if (!tags.includes(t)) tags.push(t);
@@ -9108,22 +9121,22 @@ function viewLobby(d) {
     <div class="pc-row-between pc-mt-s"><h2 class="pc-h2" style="margin:0">共享</h2><button class="pc-btn dark" data-act="lobbyupload" aria-label="上传画师串">＋ 上传</button></div>
     <div class="pc-toprow">
       <label class="pc-search"><span class="pc-sr">搜索共享</span>${ICON.search}<input data-bind="lobby.q" data-enter="lobbysearch" value="${esc(lb.q)}" placeholder="搜画师名、标签"></label>
-      <div class="pc-vt"><button class="${view === 'grid' ? 'on' : ''}" data-act="lobbyview" data-v="grid" aria-label="网格">${SYM.grid}</button><button class="${view === 'list' ? 'on' : ''}" data-act="lobbyview" data-v="list" aria-label="列表">${SYM.list}</button></div>
+      <div class="pc-vt"><button class="${view === 'grid' ? 'on' : ''}" data-act="lobbyview" data-v="grid" aria-label="网格">${SYM.grid}</button><button class="${view === 'list' ? 'on' : ''}" data-act="lobbyview" data-v="list" aria-label="列表">${SYM.list}</button>${view === 'grid' ? `<button class="${d.options.lobbyThumb === 'crop' ? '' : 'on'}" data-act="lobbythumb" aria-label="完整图片" title="完整图片 / 裁成一样高" style="font-size:12px;padding:0 8px;width:auto">全图</button>` : ''}</div>
     </div>
     <div class="pc-lbf">
     <div class="pc-chips">
       ${[['', '全部'], ['group', '画师组'], ['artist', '单个画师'], ['character', '角色'], ['outfit', '服装']].map(([k, t]) => `<button class="pc-pill ${!lb.mine && lb.kind === k ? 'on' : 'dashed'}" data-act="lobbykind" data-kind="${k}">${t}</button>`).join('')}
       <button class="pc-pill ${lb.mine ? 'on' : 'dashed'}" data-act="lobbymine">我分享的</button>
     </div>
-    <div class="pc-chips"><span class="pc-lbf-k">裸体</span>${[['sfw', '不看'], ['male', '只男性'], ['female', '只女性'], ['all', '全都有']].map(([k, t]) => `<button class="pc-pill ${k !== 'sfw' ? 'nsfw' : ''} ${nm === k ? 'on' : 'dashed'}" data-act="lobbynsfw" data-v="${k}" title="只管共享里别人的图，你自己的例图一直显示">${t}</button>`).join('')}<button class="pc-pill ${d.options.lobbyR18g ? 'nsfw on' : 'blocked'}" data-act="lobbyr18g" title="猎奇、血腥">${d.options.lobbyR18g ? 'R18G' : '⊘ R18G'}</button></div>
+    <div class="pc-chips"><span class="pc-lbf-k">裸体</span>${[['sfw', '不看'], ['male', '只看男性的'], ['female', '只看女性的'], ['all', '男女都看']].map(([k, t]) => `<button class="pc-pill ${k !== 'sfw' ? 'nsfw' : ''} ${nm === k ? 'on' : 'dashed'}" data-act="lobbynsfw" data-v="${k}" title="只管共享里别人的图，你自己的例图一直显示">${t}</button>`).join('')}<button class="pc-pill ${d.options.lobbyR18g ? 'nsfw on' : 'blocked'}" data-act="lobbyr18g" title="猎奇、血腥">${d.options.lobbyR18g ? 'R18G' : '⊘ R18G'}</button></div>
     <div class="pc-chips"><span class="pc-lbf-k">标签</span>${AUD.map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="${t}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${t}</button>`).join('')}${tags.slice(0, 24).map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag2 === t ? 'on' : 'dashed'}" data-act="lobbytag2" data-tag="${esc(t)}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${esc(t)}</button>`).join('')}</div>
-    <div class="pc-tip">点 = 只看这类　长按 = 屏蔽</div>
+    <div class="pc-tip">点标签 = 只看这类　长按标签或分享 = 屏蔽</div>
     </div>
     <style>.pc-lbf .pc-chips{gap:6px;margin:6px 0}.pc-lbf .pc-pill{font-size:13px;padding:4px 11px;min-height:0;line-height:1.5}.pc-lbf-k{align-self:center;font-size:15px;font-weight:600;margin-right:4px;white-space:nowrap}.pc-lbf .pc-tip{font-size:12px;margin:2px 0 6px}</style>
     <div class="pc-sort"><button class="${lb.sort === 'new' ? 'on' : ''}" data-act="lobbysort" data-sort="new">最新</button><button class="${lb.sort === 'hot' ? 'on' : ''}" data-act="lobbysort" data-sort="hot">最多人保存</button><button data-act="lobbyrefresh">刷新</button></div>
     ${lb.error ? `<div class="pc-card pc-pad pc-mt">连不上共享服务器：${esc(lb.error)}</div>` : ''}
     ${lb.loading && !lb.items.length ? '<div class="pc-tip pc-mt">加载中…</div>' : ''}
-    ${view === 'grid' ? `<div class="pc-grid2 pc-mt-s">${items.map(p => lobbyGridCard(p)).join('')}</div>` : `<div class="pc-list pc-mt">${items.map(p => lobbyCard(p)).join('')}</div>`}
+    ${view === 'grid' ? `<style>.pc-lobbygrid.thumb-full{display:block;columns:2;column-gap:12px}.pc-lobbygrid.thumb-full>.pc-ticket{display:inline-block;width:100%;margin:0 0 16px;break-inside:avoid;vertical-align:top}.pc-lobbygrid.thumb-full .pc-ticket-img{height:auto!important;-webkit-mask-image:none;mask-image:none}.pc-lobbygrid.thumb-full .pc-ticket-img img{height:auto;object-fit:contain;display:block}</style><div class="pc-grid2 pc-lobbygrid pc-mt-s ${d.options.lobbyThumb === 'crop' ? '' : 'thumb-full'}">${items.map(p => lobbyGridCard(p)).join('')}</div>` : `<div class="pc-list pc-mt">${items.map(p => lobbyCard(p)).join('')}</div>`}
     ${!lb.loading && !items.length ? '<div class="pc-empty pc-mt"><b>这里还没有东西</b><span>点右上角「＋ 上传」，填写画师串和署名就能发布。</span></div>' : ''}
     ${lb.items.length < lb.total ? '<button class="pc-btn pc-mt wide" data-act="lobbymore">加载更多</button>' : ''}
     <div style="height:24px"></div>`;
@@ -9134,7 +9147,7 @@ const lobbySpoiled = p => !p.mine && (p.tags || []).includes('剧透') && !lobby
 function lobbyGridCard(p) {
     const img = p.images[0];
     const banned = p.content?.artistString && M.bannedIn(getData(), p.content.artistString).length;
-    return `<article class="pc-ticket ${p.copied ? 'saved' : ''} ${banned ? 'banned' : ''}" data-act="lobbyopen" data-id="${p.id}">${banned ? '<span class="pc-banbadge">含黑名单画师</span>' : ''}
+    return `<article class="pc-ticket ${p.copied ? 'saved' : ''} ${banned ? 'banned' : ''}" data-act="lobbyopen" data-id="${p.id}" ${p.mine ? '' : 'data-lp="lpost"'}>${banned ? '<span class="pc-banbadge">含黑名单画师</span>' : ''}
       <div class="pc-ticket-img ${lobbySpoiled(p) ? 'pc-spoiler' : ''}">${img ? `<img src="${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">` : '<span>无图</span>'}${lobbySpoiled(p) ? `<button class="pc-spoil-btn" data-act="lobbyreveal" data-id="${p.id}">剧透 · 点一下看</button>` : ''}</div>
       <span class="pc-kind">${KIND_NAME[p.kind] || p.kind}</span>
       <button class="pc-use ${p.copied ? 'on dark' : ''}" data-act="lobbycopy" data-id="${p.id}" aria-label="保存">${p.copied ? SYM.check : SYM.down}</button>
@@ -9242,6 +9255,7 @@ function openLobbySheet(p) {
       ${p.note ? `<p class="pc-quote small">${esc(p.note)}</p>` : ''}
       ${lobbyHistoryHtml(p)}
       <div class="pc-chips wrap">${p.tags.map(t => `<span class="pc-tagchip ${t === 'NSFW' ? 'nsfw' : ''}">${esc(t)}</span>`).join('')}</div>
+      ${shareParamsLine(p.content?.params) ? `<div class="pc-field pc-mt-s"><span>作者出图用的参数</span><div class="pc-row-between" style="gap:8px"><small class="mono">${esc(shareParamsLine(p.content.params))}</small><button class="pc-pill dashed tiny" data-act="lobbyparams" data-id="${p.id}">套用</button></div><small class="pc-dim">保存时会绑定支持的模型，设成正文画师串后自动切换。</small></div>` : ''}
       <div class="pc-actions wrap">
         ${p.mine ? `<button class="pc-btn danger" data-act="lobbydel" data-id="${p.id}">删除</button><button class="pc-btn" data-act="lobbyedit" data-id="${p.id}">修改</button>` : `<button class="pc-btn" data-act="lobbyreport" data-id="${p.id}">举报</button><button class="pc-btn" data-act="lobbyblockpost" data-id="${p.id}">屏蔽这条</button><button class="pc-btn" data-act="lobbyblockuser" data-nick="${esc(p.nickname)}">屏蔽作者</button>`}
         <button class="pc-btn" data-act="lobbylike" data-id="${p.id}">♡ ${p.likes}</button>
@@ -9255,6 +9269,19 @@ function openLobbySheet(p) {
     });
 }
 
+async function lobbyPostMenu(id) {
+    const p = (ui.lobby.items || []).find(x => String(x.id) === String(id));
+    if (!p || p.mine) return;
+    buzz();
+    const tags = (p.tags || []).filter(t => t !== 'NSFW');
+    const i = await chooseBox(`「${p.name}」`, ['不看这条', `屏蔽「${p.nickname}」分享的全部`, ...tags.map(t => `屏蔽标签「${t}」`)]);
+    if (i == null || i < 0) return;
+    const b = lobbyBlock();
+    if (i === 0) { if (!b.posts.includes(p.id)) b.posts.push(p.id); commit(); toastr.info('这条不再显示，可以在 设置 → 共享 里恢复', '共享', { timeOut: 2500 }); return; }
+    if (i === 1) { if (!b.users.includes(p.nickname)) b.users.push(p.nickname); commit(); toastr.info(`已屏蔽「${p.nickname}」，可以在 设置 → 共享 里恢复`, '共享', { timeOut: 2500 }); return; }
+    const tag = tags[i - 2];
+    if (tag && !(getData().blockedTags || []).includes(tag)) toggleBlockTag(tag);
+}
 function toggleBlockTag(tag) {
     const d = getData();
     d.blockedTags ||= [];
@@ -9268,14 +9295,14 @@ function toggleBlockTag(tag) {
 
 function lobbyCard(p) {
     const img = p.images[0];
-    return `<article class="pc-lobby-card">
+    return `<article class="pc-lobby-card" ${p.mine ? '' : `data-lp="lpost" data-id="${p.id}"`}>
       <div class="pc-lobby-img ${lobbySpoiled(p) ? 'pc-spoiler' : ''}" ${img && !lobbySpoiled(p) ? `data-act="viewimg" data-src="${esc(L.lobbyImgUrl(img.url))}"` : ''}>${img ? `<img src="${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">` : '<span>无图</span>'}${lobbySpoiled(p) ? `<button class="pc-spoil-btn" data-act="lobbyreveal" data-id="${p.id}">剧透 · 点一下看</button>` : ''}${p.images.length > 1 ? `<em>+${p.images.length - 1}</em>` : ''}</div>
       <div class="pc-lobby-text">
         <div class="pc-row-between"><span class="pc-label">${esc(p.nickname)} · ${KIND_NAME[p.kind] || p.kind}</span>
           ${p.mine ? `<button class="pc-icon-btn small" data-act="lobbydel" data-id="${p.id}" aria-label="删除我分享的">×</button>` : `<button class="pc-icon-btn small" data-act="lobbyreport" data-id="${p.id}" aria-label="举报">${ICON.flag}</button>`}</div>
         <b>${esc(p.name)}</b>
         <small>${esc(p.note || p.content?.artistString || '')}</small>
-        <div class="pc-chips wrap tiny">${p.tags.map(t => `<span class="pc-tagchip ${t === 'NSFW' ? 'nsfw' : ''}">${esc(t)}</span>`).join('')}</div>
+        <div class="pc-chips wrap tiny">${p.tags.map(t => `<span data-lp="ltag" data-tag="${esc(t)}" class="pc-tagchip ${t === 'NSFW' ? 'nsfw' : ''}">${esc(t)}</span>`).join('')}</div>
         <div class="pc-row-between">
           <button class="pc-linkish ${p.liked ? 'strong' : ''}" data-act="lobbylike" data-id="${p.id}">♡ ${p.likes}</button>
           <span class="pc-label">${p.copies} 人保存</span>
@@ -9533,6 +9560,7 @@ function lpFire(t) {
     if (t.dataset.lp === 'ticket') openTicketSheet(refFrom(t));
     else if (t.dataset.lp === 'col') tagMenu(t.dataset.col);
     else if (t.dataset.lp === 'ltag') toggleBlockTag(t.dataset.tag);
+    else if (t.dataset.lp === 'lpost') lobbyPostMenu(t.dataset.id);
     else if (t.dataset.lp === 'vibe') vibeMenu(t.dataset.id);
     else if (t.dataset.lp === 'crgroup') crMenu(t.dataset.id);
 }
@@ -10155,7 +10183,7 @@ async function onClick(ev, outside = false) {
             case 'quickshare': {
                 if (!L.serverBase()) { toastr.warning('先到「设置」里填共享服务器地址', '共享'); break; }
                 const st = ui.studio;
-                openSharedUpload({ artistString: st.pos, negative: st.neg, image: st.result });
+                openSharedUpload({ artistString: st.pos, negative: st.neg, image: st.result, params: shareImageParams(st.sent || {}) });
                 break;
             }
             case 'saveresult': await saveStudioResult(); break;
@@ -10190,7 +10218,7 @@ async function onClick(ev, outside = false) {
             case 'cfyinsert': await E.insertIntoLastMessage(loadCfy().result); toastr.success('已插到聊天最后一楼', '智库'); break;
             case 'cfyshare': {
                 if (!L.serverBase()) { toastr.warning('先到「设置」里填共享服务器地址', '共享'); break; }
-                const c = loadCfy(); openSharedUpload({ artistString: c.pos, negative: c.neg, image: c.result }); break;
+                const c = loadCfy(); openSharedUpload({ artistString: c.pos, negative: c.neg, image: c.result, params: shareImageParams(c.sent || {}) }); break;
             }
             case 'cfyclear': loadCfy().result = ''; ui.cfy.sent = null; render(); break;
             case 'insertresult':
@@ -10351,6 +10379,8 @@ async function onClick(ev, outside = false) {
             case 'lobbykind': ui.lobby.kind = el.dataset.kind; ui.lobby.mine = false; loadLobby(); break;
             case 'lobbytag2': { const t = el.dataset.tag; if ((d.blockedTags || []).includes(t)) { toggleBlockTag(t); break; } ui.lobby.tag2 = ui.lobby.tag2 === t ? '' : t; render(); break; }
             case 'lobbyview': d.options.lobbyView = el.dataset.v; commit(); break;
+            case 'lobbyparams': { const p = ui.lobby.items.find(x => x.id === el.dataset.id); const pr = p?.content?.params; if (!pr) break; if (!(await confirmBox(`把出图设置换成：${shareParamsLine(pr)}？`, { ok: '换', cancel: '算了' }))) break; if (!applyShareParams(pr)) { toastr.info('这条分享使用其他生图通道，参数未套用', '共享'); break; } toastr.success('出图参数换好了', '共享', { timeOut: 2000 }); render(); break; }
+            case 'lobbythumb': d.options.lobbyThumb = d.options.lobbyThumb === 'crop' ? 'full' : 'crop'; commit(); break;
             case 'lobbyopen': { const p = ui.lobby.items.find(x => x.id === el.dataset.id); if (p) openLobbySheet(p); break; }
             case 'lobbymine': ui.lobby.mine = !ui.lobby.mine; ui.lobby.kind = ''; loadLobby(); break;
             case 'lobbysort': ui.lobby.sort = el.dataset.sort; loadLobby(); break;
@@ -11496,8 +11526,40 @@ function viewAiPreset(d) {
       </section>
       <div style="height:24px"></div>`;
 }
+/** 分享画师串时一起带上的出图参数；画师串绑了模型就用绑的 */
+function shareParams(ref) {
+    const s = N.settings(), d = getData();
+    const item = ref ? M.resolveTicket(d, ref)?.item : null;
+    if (s.naiMode === 'gpt') return item?.model ? { model: item.model } : {};
+    const n = v => Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : undefined;
+    return { model: item?.model || s.novelaimode || undefined, sampler: s.novelai_sampler || undefined, steps: n(s.novelai_steps), cfg: n(s.nai3Scale), rescale: Number(s.cfg_rescale) || 0, schedule: s.Schedule || undefined, width: n(s.novelai_width), height: n(s.novelai_height) };
+}
+const shareModelName = v => (N.MODELS.find(m => m[0] === v) || [v, v])[1];
+function shareImageParams(image = {}) {
+    if (image.params && typeof image.params === 'object') return { ...image.params };
+    const size = /^(\d+)×(\d+)$/.exec(image.size || '');
+    return { ...(image.model ? { model: image.model } : {}), ...(size ? { width: Number(size[1]), height: Number(size[2]) } : {}) };
+}
+function shareParamsLine(pr) {
+    if (!pr || typeof pr !== 'object' || !pr.model) return '';
+    return [shareModelName(pr.model), pr.sampler, pr.steps && pr.steps + ' 步', pr.cfg && 'CFG ' + pr.cfg, pr.rescale ? 'Rescale ' + pr.rescale : '', pr.width && pr.height ? pr.width + '×' + pr.height : ''].filter(Boolean).join(' · ');
+}
+/** 把分享里的参数套到自己的设置上（只认识的模型才换） */
+function applyShareParams(pr) {
+    if (!pr || typeof pr !== 'object' || /^(?:ComfyUI|OpenAI 兼容) ·/.test(pr.model || '')) return false;
+    const s = N.settings(), positive = v => Number.isFinite(Number(v)) && Number(v) > 0;
+    if (pr.model && N.MODELS.some(m => m[0] === pr.model)) s.novelaimode = pr.model;
+    if (typeof pr.sampler === 'string' && pr.sampler) s.novelai_sampler = pr.sampler;
+    if (positive(pr.steps)) s.novelai_steps = Number(pr.steps);
+    if (positive(pr.cfg)) s.nai3Scale = Number(pr.cfg);
+    if (pr.rescale != null && Number.isFinite(Number(pr.rescale)) && Number(pr.rescale) >= 0) s.cfg_rescale = Number(pr.rescale);
+    if (typeof pr.schedule === 'string' && pr.schedule) s.Schedule = pr.schedule;
+    if (positive(pr.width) && positive(pr.height)) { s.novelai_width = Number(pr.width); s.novelai_height = Number(pr.height); }
+    N.save(); return true;
+}
 function openSharedUpload(pre = {}) {
     const d = getData();
+    const uploadParams = pre.params ? { ...pre.params } : shareParams();
     const box = modal(`<form data-share-form>
       <h3 class="pc-h3">上传画师串</h3>
       <label class="pc-field"><span>名称</span><input class="pc-input" name="title" maxlength="200" placeholder="不填就用前两位画师的名字" value="${esc(pre.title || '')}"></label>
@@ -11632,7 +11694,7 @@ function openSharedUpload(pre = {}) {
                 images.push({ data, nsfw });
             }
             say('正在发布…');
-            const post = { nickname, name, kind: members.length === 1 ? 'artist' : 'group', note, tags, nsfw, content: { artistString, members, ...(negative ? { negative } : {}) }, images };
+            const post = { nickname, name, kind: members.length === 1 ? 'artist' : 'group', note, tags, nsfw, content: { artistString, members, ...(negative ? { negative } : {}), params: uploadParams }, images };
             await L.createPost(post);
             d.lobby.nickname = nickname;
             if (nsfw && lobbyNsfwMode() === 'sfw') { d.options.lobbyShowNsfw = true; d.options.lobbyNsfwMode = 'all'; }
@@ -11714,7 +11776,7 @@ async function shareToLobby(ref) {
         kind: ref.type, name: form.name || M.ticketName(d, ref), note: form.note,
         tags: picked,
         nsfw: images.some(i => i.nsfw),
-        content: { artistString: artistOnly(M.ticketString(d, ref)), members, ...(M.ticketNeg(d, ref) ? { negative: M.ticketNeg(d, ref) } : {}) },
+        content: { artistString: artistOnly(M.ticketString(d, ref)), members, ...(M.ticketNeg(d, ref) ? { negative: M.ticketNeg(d, ref) } : {}), params: shareParams(ref) },
         images,
     });
     toastr.success('已分享', '共享');
@@ -11728,12 +11790,14 @@ async function copyFromLobby(p, btn) {
         await copyCharacterFromLobby(p);
     } else {
         let ref;
-        if ((p.kind === 'artist' || p.content?.members?.length === 1) && !p.content?.negative && !M.parseArtistString(p.content?.artistString || '').extra && (p.content?.members?.[0]?.weight ?? 1) === 1) {
+        if ((p.kind === 'artist' || p.content?.members?.length === 1) && !p.content?.negative && !p.content?.params?.model && !M.parseArtistString(p.content?.artistString || '').extra && (p.content?.members?.[0]?.weight ?? 1) === 1) {
             const a = M.ensureArtist(d, p.content.members?.[0]?.tag || p.content.artistString);
             if (p.note && !a.note) a.note = p.note;
             ref = { type: 'artist', id: a.id };
         } else {
             ref = M.createFromString(d, { name: p.name, text: p.content.artistString, note: p.note, neg: p.content.negative || '', forceGroup: true });
+            const pr = p.content?.params;
+            if (ref && pr && typeof pr === 'object') { const it = M.resolveTicket(d, ref)?.item; if (it) { if (pr.model && N.MODELS.some(m => m[0] === pr.model) && !it.model) it.model = pr.model; it.shareParams = pr; } }
         }
         if (!ref) throw new Error('这一条里没有画师');
         for (const img of p.images) {
