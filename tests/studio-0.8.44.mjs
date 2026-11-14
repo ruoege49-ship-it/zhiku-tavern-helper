@@ -23,6 +23,6 @@ const empty=M.emptyData();const dead=M.ensureArtist(empty,'artist:8k');empty.act
 const clean=M.normalizeData(empty);assert.equal(clean.active,null);assert.equal(clean.recent.length,0);assert(!clean.bindings.card);
 let request;
 const result={look:'人物坐在窗边，手里拿着杯子。',people:[{en:'1girl'}],pose:[{en:'sitting'}],composition:[{en:'upper body'}],props:[{en:'holding cup'}],background:[{en:'window'}],nsfw:[]};
-const imagePose=vm.runInNewContext(part('async function imagePose(', 'return { AI_FNS,')+'\nimagePose',{normPairs:a=>a||[],PAIRS:'',pickJson:JSON.parse,askVision:async(...args)=>{request=args;return JSON.stringify(result)}});
+const imagePose=vm.runInNewContext(part('const GESTURE_ZH =', 'return { AI_FNS,')+'\nimagePose',{normPairs:a=>a||[],PAIRS:'',pickJson:JSON.parse,askVision:async(...args)=>{request=args;return JSON.stringify(result)}});
 const parsed=await imagePose('fixture');for(const key of ['look','people','pose','composition','props','background'])assert.deepEqual(JSON.parse(JSON.stringify(parsed[key])),result[key]);assert.equal(request[3].maxTokens,4000);
 console.log('PASS: quality-tag normalization, weighted migration, image/name collision and reference preservation, stable reload, structured pose/props/background/description parsing');

@@ -25,7 +25,7 @@ assert.equal(C.importZhihuijiCharacters({characterPresets:{imported:{nameCN:'Imp
 assert.equal(C.freeChars().find(c=>c.name==='Imported').nsfwBody[0].en,'private_import_fixture');
 // Returned categories are normalized and deduplicated without needing a real image request.
 let result={pose:[{en:'standing'},{en:'nsfw'}],composition:[{en:'close-up'},{en:'nsfw'}],nsfw:[{en:'nsfw'}]};
-const imagePose=vm.runInNewContext(part('async function imagePose(', 'return { AI_FNS,')+'\nimagePose',{normPairs:a=>a||[],PAIRS:'',pickJson:JSON.parse,askVision:async()=>JSON.stringify(result)});
+const imagePose=vm.runInNewContext(part('const GESTURE_ZH =', 'return { AI_FNS,')+'\nimagePose',{normPairs:a=>a||[],PAIRS:'',pickJson:JSON.parse,askVision:async()=>JSON.stringify(result)});
 const pose=await imagePose('fixture');assert.equal(pose.pose.length,1);assert.equal(pose.composition.length,1);assert.equal(pose.nsfw.length,1);
 // A late translation cannot re-label an edited/replaced scene as translated.
 const ui={studio:{scene:'原文',sceneEn:'',sceneSrc:''}};let resolve;
