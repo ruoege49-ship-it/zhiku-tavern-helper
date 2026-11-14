@@ -43,3 +43,9 @@ calls.length=0;responses=[reject(504,'context timeout')];await assert.rejects(()
 data.options.aiMaxTokens='2048';calls.length=0;responses=[reject(400,'max_tokens must be <= 1024')];await assert.rejects(()=>T.askLLM('task','input',{maxTokens:32000}));assert.deepEqual(calls.map(c=>c.body.max_tokens),[2048]);
 data.options.aiMaxTokens='';calls.length=0;responses=[];await T.askLLM('task','input',{maxTokens:32000});assert.equal(calls[0].body.max_tokens,32000);
 console.log('PASS: initial 16000 budget across host/direct/proxy text and vision, larger budget preservation, bounded explicit rejection fallback, no empty/network/server/abort retries and context-only shrinking.');
+// A reported zero-output stop is distinct from token exhaustion; absent usage is not zero.
+for (const completion_tokens of [0, null]) {
+ calls.length=0;responses=[{status:200,json:{choices:[{message:{content:''},finish_reason:'stop'}],usage:{completion_tokens}}}];
+ await assert.rejects(()=>T.askLLM('task','input'),e=>completion_tokens===0 ? e.silentEmpty===true && !e.emptyLength : e.emptyLength===true && !e.silentEmpty);
+ assert.equal(calls.length,1);
+}

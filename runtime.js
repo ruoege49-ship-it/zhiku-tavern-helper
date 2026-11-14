@@ -1688,7 +1688,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.60（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.61（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1737,7 +1737,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.60';
+globalThis.__PC_VERSION = '0.8.61';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -4538,6 +4538,7 @@ function isBlockedReply(out) {
     return blockedResponse(json) || BLOCKED.test(reason) || (t.indexOf('{') < 0 && BLOCKED.test(t));
 }
 function isBlockedFailure(error) {
+    if (error?.silentEmpty) return false;
     if (error?.name === 'AbortError' || error?.name === 'TypeError' || error?.emptyLength) return false;
     if (error?.status && ![400,403,422].includes(error.status)) return false;
     return isBlockedReply(error?.providerMessage || error?.message || error);
@@ -4566,6 +4567,7 @@ async function retryIfBlocked(system, run, opts = {}) {
 async function askLLM(system, user, opts = {}) {
     try { return await retryIfBlocked(system, s => withTokenFallback(o => askLLMOnce(s, user, o), opts), opts); }
     catch (e) {
+        if (e.silentEmpty) throw Object.assign(new Error(`AI 一个字都没回就结束了（${e.diag || '没有更多信息'}）。接口报告正常结束且输出为 0 token，目前无法确定原因。请查看模型服务或中转站日志；这次不自动增大回复长度或重试`), { diag: e.diag, silentEmpty: true });
         if (e.emptyLength) throw Object.assign(new Error(`AI 回复是空的（${e.diag || '没有更多信息'}）。带思考的模型会先把长度用在思考上：到设置 → 翻译和 AI 把「回复长度上限」调大，或者换不带思考的模型`), { emptyLength: true, diag: e.diag });
         throw e;
     }
@@ -4626,6 +4628,8 @@ async function askLLMOnce(system, user, { maxTokens = 800, fn = '' } = {}) {
     // 正文是空的：把 API 实际返回的情况记下来，报错时给用户看，不靠猜
     const u = json.usage || {}, rt = u.completion_tokens_details?.reasoning_tokens;
     const diag = `模型 ${json.model || api.model || '?'}，结束原因 ${ch.finish_reason || '没给'}，这次限长 ${maxTokens}，用了 ${u.completion_tokens ?? '?'} token${rt !== undefined ? `（其中思考 ${rt}）` : think ? `（有 ${think.length} 字思考内容）` : ''}${!json.choices?.length ? '，返回里没有 choices：' + raw.slice(0, 80) : ''}`;
+    const silent = !think && ch.finish_reason === 'stop' && u.completion_tokens != null && Number(u.completion_tokens) === 0;
+    if (silent) throw Object.assign(new Error('AI 回复是空的（' + diag + '）'), { silentEmpty: true, diag });
     throw Object.assign(new Error('AI 回复是空的（' + diag + '）'), { emptyLength: true, diag });
 }
 
@@ -5167,6 +5171,33 @@ ${list('构图', first.composition)}
 }
 
 /** 看图只读姿势和构图（带中文） */
+/** 想法 → 姿势构图标签。round 是第几版，越往后越换思路 */
+async function ideaPose(idea, { round = 1, prev = '' } = {}) {
+    const text = String(idea || '').trim();
+    if (!text) throw new Error('先写一句想法');
+    const sys = `你是很会构图的插画分镜师。用户随便写了一个画面想法，你把它扩写成一张「让人想多看两眼」的画，再拆成 NovelAI / Danbooru 标签。
+先想清楚再写：
+1. idea：一句中文定下这张图的亮点。一定要有一个让画面不普通的点——特别的机位（仰拍、俯拍、鱼眼、倒过来、透过东西看）、人物之间或和镜头的互动（伸手向镜头、画外伸进来的手）、有意思的前景遮挡、强烈的光影（逆光、窗格光影、霓虹、烛光）、画中画（镜子、手机屏幕、玻璃倒影）、大小反差、动作瞬间（风吹起头发、回头、奔跑）。用户写了的就照着来，没写到的你来补，但别偏离用户的想法。
+2. look：80 到 150 字中文，像分镜一样写这张画：人在画面哪里、身体怎么摆、两只手各在干什么、看哪里、什么表情，镜头从哪拍、拍到哪，前景、中景、背景各有什么，光从哪来、什么颜色、什么氛围。
+3. 标签，合计 45 到 70 个，写细写具体，不要空泛的词：
+- people：人数和性别（1girl、1boy、2girls、1boy 1girl 等）。用户没说就按想法判断，不能空。
+- concept：这张图的特色构图标签（就是 idea 拆出来的）。
+- pose：动作、姿势、手（每只手分别在干什么）、视线、表情、头的角度，至少 12 个。
+- composition：景别（close-up、upper body、cowboy shot、full body…）、机位和角度、构图方式、景深、焦点、画面倾斜，至少 6 个。
+- props：画里的物件、拿着的东西、前景里的东西。
+- background：地点、时间、天气、光线、颜色、氛围、特效（光斑、粒子、雨、花瓣…），至少 10 个。
+不要写画师、画质词（masterpiece 之类），不要写发色、瞳色、发型、身材这类角色外貌（那是角色卡管的），用户在想法里写明了的才写。衣服只在用户提到时写。
+${round > 1 ? `这是第 ${round} 版：换一个完全不同的切入角度和亮点（换机位、换光、换互动方式），别和上一版重复。${prev ? '上一版的亮点是：' + prev : ''}` : ''}
+${PAIRS}
+只输出 JSON：{"idea": "一句话", "look": "中文分镜描述", "people": [...], "concept": [...], "pose": [...], "composition": [...], "props": [...], "background": [...]}`;
+    const j = pickJson(await askLLM(sys, '我的想法：' + text, { maxTokens: 4000, fn: 'tr' }));
+    const out = { people: normPairs(j.people), concept: normPairs(j.concept), pose: normPairs(j.pose), composition: normPairs(j.composition), props: normPairs(j.props), background: normPairs(j.background), nsfw: [], idea: String(j.idea || '').trim(), look: String(j.look || '').trim() };
+    // 同一个标签只留第一次出现的那组
+    const seen = new Set();
+    for (const k of ['people', 'concept', 'pose', 'composition', 'props', 'background']) out[k] = out[k].filter(p => { const key = p.en.replace(/_/g, ' ').trim().toLowerCase(); if (seen.has(key)) return false; seen.add(key); return true; });
+    if (!seen.size) throw new Error('AI 没写出标签，换个说法再试，或者到设置里看看「中文转标签」用的 AI');
+    return out;
+}
 async function imagePose(imageDataUrl) {
     const sys = `你是给 NovelAI / Danbooru 反推提示词的标注员。目标：用你写的标签重新生成，能得到「人摆放位置、姿势、镜头、构图、背景布局」和原图几乎一样的画面。宁可多写不要少写，每个看得到的细节都写成标签。
 先在 look 里用中文说这张图特别在哪（创意、梗、和普通构图不一样的地方），再把画面从上到下、从左到右仔细描述一遍（人在画面哪个位置、身体每一部分怎么摆、镜头从哪拍、背景有什么、东西放在哪），再照着描述写标签。
@@ -5238,7 +5269,7 @@ ${PAIRS}
     } catch (e) { if (e?.name === 'AbortError') throw e; console.warn('[智库] 构图复核没成功，用第一遍的结果', e); }
     return { people, concept, idea, pose, composition, props, background, nsfw, look: lookOut };
 }
-return { AI_FNS, stopFetch, extractCastFromChat, identifyCanon, apiFor, aiSeen, aiCfg, splitFormat, stToEntries, tavernPresets, entriesFor, currentTavernPreset, imagePose, imageToPrompt, zhForTags, extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
+return { AI_FNS, ideaPose, stopFetch, extractCastFromChat, identifyCanon, apiFor, aiSeen, aiCfg, splitFormat, stToEntries, tavernPresets, entriesFor, currentTavernPreset, imagePose, imageToPrompt, zhForTags, extractCast, hasChinese, apiProfiles, activeApiId, currentApi, askLLM, translateToTags, pickJson, extractAppearance, textToPairs, sceneFromChat, listModels, designOutfit, outfitFromStory, designOutfitsFromChat, askVision, outfitFromImage, lookFromImage, outfitFromText };
 })();
 
 // ───── chars.js ─────
@@ -6552,6 +6583,8 @@ function loadStudio() {
     st.scene = saved.scene || '';
     st.sceneOn = saved.sceneOn !== false;
     st.sceneEn = saved.sceneEn || '';
+    st.sceneNeg = saved.sceneNeg || '';
+    st.sceneFrom = saved.sceneFrom || '';
     st.sceneSrc = saved.sceneSrc || '';
     st.sceneExpand = !!saved.sceneExpand;
     st.cast = Array.isArray(saved.cast) ? saved.cast : [];
@@ -6564,7 +6597,7 @@ function loadStudio() {
 function saveStudio() {
     const d = getData();
     const st = ui.studio;
-    d.studio = { sourceRef: st.sourceRef || null, pos: st.pos, neg: st.neg, lastExtra: st.lastExtra, lastNeg: st.lastNeg || '', scene: st.scene || '', sceneOn: st.sceneOn !== false, sceneEn: st.sceneEn || '', sceneSrc: st.sceneSrc || '', sceneExpand: !!st.sceneExpand, cast: st.cast || [], castByChat: st.castByChat || {}, castMemo: st.castMemo !== false, scenes: st.scenes || [], recentScenes: st.recentScenes || [] };
+    d.studio = { sourceRef: st.sourceRef || null, pos: st.pos, neg: st.neg, lastExtra: st.lastExtra, lastNeg: st.lastNeg || '', scene: st.scene || '', sceneNeg: st.sceneNeg || '', sceneFrom: st.sceneFrom || '', sceneOn: st.sceneOn !== false, sceneEn: st.sceneEn || '', sceneSrc: st.sceneSrc || '', sceneExpand: !!st.sceneExpand, cast: st.cast || [], castByChat: st.castByChat || {}, castMemo: st.castMemo !== false, scenes: st.scenes || [], recentScenes: st.recentScenes || [] };
     commit({ silent: true });
 }
 function studioSource() {
@@ -6749,9 +6782,9 @@ function openCastPicker() {
 /** 现在的固定提示词 */
 function sceneSnapshot() {
     const st = ui.studio;
-    return { scene: String(st.scene || '').trim(), sceneEn: st.sceneEn || '', sceneSrc: st.sceneSrc || '', at: Date.now() };
+    return { scene: String(st.scene || '').trim(), sceneNeg: String(st.sceneNeg || '').trim(), sceneEn: st.sceneEn || '', sceneSrc: st.sceneSrc || '', at: Date.now() };
 }
-const sceneSig = p => String(p.scene || '').toLowerCase().replace(/[\s，,]+/g, ',');
+const sceneSig = p => String(p.scene || '').toLowerCase().replace(/[\s，,]+/g, ',') + (String(p.sceneNeg || '').trim() ? '|' + String(p.sceneNeg).toLowerCase().replace(/[\s，,]+/g, ',') : '');
 const sceneName = text => String(text || '').split(/[,，\n]/).map(s => s.trim()).filter(s => s && !/quality|masterpiece|highres|absurdres|detailed/i.test(s)).slice(0, 3).join(', ').slice(0, 24);
 function rememberScene(p = sceneSnapshot(), enabled = ui.studio.sceneOn !== false) {
     const st = ui.studio;
@@ -6761,9 +6794,11 @@ function rememberScene(p = sceneSnapshot(), enabled = ui.studio.sceneOn !== fals
     st.recentScenes = [p, ...(st.recentScenes || []).filter(x => sceneSig(x) !== sig)].slice(0, 20);
     saveStudio();
 }
+const sceneEntryId = p => (p.id ||= 'sc' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
 function applyScene(p) {
     const st = ui.studio;
-    st.scene = p.scene || ''; st.sceneEn = p.sceneEn || ''; st.sceneSrc = p.sceneSrc || '';
+    st.sceneFrom = (st.scenes || []).includes(p) ? sceneEntryId(p) : '';
+    st.scene = p.scene || ''; st.sceneNeg = p.sceneNeg || ''; st.sceneEn = p.sceneEn || ''; st.sceneSrc = p.sceneSrc || '';
     st.sceneOn = true;
     saveStudio();
 }
@@ -6814,7 +6849,7 @@ function sceneLibrary() {
 .pc-i2i img{width:84px;max-height:120px;object-fit:cover;border-radius:12px;cursor:zoom-in}
 .pc-i2i input[type=range]{width:100%}
 </style>
-      <div class="pc-actions wrap" style="margin-top:8px"><button class="pc-pill dashed" data-act="scenesave">＋ 存下这段（起个名字）</button><button class="pc-pill dashed" data-act="scenesave" data-ai="1">✦ AI 起名存下</button></div>
+      <div class="pc-actions wrap" style="margin-top:8px">${(() => { const from = (ui.studio.scenes || []).find(x => x.id && x.id === ui.studio.sceneFrom); return from ? `<button class="pc-pill on" data-act="sceneoverwrite">覆盖「${esc(from.name || '没起名')}」</button>` : ''; })()}<button class="pc-pill dashed" data-act="scenesave">＋ 存下这段（起个名字）</button><button class="pc-pill dashed" data-act="scenesave" data-ai="1">✦ AI 起名存下</button></div>
       ${saved.length ? (() => {
         const tagsOf = p => (p.tags ??= sceneAutoTags(p.scene));
         const all = [...new Set(saved.flatMap(tagsOf))];
@@ -6829,7 +6864,8 @@ function sceneLibrary() {
       })() : ''}
       ${recent.length ? `<details class="pc-recent-scenes" ${ui.studio.open.recentScenes ? 'open' : ''} data-fold="recentScenes"><summary>最近用过 ${recent.length} 条（生成时自动记）▸</summary>${recent.map((p, i) => sceneRow(p, i, 'recent')).join('')}<div class="pc-actions" style="margin-top:6px"><button class="pc-pill tiny dashed" data-act="sceneclear">清空最近</button></div></details>` : ''}`;
 }
-function studioParts() { return { pos: ui.studio.pos, neg: ui.studio.neg, scene: sceneTags() }; }
+function sceneNegTags() { const st = ui.studio; return st.sceneOn === false ? '' : String(st.sceneNeg || '').trim(); }
+function studioParts() { return { pos: ui.studio.pos, neg: [ui.studio.neg, sceneNegTags()].filter(x => String(x || '').trim()).join(', '), scene: sceneTags() }; }
 /** 固定提示词（原来在页面下面，挪到正面、负面下面） */
 function sceneFold() {
     const st = ui.studio;
@@ -6837,6 +6873,8 @@ function sceneFold() {
     return fold('scene', named ? `固定提示词 · ${named}` : '固定提示词', st.sceneOn === false ? '不发送' : !String(st.scene || '').trim() ? '跟着发送 · 还没写' : !sceneReady() ? '跟着发送 · 生成时转成标签' : `跟着发送 · ${M.tokenize(sceneTags()).length} 个词`, `
       <label class="pc-switch"><input type="checkbox" data-scene-on ${st.sceneOn !== false ? 'checked' : ''}><span></span>每次生成都带上<small>接在正面提示词后面、质量词前面一起发。不改你的正面提示词，也不进画师串。</small></label>
       <textarea id="pc-scene" class="pc-textarea small" data-bind="studio.scene" placeholder="中文英文都行。比如：坐在窗边喝咖啡，外面下雨 / 1boy, sitting, window, rain">${esc(st.scene || '')}</textarea>
+      <label class="pc-label pc-mt-s">固定负面<span class="pc-dim small"> · 开着时接在负面提示词后面一起发，存下这段时一起存</span></label>
+      <textarea class="pc-textarea small mono" data-bind="studio.sceneNeg" placeholder="英文标签，比如：long neck, wide face, border">${esc(st.sceneNeg || '')}</textarea>
       ${sceneLibrary()}
       <div id="pc-scene-ai" ${sceneZh() ? '' : 'hidden'}>
         <div class="pc-dim small pc-mt-s" id="pc-scene-state">${sceneStateText()}</div>
@@ -7182,7 +7220,7 @@ function viewStudio(d) {
     ${!N.isReady() ? `<section class="pc-card pc-pad pc-warn-card"><b>还没填 NovelAI key</b><div class="pc-hint">填好才能生图。</div><button class="pc-btn dark pc-mt-s" data-act="nav" data-view="settings">去填</button></section>` : ''}
     <section class="pc-card pc-pad ${!N.isReady() ? 'pc-mt' : ''}">
       <div class="pc-row-between"><h2 class="pc-h2" style="margin:0">生成图片</h2>${s.naiMode === 'gpt' ? `<span class="pc-dim small">${esc(modelName)}</span>` : `<select data-st="novelaimode" title="换模型" style="width:auto;max-width:58%;padding:4px 8px;border-radius:999px;border:1.5px dashed var(--pc-dash);background:transparent;color:var(--pc-ink);font:inherit;font-size:13px">${N.MODELS.map(([v, t]) => `<option value="${v}" ${v === s.novelaimode ? 'selected' : ''}>${esc(t)}</option>`).join('')}${N.MODELS.some(m => m[0] === s.novelaimode) ? '' : `<option value="${esc(s.novelaimode)}" selected>${esc(modelName)}</option>`}</select>`}</div>
-      <div class="pc-row-between" style="margin-top:10px"><span class="pc-label" style="margin:0">正面提示词</span><span class="pc-chips" style="margin:0;flex-wrap:wrap;justify-content:flex-end"><label class="pc-pill dashed tiny" style="cursor:pointer">${ui.img2pBusy ? '<span class="pc-busy">看图中</span>' : '看图写提示词'}<input type="file" accept="image/*" data-img2prompt hidden ${ui.img2pBusy ? 'disabled' : ''}></label><label class="pc-pill dashed tiny" style="cursor:pointer">${ui.poseBusy ? '<span class="pc-busy">读姿势中</span>' : '看图读姿势构图'}<input type="file" accept="image/*" data-imgpose hidden ${ui.poseBusy ? 'disabled' : ''}></label></span></div>
+      <div class="pc-row-between" style="margin-top:10px"><span class="pc-label" style="margin:0">正面提示词</span><span class="pc-chips" style="margin:0;flex-wrap:wrap;justify-content:flex-end"><label class="pc-pill dashed tiny" style="cursor:pointer">${ui.img2pBusy ? '<span class="pc-busy">看图中</span>' : '看图写提示词'}<input type="file" accept="image/*" data-img2prompt hidden ${ui.img2pBusy ? 'disabled' : ''}></label><button class="pc-pill dashed tiny" data-act="ideapose" ${ui.ideaBusy ? 'disabled' : ''}>${ui.ideaBusy ? '<span class="pc-busy">构思中</span>' : '✦ 灵感写姿势'}</button><label class="pc-pill dashed tiny" style="cursor:pointer">${ui.poseBusy ? '<span class="pc-busy">读姿势中</span>' : '看图读姿势构图'}<input type="file" accept="image/*" data-imgpose hidden ${ui.poseBusy ? 'disabled' : ''}></label></span></div>
       <div class="pc-artline">
         ${(() => { const cv = owner && M.ticketCover(d, owner); return cv ? `<img class="pc-artcover" src="${esc(imgUrl(cv))}" alt="看例图" data-act="viewticket" data-type="${owner.type}" data-id="${esc(owner.id)}">` : seal(); })()}
         <div class="pc-grow"><b ${owner?.type === 'group' ? 'data-act="studiorename" style="cursor:pointer" title="点一下改名"' : ''}>${owner ? esc(M.ticketName(d, owner)) : (st.pos.trim() ? '这串还没存进画师库' : '还没写')}${owner?.type === 'group' ? ' <span class="pc-dim" style="font-weight:400;font-size:12px">✎ 改名</span>' : ''}</b><small>${[nArtists ? nArtists + ' 位画师' : '没有 artist: 画师', nOther ? nOther + ' 个别的词' : ''].filter(Boolean).join(' · ')}${owner && M.ticketCover(d, owner) ? ' · 点图看大图' : ''}</small></div>
@@ -7619,7 +7657,7 @@ function batchSceneTemplates() {
     const sc = batchSavedScenes().find(p => sceneSig(p) === b.sceneSig);
     const positive = batchScenePrompt(sc);
     if (!positive) return [];
-    const negative = batchSceneNeg(), nsfw = SCENE_NSFW.test([sc.scene, positive].join(', '));
+    const negative = [batchSceneNeg(), String(sc.sceneNeg || '').trim()].filter(Boolean).join(', '), nsfw = SCENE_NSFW.test([sc.scene, positive].join(', '));
     const shots = b.shot === 'all' ? Object.keys(M.SHOTS) : [b.shot in M.SHOTS ? b.shot : 'bust'];
     return shots.map(sh => {
         const { width, height } = M.SHOTS[sh];
@@ -8085,10 +8123,9 @@ function viewWardrobe(d) {
     return `${castTop()}
     <div class="pc-outmake">
       <label class="pc-btn dark">${IMG_ICON} 图片<input type="file" accept="image/*" multiple data-wardimg hidden></label>
-      <button class="pc-btn" data-act="wardai">✦ AI 设计</button>
       <button class="pc-btn" data-act="wardnew">＋ 自己写</button>
     </div>
-    ${WARD2_CSS}<div class="pc-outmake2"><button class="pc-btn" data-act="wardcombine">⊕ 配饰搭配</button><button class="pc-pill dashed tiny" data-act="omimport">从穿搭管理器导入</button></div>
+    ${WARD2_CSS}<div class="pc-chips wrap" style="margin-top:8px"><button class="pc-pill dashed tiny" data-act="wardai">✦ AI 设计</button><button class="pc-pill dashed tiny" data-act="wardcombine">⊕ 配饰搭配</button><button class="pc-pill dashed tiny" data-act="omimport">从穿搭管理器导入</button></div>
     ${ui.wardBatch ? `<div class="pc-castmode pc-mt-s">批量导入 ${ui.wardBatch.done} / ${ui.wardBatch.total} · 已存 ${ui.wardBatch.saved} 套${ui.wardBatch.skipped ? ' · ' + ui.wardBatch.skipped + ' 张读取失败' : ''}${ui.wardBatch.fail ? `（${ui.wardBatch.fail} 张没读出标签，存了图，打开改一下）` : ''}… <button class="pc-pill tiny dashed" data-act="wardbatchstop">${ui.wardBatch.stop ? '当前张处理完就停' : '停'}</button></div>` : '<div class="pc-dim small pc-mt-s">「图片」可以一次选好几张，每张存成一套。</div>'}
     <label class="pc-search pc-mt-s"><span class="pc-sr">搜索</span>${ICON.search}<input data-bind="wardSearch" value="${esc(ui.wardSearch)}" placeholder="搜衣服名、标签"></label>
     <div class="pc-chips">${[['all', '全部'], ...owners.map(c => [c.key, c.name]), ['none', '没给谁穿']].map(([k, t]) => `<button class="pc-pill ${ui.wardFilter === k ? 'on' : 'dashed'}" data-act="wardfilter" data-v="${esc(k)}">${esc(t)}</button>`).join('')}</div>
@@ -8157,6 +8194,8 @@ function viewOutfit(d) {
     <section class="pc-card pc-pad pc-mt">
       <div class="pc-row-between"><b>${o.tags.length ? `${o.tags.length} 件` : '还没有标签'}</b>${o.tags.length ? `<button class="pc-pill dashed tiny" data-act="copytext" data-text="${esc(C.tagText(o.tags))}">复制整套</button>` : ''}</div>
       ${outfitSections(o.tags, 'ward', { busy: u.busy === 'add', busyKey: u.addKey })}
+      <div class="pc-chips wrap pc-mt-s"><label class="pc-pill dashed tiny" style="cursor:pointer">${u.busy === 'mix' ? `<span class="pc-busy">看图中 ${u.mixDone || 0}/${u.mixTotal || 0}</span>` : '📷 从图片读，加进这套'}<input type="file" accept="image/*" multiple data-outadd hidden ${u.busy ? 'disabled' : ''}></label></div>
+      <div class="pc-dim small">可以一次选好几张拼成一套：比如上衣一张、裤子一张、鞋一张。读到的加在现有标签后面，不要的点 × 删掉。</div>
     </section>
     <section class="pc-card pc-pad pc-mt">
       <b>${u.draft ? '存到哪里' : holders.length ? '谁在穿' : '给谁穿'}</b>
@@ -8296,11 +8335,12 @@ function viewCharEdit(d) {
     <div class="pc-dhead"><button class="pc-round" data-act="nav" data-view="cast" aria-label="返回">‹</button>${av(c, 'pc-av big')}
       <div class="pc-grow"><h2 class="pc-dtitle">${esc(c.name)}</h2><div class="pc-tip" style="margin:0">${c.kind === 'user' ? '我的人设（user）' : c.kind === 'free' ? '存下的角色（没绑定角色卡）' : '角色卡（char）'}${c.kind === 'side' ? ' · 卡里的配角' : ''}</div></div></div>
     ${c.kind === 'free' ? `<div class="pc-chips wrap"><button class="pc-pill ${castRow ? 'on' : 'dashed'}" data-act="freecast">${castRow ? '✓ 在这次聊天里' : '＋ 加到这次聊天'}</button><button class="pc-pill dashed" data-act="copylook">套用到角色卡…</button><button class="pc-pill dashed" data-act="renamefree">改名</button></div>` : ''}
-    ${c.kind !== 'free' && (family.length > 1 || c.kind !== 'user') ? `<div class="pc-chips">${family.map(f => `<button class="pc-pill ${f.key === c.key ? 'on' : 'dashed'}" data-act="openchar" data-key="${esc(f.key)}">${esc(f.name)}${f.kind === 'side' ? '（配角）' : ''}</button>`).join('')}${card ? '<button class="pc-pill dashed" data-act="addside">＋ 配角</button>' : ''}</div>` : ''}
+    ${c.kind !== 'free' && (family.length > 1 || c.kind !== 'user') ? `<div class="pc-chips">${family.map(f => `<button class="pc-pill ${f.key === c.key ? 'on' : 'dashed'}" data-act="openchar" data-key="${esc(f.key)}">${esc(f.name)}${f.kind === 'side' ? '（配角）' : ''}</button>${f.kind === 'side' ? `<button class="pc-x" data-act="delsidekey" data-key="${esc(f.key)}" aria-label="删掉配角${esc(f.name)}" title="删掉这个配角" style="margin:0 6px 0 -4px">×</button>` : ''}`).join('')}${card ? '<button class="pc-pill dashed" data-act="addside">＋ 配角</button>' : ''}</div>` : ''}
 
     <section class="pc-card pc-pad pc-mt">
       <div class="pc-row-between"><b>固定外貌</b><span class="pc-chips" style="margin:0">${c.kind !== 'free' ? `<button class="pc-pill dashed tiny" data-act="readcard" ${busy ? 'disabled' : ''}>${busy === 'read' ? '读取中…' : c.kind === 'user' ? '从人设读' : c.kind === 'side' ? '从卡和世界书读' : '从角色卡读'}</button>` : ''}<label class="pc-pill dashed tiny">${busy === 'look' ? '<span class="pc-busy">看图中</span>' : '从图片读'}<input type="file" accept="image/*" data-lookimg hidden></label></span></div>
       <div class="pc-dim small">头发、眼睛、脸、身材这类不会变的。第一个写 1boy 或 1girl。点标签可以改，× 删掉。</div>
+      ${c.kind !== 'free' ? `<details class="pc-fold pc-mt-s" data-cfold="readnote" ${c.readNote || ui.readNoteOpen ? 'open' : ''}><summary><b>读之前补几句</b><i>${c.readNote ? '读的时候会带上' : c.kind === 'user' ? '人设写得少就在这补' : '卡里写得少就在这补'}</i></summary><div class="pc-fold-in"><textarea class="pc-textarea small" data-readnote placeholder="比如：黑色长直发，左眼下有泪痣，185cm，身材偏瘦，总戴银框眼镜">${esc(c.readNote || '')}</textarea><div class="pc-dim small">写完点上面的「${c.kind === 'user' ? '从人设读' : c.kind === 'side' ? '从卡和世界书读' : '从角色卡读'}」，AI 会把这段和${c.kind === 'user' ? '人设' : '卡'}里的设定一起读。只想直接加几个标签，用下面「自己加」那一栏。</div></div></details>` : ''}
       ${c.kind === 'char' || c.kind === 'side' ? `<button class="pc-pill dashed tiny pc-mt-s" data-act="readcast" ${busy ? 'disabled' : ''}>${busy === 'cast' ? '<span class="pc-busy">读取中</span>' : '读出这张卡里所有人（含世界书）'}</button><button class="pc-pill dashed tiny pc-mt-s" style="margin-left:6px" data-act="readchatcast" ${busy ? 'disabled' : ''}>${busy === 'chatcast' ? '<span class="pc-busy">读取中</span>' : '从聊天正文读出人物（最近 40 楼）'}</button>` : ''}
       <label class="pc-field pc-mt-s"><span>别名（逗号隔开）· 图片角色标记可使用名字或别名</span><input data-charalias value="${esc(c.aliases || '')}" placeholder="比如 小秋，秋秋"></label>
       <label class="pc-switch pc-mt-s"><input type="checkbox" data-charcanon ${c.canonOn ? 'checked' : ''}><span></span>同人角色：直接写原作角色名<small>原作里有的角色，写 danbooru 上的角色名，NovelAI 认得就会照原作的长相画。打开后外貌只发性别词 + 角色名，衣服照常。</small></label>
@@ -8328,6 +8368,7 @@ function viewCharEdit(d) {
       <div class="pc-chips wrap">${c.outfits.map(o => `<button class="pc-pill ${o.id === out?.id ? 'on' : 'dashed'}" data-act="pickout" data-id="${o.id}">${esc(o.name)}</button>`).join('') || '<span class="pc-dim small">还没有衣服</span>'}</div>
       <div class="pc-outmake">
         <button class="pc-btn" data-act="newout">＋ 自己写一套</button>
+        <button class="pc-btn" data-act="outfrompick">👕 从衣柜拿</button>
         <button class="pc-btn" data-act="aiout" ${busy ? 'disabled' : ''}>${busy === 'aiout' ? '<span class="pc-busy">AI 设计中</span>' : '✦ 让 AI 设计一套'}</button>
         ${c.kind !== 'user' ? `<button class="pc-btn" data-act="storyout" ${busy ? 'disabled' : ''}>${busy === 'storyout' ? '<span class="pc-busy">读剧情中</span>' : '从剧情里读现在穿的'}</button>` : ''}
       </div>
@@ -8603,7 +8644,10 @@ async function charAction(act, el) {
         }
         case 'readcard': {
             ui.charBusy = 'read'; render();
-            const desc = await C.descOfFull(c).catch(() => '');
+            const readNote = String(root.querySelector('[data-readnote]')?.value ?? c.readNote ?? '').trim();
+            if (readNote !== String(c.readNote || '')) { c.readNote = readNote; save(); }
+            const descRaw = await C.descOfFull(c).catch(() => '');
+            const desc = readNote ? [descRaw, `【用户补充的外貌设定，以这段为准】\n${readNote}`].filter(x => String(x).trim()).join('\n\n') : descRaw;
             ui.charBusy = ''; render();
             if (!desc.trim()) { toastr.warning(c.kind === 'side' ? `卡和世界书里都没提到「${c.name}」，可以在下面手动填外貌` : '描述、性格、场景、世界书里都没找到设定，可以在下面手动填外貌', '角色', { timeOut: 6000 }); return true; }
             if (c.appearance.length && !(await confirmBox('用读到的外貌替换现在的？', { ok: '替换', cancel: '算了' }))) return true;
@@ -8707,6 +8751,40 @@ async function charAction(act, el) {
             ui.charBusy = ''; render();
             return true;
         }
+        case 'outfrompick': {
+            if (!c) return true;
+            const key = c.key;
+            const box = modal(`<h3 class="pc-h3">给${esc(c.name)}从衣柜拿衣服</h3>
+              <label class="pc-search"><span class="pc-sr">搜衣服</span>${ICON.search}<input data-pq placeholder="搜衣服名、标签"></label>
+              <div data-plist style="max-height:52vh;overflow:auto;margin-top:8px"></div>
+              <div class="pc-dim small" data-pnote style="margin-top:6px"></div>
+              <div class="pc-actions"><button class="pc-btn dark" data-px="ok">好了</button></div>`);
+            const got = [];
+            const draw = () => {
+                const me = C.getChar(key); if (!me) { box.closeModal(); return; }
+                const q = String(box.querySelector('[data-pq]').value || '').trim().toLowerCase();
+                const groups = C.wardrobeGroups().filter(g => !g.holders.some(h => h.owner?.key === key))
+                    .filter(g => !q || (g.o.name + ' ' + C.tagText(g.o.tags) + ' ' + g.o.tags.map(t => t.zh || '').join(' ')).toLowerCase().includes(q));
+                const who = g => { const n = [...new Set(g.holders.map(h => h.owner?.name).filter(Boolean))]; return n.length ? n.join('、') + ' 在穿' : '没给谁穿'; };
+                box.querySelector('[data-plist]').innerHTML = groups.map((g, i) => `<button class="pc-promptrow" data-pi="${i}" style="width:100%;text-align:left;cursor:pointer;background:none;border:0;border-bottom:1px dashed var(--pc-dash);padding:8px 2px">
+                    <div class="pc-grow"><b>${esc(g.o.name || '没起名')}</b> <small class="pc-dim">${esc(who(g))}</small><small class="mono" style="display:block">${esc(C.tagText(g.o.tags.slice(0, 8)))}${g.o.tags.length > 8 ? ' …' : ''}</small></div></button>`).join('') || '<div class="pc-dim small">衣柜里没有别的衣服了</div>';
+                box.querySelector('[data-pnote]').textContent = got.length ? `拿了：${got.join('、')}` : '点一套就给' + me.name + '，可以连着点好几套';
+                draw.groups = groups;
+            };
+            box.addEventListener('input', ev => { if (ev.target.matches('[data-pq]')) draw(); });
+            box.addEventListener('click', ev => {
+                if (ev.target.closest('[data-px="ok"]')) { box.closeModal(); render(); return; }
+                const b = ev.target.closest('[data-pi]'); if (!b) return;
+                const g = draw.groups?.[Number(b.dataset.pi)], me = C.getChar(key); if (!g || !me) return;
+                const src = g.holders.find(h => h.owner) || g.holders[0];
+                const o = C.giveOutfit(src.owner?.key || '', src.o.id, key, { wear: me.outfitMode === 'fixed' });
+                if (o) got.push(o.name || '没起名');
+                draw();
+            });
+            box.parentElement?.addEventListener('click', ev => { if (ev.target === box.parentElement) render(); });
+            draw();
+            return true;
+        }
         case 'newout': {
             // 一步建好：整套粘进去，名字可以不填（默认「第 N 套」）
             let n = c.outfits.length + 1;
@@ -8754,7 +8832,22 @@ async function charAction(act, el) {
         }
         case 'delside': {
             if (!(await confirmBox(`删除「${c.name}」？`))) return true;
-            C.deleteChar(c.key); ui.view = 'cast'; render();
+            const home = c.kind === 'side' && c.card && C.getChar('char:' + c.card) ? 'char:' + c.card : '';
+            C.deleteChar(c.key);
+            // 配角删完回到主角这页，接着删下一个；没有主角页才回角色列表
+            if (home) { ui.charKey = home; ui.view = 'charedit'; toastr.info(`删掉了「${c.name}」`, '角色', { timeOut: 1500 }); } else ui.view = 'cast';
+            render();
+            return true;
+        }
+        case 'delsidekey': {
+            const s2 = C.getChar(el.dataset.key);
+            if (!s2 || s2.kind !== 'side') return true;
+            if (!(await confirmBox(`删除配角「${s2.name}」？`, { ok: '删除', cancel: '算了' }))) return true;
+            const home = s2.card && C.getChar('char:' + s2.card) ? 'char:' + s2.card : '';
+            C.deleteChar(s2.key);
+            if (ui.charKey === s2.key) { if (home) ui.charKey = home; else ui.view = 'cast'; }
+            toastr.info(`删掉了「${s2.name}」`, '角色', { timeOut: 1500 });
+            render();
             return true;
         }
         case 'chartestopt': ui[{ rating: 'charTestRating', shot: 'charTestShot', bg: 'charTestBg' }[el.dataset.k]] = el.dataset.v; render(); return true;
@@ -9219,7 +9312,8 @@ function viewLobby(d) {
     </div>
     <div class="pc-chips"><span class="pc-lbf-k">裸体</span>${[['sfw', '不看'], ['male', '只看男性的'], ['female', '只看女性的'], ['all', '男女都看']].map(([k, t]) => `<button class="pc-pill ${k !== 'sfw' ? 'nsfw' : ''} ${nm === k ? 'on' : 'dashed'}" data-act="lobbynsfw" data-v="${k}" title="只管共享里别人的图，你自己的例图一直显示">${t}</button>`).join('')}<button class="pc-pill ${d.options.lobbyR18g ? 'nsfw on' : 'blocked'}" data-act="lobbyr18g" title="猎奇、血腥">${d.options.lobbyR18g ? 'R18G' : '⊘ R18G'}</button></div>
     <div class="pc-chips"><span class="pc-lbf-k">标签</span>${AUD.map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag === t ? 'on' : 'dashed'}" data-act="lobbyaud" data-tag="${t}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${t}</button>`).join('')}${tags.slice(0, 24).map(t => `<button class="pc-pill ${blocked.has(t) ? 'blocked' : lb.tag2 === t ? 'on' : 'dashed'}" data-act="lobbytag2" data-tag="${esc(t)}" data-lp="ltag">${blocked.has(t) ? '⊘ ' : ''}${esc(t)}</button>`).join('')}</div>
-    <div class="pc-tip">点标签 = 只看这类　长按标签或分享 = 屏蔽</div>
+    <div class="pc-tip">点标签 = 只看这类　长按标签或分享 = 屏蔽（自己的 = 修改）　多张图点图片换下一张</div>
+    <style>#pc-root [data-lp],#pc-root .pc-lobby-card,#pc-root .pc-lbf{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}#pc-root .pc-imgno{position:absolute;right:6px;bottom:6px;font-style:normal;font-size:10px;padding:0 6px;border-radius:999px;background:rgba(244,239,228,.9);color:var(--pc-ink)}</style>
     </div>
     <style>.pc-lbf .pc-chips{gap:6px;margin:6px 0}.pc-lbf .pc-pill{font-size:13px;padding:4px 11px;min-height:0;line-height:1.5}.pc-lbf-k{align-self:center;font-size:15px;font-weight:600;margin-right:4px;white-space:nowrap}.pc-lbf .pc-tip{font-size:12px;margin:2px 0 6px}</style>
     <div class="pc-sort"><button class="${lb.sort === 'new' ? 'on' : ''}" data-act="lobbysort" data-sort="new">最新</button><button class="${lb.sort === 'hot' ? 'on' : ''}" data-act="lobbysort" data-sort="hot">最多人保存</button><button data-act="lobbyrefresh">刷新</button></div>
@@ -9233,11 +9327,12 @@ function viewLobby(d) {
 
 const lobbyRevealed = new Set();
 const lobbySpoiled = p => !p.mine && (p.tags || []).includes('剧透') && !lobbyRevealed.has(p.id);
+const lobbyImgIdx = p => { const n = (p.images || []).length; return n ? (((ui.lobbyImg ||= {})[p.id] || 0) % n + n) % n : 0; };
 function lobbyGridCard(p) {
-    const img = p.images[0];
+    const img = p.images[lobbyImgIdx(p)];
     const banned = p.content?.artistString && M.bannedIn(getData(), p.content.artistString).length;
-    return `<article class="pc-ticket ${p.copied ? 'saved' : ''} ${banned ? 'banned' : ''}" data-act="lobbyopen" data-id="${p.id}" ${p.mine ? '' : 'data-lp="lpost"'}>${banned ? '<span class="pc-banbadge">含黑名单画师</span>' : ''}
-      <div class="pc-ticket-img ${lobbySpoiled(p) ? 'pc-spoiler' : ''}">${img ? `<img src="${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">` : '<span>无图</span>'}${lobbySpoiled(p) ? `<button class="pc-spoil-btn" data-act="lobbyreveal" data-id="${p.id}">剧透 · 点一下看</button>` : ''}</div>
+    return `<article class="pc-ticket ${p.copied ? 'saved' : ''} ${banned ? 'banned' : ''}" data-act="lobbyopen" data-id="${p.id}" data-lp="lpost">${banned ? '<span class="pc-banbadge">含黑名单画师</span>' : ''}
+      <div class="pc-ticket-img ${lobbySpoiled(p) ? 'pc-spoiler' : ''}" ${p.images.length > 1 && !lobbySpoiled(p) ? `data-act="lobbyimgnext" data-id="${p.id}"` : ''} style="position:relative">${img ? `<img src="${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">` : '<span>无图</span>'}${lobbySpoiled(p) ? `<button class="pc-spoil-btn" data-act="lobbyreveal" data-id="${p.id}">剧透 · 点一下看</button>` : ''}${p.images.length > 1 ? `<em class="pc-imgno">${lobbyImgIdx(p) + 1}/${p.images.length}</em>` : ''}</div>
       <span class="pc-kind">${KIND_NAME[p.kind] || p.kind}</span>
       <button class="pc-use ${p.copied ? 'on dark' : ''}" data-act="lobbycopy" data-id="${p.id}" aria-label="保存">${p.copied ? SYM.check : SYM.down}</button>
       <div class="pc-ticket-text"><b>${esc(p.name)}</b><div class="pc-row-between pc-meta"><span>${esc(p.nickname)}</span><span>♡ ${p.likes} · ${p.copies} 存</span></div></div>
@@ -9360,8 +9455,15 @@ function openLobbySheet(p) {
 
 async function lobbyPostMenu(id) {
     const p = (ui.lobby.items || []).find(x => String(x.id) === String(id));
-    if (!p || p.mine) return;
+    if (!p) return;
     buzz();
+    if (p.mine) {
+        const k = await chooseBox(`「${p.name}」`, ['修改', '删除']);
+        if (k == null || k < 0) return;
+        const b = DOC.createElement('button'); b.dataset.act = k === 0 ? 'lobbyedit' : 'lobbydel'; b.dataset.id = p.id;
+        await onClick({ target: b, preventDefault() {}, stopPropagation() {} }, true);
+        return;
+    }
     const tags = (p.tags || []).filter(t => t !== 'NSFW');
     const i = await chooseBox(`「${p.name}」`, ['不看这条', `屏蔽「${p.nickname}」分享的全部`, ...tags.map(t => `屏蔽标签「${t}」`)]);
     if (i == null || i < 0) return;
@@ -9383,9 +9485,9 @@ function toggleBlockTag(tag) {
 }
 
 function lobbyCard(p) {
-    const img = p.images[0];
-    return `<article class="pc-lobby-card" ${p.mine ? '' : `data-lp="lpost" data-id="${p.id}"`}>
-      <div class="pc-lobby-img ${lobbySpoiled(p) ? 'pc-spoiler' : ''}" ${img && !lobbySpoiled(p) ? `data-act="viewimg" data-src="${esc(L.lobbyImgUrl(img.url))}"` : ''}>${img ? `<img src="${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">` : '<span>无图</span>'}${lobbySpoiled(p) ? `<button class="pc-spoil-btn" data-act="lobbyreveal" data-id="${p.id}">剧透 · 点一下看</button>` : ''}${p.images.length > 1 ? `<em>+${p.images.length - 1}</em>` : ''}</div>
+    const img = p.images[lobbyImgIdx(p)];
+    return `<article class="pc-lobby-card" data-lp="lpost" data-id="${p.id}">
+      <div class="pc-lobby-img ${lobbySpoiled(p) ? 'pc-spoiler' : ''}" ${img && !lobbySpoiled(p) ? (p.images.length > 1 ? `data-act="lobbyimgnext" data-id="${p.id}"` : `data-act="viewimg" data-src="${esc(L.lobbyImgUrl(img.url))}"`) : ''}>${img ? `<img src="${esc(L.lobbyImgUrl(img.url))}" loading="lazy" alt="">` : '<span>无图</span>'}${lobbySpoiled(p) ? `<button class="pc-spoil-btn" data-act="lobbyreveal" data-id="${p.id}">剧透 · 点一下看</button>` : ''}${p.images.length > 1 ? `<em>${lobbyImgIdx(p) + 1}/${p.images.length}</em>` : ''}</div>
       <div class="pc-lobby-text">
         <div class="pc-row-between"><span class="pc-label">${esc(p.nickname)} · ${KIND_NAME[p.kind] || p.kind}</span>
           ${p.mine ? `<button class="pc-icon-btn small" data-act="lobbydel" data-id="${p.id}" aria-label="删除我分享的">×</button>` : `<button class="pc-icon-btn small" data-act="lobbyreport" data-id="${p.id}" aria-label="举报">${ICON.flag}</button>`}</div>
@@ -10027,10 +10129,24 @@ async function onClick(ev, outside = false) {
                 const name = await promptText(el.dataset.ai ? '给这段固定提示词起个名字（AI 起的，可以改）' : '给这段固定提示词起个名字', guess);
                 if (name == null || !current()) { render(); break; }
                 if ((ui.studio.scenes || []).some(x => sceneSig(x) === sceneSig(p))) { render(); break; }
-                ui.studio.scenes = [{ ...p, name: name.trim() || '没起名' }, ...(ui.studio.scenes || [])];
+                const fresh = { ...p, name: name.trim() || '没起名' }; ui.studio.sceneFrom = sceneEntryId(fresh);
+                ui.studio.scenes = [fresh, ...(ui.studio.scenes || [])];
                 ui.studio.recentScenes = (ui.studio.recentScenes || []).filter(x => sceneSig(x) !== sceneSig(p));
                 ui.studio.open.savedScenes = true;
                 saveStudio(); toastr.success(`存好了：「${name.trim() || '没起名'}」`, '固定提示词', { timeOut: 2000 }); render(); break;
+            }
+            case 'sceneoverwrite': {
+                const st = ui.studio, from = (st.scenes || []).find(x => x.id && x.id === st.sceneFrom);
+                if (!from) { toastr.info('原来那条已经删了，点「存下这段」另存一条', '固定提示词'); st.sceneFrom = ''; render(); break; }
+                const p = sceneSnapshot();
+                if (!p.scene) { toastr.info('固定提示词是空的，不能覆盖', '固定提示词'); break; }
+                if (sceneSig(p) === sceneSig(from) && (p.sceneEn || '') === (from.sceneEn || '')) { toastr.info('和「' + (from.name || '没起名') + '」一样，没改过', '固定提示词', { timeOut: 1500 }); break; }
+                const dup = st.scenes.find(x => x !== from && sceneSig(x) === sceneSig(p));
+                if (!(await confirmBox(`用框里现在的内容覆盖「${from.name || '没起名'}」？名字和标签不变。${dup ? `（「${dup.name || '没起名'}」和改完的一模一样）` : ''}`, { ok: '覆盖', cancel: '算了' }))) break;
+                if (!st.scenes.includes(from)) break;
+                Object.assign(from, { scene: p.scene, sceneNeg: p.sceneNeg, sceneEn: p.sceneEn, sceneSrc: p.sceneSrc, at: Date.now() });
+                st.recentScenes = (st.recentScenes || []).filter(x => sceneSig(x) !== sceneSig(p));
+                saveStudio(); toastr.success(`覆盖好了：「${from.name || '没起名'}」`, '固定提示词', { timeOut: 1800 }); render(); break;
             }
             case 'sceneuse': {
                 const p = (el.dataset.kind === 'saved' ? ui.studio.scenes : ui.studio.recentScenes)?.[Number(el.dataset.i)];
@@ -10069,6 +10185,7 @@ async function onClick(ev, outside = false) {
                 const box = modal(`<h3 class="pc-h3">修改固定提示词</h3>
                   <label class="pc-label">名字</label><input class="pc-input" data-f="name" value="${esc(p.name || '')}" placeholder="没起名">
                   <label class="pc-label">内容（英文标签，会发出去）</label><textarea class="pc-textarea mono" data-f="scene" style="min-height:150px">${esc(p.scene || '')}</textarea>
+                  <label class="pc-label">负面（可以不填）</label><textarea class="pc-textarea mono" data-f="sceneNeg" style="min-height:60px">${esc(p.sceneNeg || '')}</textarea>
                   <label class="pc-label">标签（逗号隔开）${had.length ? `<span class="pc-dim small"> · 已有：${esc(had.join('、'))}</span>` : ''}</label><input class="pc-input" data-f="tags" value="${esc((p.tags || []).join('，'))}" placeholder="比如 证件照，NSFW，双人">
                   ${wasCur ? '<div class="pc-hint">这一条正在用，改完框里的固定提示词也跟着换。</div>' : ''}
                   <div class="pc-actions"><button class="pc-btn" data-m="no">算了</button><button class="pc-btn dark" data-m="ok">保存</button></div>`);
@@ -10082,6 +10199,7 @@ async function onClick(ev, outside = false) {
                     if (!scene) { toastr.warning('内容不能是空的，不要了就点 × 删掉', '固定提示词'); return; }
                     p.name = f('name').trim() || p.name || sceneName(scene);
                     if (scene !== p.scene) { p.scene = scene; p.sceneEn = ''; p.sceneSrc = ''; }
+                    p.sceneNeg = f('sceneNeg').trim();
                     p.tags = [...new Set(f('tags').split(/[,，、;；\n]+/).map(x => x.trim()).filter(Boolean))].slice(0, 8);
                     if (ui.batch?.sceneSig === oldSig) ui.batch.sceneSig = sceneSig(p);
                     if (wasCur && sceneSig(sceneSnapshot()) === oldSig) { const enabled=st.sceneOn; applyScene(p); st.sceneOn=enabled; }
@@ -10472,6 +10590,26 @@ async function onClick(ev, outside = false) {
             case 'lobbyaud': { const t = el.dataset.tag; if ((d.blockedTags || []).includes(t)) { toggleBlockTag(t); break; } ui.lobby.tag = ui.lobby.tag === t ? '' : t; loadLobby(); break; }
             case 'lobbykind': ui.lobby.kind = el.dataset.kind; ui.lobby.mine = false; loadLobby(); break;
             case 'lobbytag2': { const t = el.dataset.tag; if ((d.blockedTags || []).includes(t)) { toggleBlockTag(t); break; } ui.lobby.tag2 = ui.lobby.tag2 === t ? '' : t; render(); break; }
+            case 'ideapose': {
+                if (ui.ideaBusy) break;
+                const box = modal(`<h3 class="pc-h3">灵感写姿势</h3>
+                  <div class="pc-dim small">随便写一句想法，AI 扩成一张有特色的画：姿势、手、镜头、构图、光影、背景，一共 50 个上下的标签。外貌、衣服交给角色，不用写。</div>
+                  <textarea class="pc-textarea" data-idea style="min-height:110px;margin-top:8px" placeholder="比如：下雨天他在便利店门口等我，有点不耐烦但还是把伞往我这边倾\n或者：两个人在天台抢一副耳机">${esc(ui.lastIdea || '')}</textarea>
+                  <div class="pc-actions"><button class="pc-btn" data-m="no">算了</button><button class="pc-btn dark" data-m="ok">写</button></div>`);
+                const go = await new Promise(res => box.addEventListener('click', ev => { const m = ev.target.closest('[data-m]')?.dataset.m; if (!m) return; const v = box.querySelector('[data-idea]').value.trim(); if (m === 'ok' && !v) { toastr.info('先写一句想法', '灵感写姿势'); return; } box.closeModal(); res(m === 'ok' ? v : null); }));
+                if (!go) break;
+                ui.lastIdea = go;
+                const run = async (round = 1, prev = '') => {
+                    ui.ideaBusy = true; render();
+                    try {
+                        const r = await T.ideaPose(go, { round, prev });
+                        ui.ideaBusy = false; render();
+                        showPose({ ...r, title: '灵感：' + (go.length > 18 ? go.slice(0, 18) + '…' : go), lookLabel: 'AI 构思的画面（中文）', again: () => run(round + 1, r.idea) });
+                    } catch (e) { ui.ideaBusy = false; render(); if (e?.name !== 'AbortError') toastr.error(e.message || String(e), '灵感写姿势', { timeOut: 7000 }); }
+                };
+                await run();
+                break;
+            }
             case 'lobbyview': d.options.lobbyView = el.dataset.v; commit(); break;
             case 'lobbyparams': { const p = ui.lobby.items.find(x => x.id === el.dataset.id); const pr = p?.content?.params; if (!pr) break; if (!(await confirmBox(`把出图设置换成：${shareParamsLine(pr)}？`, { ok: '换', cancel: '算了' }))) break; if (!applyShareParams(pr)) { toastr.info('这条分享使用其他生图通道，参数未套用', '共享'); break; } toastr.success('出图参数换好了', '共享', { timeOut: 2000 }); render(); break; }
             case 'lobbythumb': d.options.lobbyThumb = d.options.lobbyThumb === 'crop' ? 'full' : 'crop'; commit(); break;
@@ -10514,6 +10652,7 @@ async function onClick(ev, outside = false) {
                 } catch (e) { toastr.error(e.message, '修改失败'); }
                 break;
             }
+            case 'lobbyimgnext': { const p = ui.lobby.items.find(x => x.id === el.dataset.id); if (!p?.images?.length) break; (ui.lobbyImg ||= {})[p.id] = (lobbyImgIdx(p) + 1) % p.images.length; render(); break; }
             case 'lobbydel': {
                 if (!(await confirmBox('删除你分享的这一条？'))) break;
                 await L.deletePost(el.dataset.id);
@@ -10654,6 +10793,7 @@ function onInput(ev) {
     const d = getData();
     if (el.dataset.chartestextra !== undefined) { ui.charTestExtra = el.value; return; }
     if (el.dataset.charbgq !== undefined) { ui.charBgQ = el.value; return; }
+    if (el.dataset.readnote !== undefined) { const c = C.getChar(ui.charKey); if (c) { c.readNote = el.value; ui.readNoteOpen = true; clearTimeout(onInput.rn); onInput.rn = setTimeout(() => { if (C.getChar(c.key) === c) C.saveChar(c); }, 800); } return; }
     if (el.dataset.outmodel !== undefined) { getData().options.outfitModel = el.value; commit({ silent: true }); return; }
     if (el.dataset.bsneg !== undefined) { d.options.batchSceneNeg = el.value; clearTimeout(onInput.bn); onInput.bn = setTimeout(() => commit({ silent: true }), 500); return; }
     if (el.dataset.ucpCustom !== undefined) { N.settings().UCP_custom = el.value; N.save(); updateStudioPreview(); return; }
@@ -10670,7 +10810,7 @@ function onInput(ev) {
         if (el.dataset.bind === 'outPeopleQ') { const q = el.value.trim().toLowerCase(); root.querySelectorAll('#pc-outmore [data-name]').forEach(b => { b.style.display = q && !b.dataset.name.toLowerCase().includes(q) ? 'none' : ''; }); }
         if (el.dataset.bind === 'batch.text') { const w = root.querySelector('#pc-batch-ban'); if (w) w.innerHTML = batchBanWarn(getData(), el.value); }
         if (String(el.dataset.bind).startsWith('cfy.')) { clearTimeout(onInput.cf); onInput.cf = setTimeout(saveCfy, 600); }
-        if (['studio.pos', 'studio.neg', 'studio.scene', 'studio.sceneEn'].includes(el.dataset.bind)) { updateStudioPreview(); clearTimeout(onInput.ss); onInput.ss = setTimeout(saveStudio, 600); }
+        if (['studio.pos', 'studio.neg', 'studio.scene', 'studio.sceneEn', 'studio.sceneNeg'].includes(el.dataset.bind)) { updateStudioPreview(); clearTimeout(onInput.ss); onInput.ss = setTimeout(saveStudio, 600); }
         if (el.dataset.bind === 'studio.scene') { const box = root.querySelector('#pc-scene-ai'); if (box) box.hidden = !sceneZh(); const s2 = root.querySelector('#pc-scene-state'); if (s2) s2.textContent = sceneStateText(); }
         if (el.dataset.bind === 'search') { clearTimeout(onInput.t); onInput.t = setTimeout(() => { render(); const i = root.querySelector('[data-bind="search"]'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }, 250); }
         return;
@@ -10804,6 +10944,39 @@ async function onChangeEv(ev) {
         } catch (e) { toastr.error(e.message, '看不了图', { timeOut: 9000 }); }
         u.busy = '';
         if (!u.draft) { const h = C.findOutfit(u.owner, u.id); if (h?.owner) C.saveChar(h.owner); else commit({ silent: true }); }
+        render();
+        return;
+    }
+    if (el.dataset.outadd !== undefined) {
+        const files = [...(el.files || [])].slice(0, 6); el.value = '';
+        const u = ui.outfit;
+        if (!files.length || !u || u.busy) return;
+        const target = u.draft ? u : C.findOutfit(u.owner, u.id)?.o;
+        if (!target) return;
+        u.busy = 'mix'; u.mixDone = 0; u.mixTotal = files.length; render();
+        let added = 0, failed = 0, firstImg = '';
+        for (const f of files) {
+            try {
+                const du = await shrinkDataUrl(await fileToDataUrl(f), 1024, 0.88);
+                if (!firstImg) firstImg = du;
+                const r = await T.outfitFromImage(du);
+                const before = target.tags.length;
+                addToOutfit(target.tags, r.tags || [], false);
+                added += target.tags.length - before;
+                if (!target.name && r.name) target.name = files.length > 1 ? r.name + ' 拼搭' : r.name;
+                if (!(r.tags || []).length) failed++;
+            } catch (e) { failed++; console.warn('[智库] 衣服图没读出来', e); }
+            u.mixDone++; render();
+        }
+        // 还没有图就用第一张当封面
+        if (firstImg && !target.image) {
+            if (u.draft) target.image = firstImg;
+            else { try { target.image = (await uploadImage(await shrinkDataUrl(firstImg, 768), `outfit_${M.uid('')}`)).path; } catch (e) { console.warn(e); } }
+        }
+        u.busy = ''; u.mixDone = 0; u.mixTotal = 0;
+        if (!u.draft) { const h = C.findOutfit(u.owner, u.id); if (h?.owner) C.saveChar(h.owner); else commit({ silent: true }); }
+        if (added) toastr.success(`加了 ${added} 件${failed ? `，${failed} 张没读出来` : ''}`, '衣柜', { timeOut: 2200 });
+        else toastr.warning(failed ? '图里没认出衣服' : '读到的都已经在这套里了', '衣柜');
         render();
         return;
     }
@@ -11438,7 +11611,7 @@ function showPose(r) {
     const draw = () => {
         const grp = g => all.map((p, i) => [p, i]).filter(([p]) => p.g === g).map(([p, i]) => `<button class="pc-pair-pick ${picked.has(i) ? 'on' : ''}" data-pi="${i}" ${noteBusy ? 'disabled' : ''}><span class="mono">${esc(p.en)}</span>${p.zh ? `<em>${esc(p.zh)}</em>` : ''}</button>`).join('') || '<span class="pc-dim small">没读出来</span>';
         box.querySelector('[data-pose]').innerHTML = `<style>.pc-pair-pick{display:inline-flex;align-items:baseline;gap:6px;margin:0 6px 6px 0;padding:6px 11px;border-radius:999px;border:1.5px dashed var(--pc-dash);background:transparent;color:var(--pc-ink);font-family:var(--pc-font);font-size:13px;cursor:pointer}.pc-pair-pick em{font-style:normal;font-size:12px;color:var(--pc-ink-soft)}.pc-pair-pick.on{border-style:solid;border-color:var(--pc-ink);background:var(--pc-paper-2)}</style>
-          <h3 class="pc-h3">图里的姿势和构图</h3>${r.look ? `<details class="pc-details"><summary class="pc-dim small">AI 看到的画面（中文）</summary><div class="small" style="line-height:1.7">${esc(r.look)}</div></details>` : ''}<div class="pc-dim small">点标签选上 / 取消，选上的才会用。不想要背景就把「背景」那组点掉。</div>
+          <h3 class="pc-h3">${esc(r.title || '图里的姿势和构图')}</h3>${r.look ? `<details class="pc-details"><summary class="pc-dim small">${esc(r.lookLabel || 'AI 看到的画面（中文）')}</summary><div class="small" style="line-height:1.7">${esc(r.look)}</div></details>` : ''}<div class="pc-dim small">点标签选上 / 取消，选上的才会用。不想要背景就把「背景」那组点掉。</div>
           ${all.some(p => p.g === '人数性别') ? `<div class="pc-label">人数性别</div><div>${grp('人数性别')}</div>` : ''}
           ${r.idea || all.some(p => p.g === '特殊构图') ? `<div class="pc-label">特殊构图</div>${r.idea ? `<div class="pc-dim small" style="margin-bottom:6px">${esc(r.idea)}</div>` : ''}<div>${grp('特殊构图')}</div>` : ''}
           <div class="pc-label">姿势</div><div>${grp('姿势')}</div>
@@ -11452,7 +11625,7 @@ function showPose(r) {
           <div class="pc-actions" style="margin-top:6px"><button class="pc-btn" data-pa="note" ${noteBusy ? 'disabled' : ''}>${noteBusy ? '<span class="pc-busy">转换中</span>' : '转成标签加进去'}</button></div>
           ${all.some(p => p.g === '我的补充') ? `<div style="margin-top:6px">${grp('我的补充')}</div>` : ''}
           <div class="pc-actions wrap">
-            <button class="pc-btn dark" data-pa="pos" ${noteBusy ? 'disabled' : ''}>接在正面后面</button>
+            <button class="pc-btn dark" data-pa="pos" ${noteBusy ? 'disabled' : ''}>接在正面后面</button>${r.again ? `<button class="pc-btn" data-pa="again" ${noteBusy ? 'disabled' : ''}>再来一版</button>` : ''}
             <button class="pc-btn" data-pa="scene" ${noteBusy ? 'disabled' : ''}>换成固定提示词</button>
             <button class="pc-btn" data-pa="copy" ${noteBusy ? 'disabled' : ''}>复制</button>
             <button class="pc-btn" data-pa="no">算了</button></div>`;
@@ -11464,6 +11637,7 @@ function showPose(r) {
         const a = ev.target.closest('[data-pa]')?.dataset.pa;
         if (!a) return;
         if (a === 'no') { box.closeModal(); return; }
+        if (a === 'again') { box.closeModal(); r.again(); return; }
         if (noteBusy) return;
         if (ui.studio !== st) { toastr.info('生图草稿已切换，请重新打开识图结果', '姿势构图'); box.closeModal(); return; }
         if (a === 'note') {
