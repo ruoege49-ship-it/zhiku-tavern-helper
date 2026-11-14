@@ -1,0 +1,14 @@
+import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';
+const s=fs.readFileSync(new URL('../runtime.js',import.meta.url),'utf8');const part=(a,b)=>{let i=s.indexOf(a),j=s.indexOf(b,i);assert(i>=0&&j>i,a);return s.slice(i,j)};
+const ui={studio:{pos:'base',neg:'bad',sceneNeg:'border',sceneOn:true}};
+const c=vm.createContext({ui,sceneTags:()=> 'standing'});vm.runInContext(part('function sceneNegTags()', '/** 固定提示词（原来'),c);
+assert.equal(c.studioParts().neg,'bad, border');ui.studio.sceneOn=false;assert.equal(c.studioParts().neg,'bad');
+const snap=vm.runInNewContext(part('function sceneSnapshot(', 'const SCENE_NSFW =')+'\n({sceneSnapshot,sceneSig,applyScene})',{ui,Date,Math,saveStudio(){},render(){}});
+ui.studio.scene='standing';ui.studio.sceneNeg='border';const p=snap.sceneSnapshot();assert.equal(p.sceneNeg,'border');assert.notEqual(snap.sceneSig(p),snap.sceneSig({...p,sceneNeg:'text'}));ui.studio.scenes=[p];snap.applyScene(p);assert.equal(ui.studio.sceneFrom,p.id);assert.equal(ui.studio.sceneNeg,'border');
+const calls=[];const idea=vm.runInNewContext(part('async function ideaPose(', 'async function imagePose(')+'\nideaPose',{PAIRS:'',pickJson:JSON.parse,normPairs:a=>(a||[]),askLLM:async(...a)=>{calls.push(a);return JSON.stringify({idea:'window light',people:[{en:'1girl'}],pose:[{en:'looking_at_viewer'}],composition:[{en:'looking at viewer'},{en:'close-up'}]})}});
+const r=await idea('standing at window',{round:2,prev:'rain'});assert.equal(r.pose.length,1);assert.equal(r.composition.length,1);assert(calls[0][0].includes('rain'));await assert.rejects(()=>idea(' '),/先写/);
+const idx=vm.runInNewContext(part('const lobbyImgIdx =','function lobbyGridCard(')+'\nlobbyImgIdx',{ui});const post={id:'one',images:[{},{}]};assert.equal(idx(post),0);ui.lobbyImg.one=3;assert.equal(idx(post),1);
+const from={id:'a',name:'original',tags:['tag'],scene:'old'};ui.studio={sceneFrom:'a',scenes:[from],recentScenes:[]};let saved=0;
+const overwrite=part("            case 'sceneoverwrite': {","            case 'sceneuse': {");
+const execute=vm.runInNewContext('(async()=>{switch("sceneoverwrite"){'+overwrite+'}})',{ui,sceneSnapshot:()=>({scene:'new',sceneNeg:'border'}),sceneSig:x=>x.scene,confirmBox:async()=>true,saveStudio:()=>saved++,toastr:{info(){},success(){}},render(){},Date});await execute();assert.equal(from.scene,'new');assert.equal(from.sceneNeg,'border');assert.equal(from.name,'original');assert.equal(from.tags[0],'tag');assert.equal(saved,1);
+console.log('PASS: fixed negative on/off and snapshot, scene identity/overwrite retention, idea validation/dedup/variation and lobby image cycling');

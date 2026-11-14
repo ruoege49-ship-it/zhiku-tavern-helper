@@ -35,13 +35,20 @@ import {applyComic} from './comic.mjs';
 import {applyChatArtistCheckCompatibility} from './chat-artist-check-compat.mjs';
 import {applyLobbyFixCompatibility} from './lobby-fix-compat.mjs';
 import {applyShareParamsCompatibility} from './share-params-compat.mjs';
+import {applyCastWardrobeCompatibility} from './cast-wardrobe-compat.mjs';
+import {applyOutfitPickCompatibility} from './outfit-pick-compat.mjs';
+import {applyLobbyTouchCompatibility} from './lobby-touch-compat.mjs';
+import {applyEmptyReplyCompatibility} from './empty-reply-compat.mjs';
+import {applySceneNegCompatibility} from './scene-neg-compat.mjs';
+import {applySceneOverwriteCompatibility} from './scene-overwrite-compat.mjs';
+import {applyIdeaPoseCompatibility} from './idea-pose-compat.mjs';
 import {fileURLToPath} from 'node:url';
 process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.60';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.60');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.8.61';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.8.61');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -5353,6 +5360,20 @@ s=applyShareParamsCompatibility(s);
 s=applyComfyChatCompatibility(s);
 s=applyShareUnsavedCompatibility(s);
 s=applyHistoryStoreCompatibility(s);
+// 0.8.61：配角连着删、读外貌前补设定、衣柜按钮收小、衣服从多张图拼一套
+s=applyCastWardrobeCompatibility(s);
+// 0.8.61：角色页从衣柜直接拿衣服
+s=applyOutfitPickCompatibility(s);
+// 0.8.61：共享长按修改自己的、不弹全选、点图换下一张
+s=applyLobbyTouchCompatibility(s);
+// 0.8.61：AI 空回复且 0 token 时保留诊断，不按长度或拦截重试
+s=applyEmptyReplyCompatibility(s);
+// 0.8.61：固定提示词加负面
+s=applySceneNegCompatibility(s);
+// 0.8.61：固定提示词改完能覆盖原来那条
+s=applySceneOverwriteCompatibility(s);
+// 0.8.61：灵感写姿势
+s=applyIdeaPoseCompatibility(s);
 s=applySiteCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
@@ -5367,9 +5388,9 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',(prefix+s+'\n}\n').replace(/\r\n/g, '\n'));
 fs.copyFileSync('src/index.js',dir+'/index.js');
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.60',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.60',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.8.61',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.8.61',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.8.60 built; storage keys and shared upload preserved.');
+console.log('Extension 0.8.61 built; storage keys and shared upload preserved.');

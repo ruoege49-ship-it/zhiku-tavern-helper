@@ -11,7 +11,7 @@ function harness() {
         promptText:async(...args)=>{dialogs.push(args);return '手动名字'},
         saveStudio:()=>saved.push(JSON.parse(JSON.stringify(ctx.ui.studio))),render:()=>renders++,
         toastr:Object.fromEntries(['info','success','warning','error'].map(k=>[k,(...a)=>notices.push([k,...a])]))};
-    const api=vm.runInNewContext(part('function sceneSnapshot()', 'function rememberScene(')+part('async function aiSceneName(', 'function sceneRow(')+
+    const api=vm.runInNewContext(part('function sceneSnapshot()', 'function rememberScene(')+part('const sceneEntryId =', 'function applyScene(')+part('async function aiSceneName(', 'function sceneRow(')+
         'async function act(action,el){switch(action){'+part("            case 'scenesave':", "            case 'sceneuse':")+part("            case 'sceneainame':", "            case 'scenerename':")+'}}\n({act,aiSceneName})',ctx);
     const run=(action='scenesave',ai=false)=>api.act(action,{dataset:{i:'0',ai:ai?'1':''}});
     return {ctx,...api,run,calls,dialogs,saved,notices,get renders(){return renders}};
