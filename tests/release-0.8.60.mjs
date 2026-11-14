@@ -22,7 +22,7 @@ const N=vm.runInNewContext(part('const __mod_nai =','const __mod_engine =')+'\n_
  fetch:async(url,o)=>{sentBody=JSON.parse(o.body);return {ok:true,status:200,headers:{get:()=>null},arrayBuffer:async()=>new Uint8Array([137,80,78,71]).buffer}}});
 const result=await N.generate({positive:'artist:alpha, standing',negative:'blur',width:1024,height:1024});N.stopQueue();
 assert.equal(result.sent.params.steps,sentBody.parameters.steps);assert.equal(result.sent.params.sampler,sentBody.parameters.sampler);assert.equal(result.sent.params.width,1024);assert.equal(result.sent.params.cfg,sentBody.parameters.scale);
-const record=vm.runInNewContext(part('async function pcRecordImage(', 'let pcMarkerRaw =')+'\npcRecordImage',{__mod_store:{getData:()=>data,commit(){}},pcLocal:{put:async()=> 'thumb'},pcMakeThumb:async()=>'',DOC:{querySelector:()=>null},console});
+const record=vm.runInNewContext(part('const pcHist =', 'let pcMarkerRaw =')+'\npcRecordImage',{P:{},__mod_store:{getData:()=>data,commit(){}},pcLocal:{put:async()=> 'thumb'},pcMakeThumb:async()=>'',DOC:{querySelector:()=>null},console});
 await record({dataUrl:'image',url:'local/image',sent:result.sent,from:'studio'});data=M.normalizeData(plain(data));assert.deepEqual(plain(data.history[0].params),plain(result.sent.params));
 const params=vm.runInNewContext(part('function shareParams(', 'function openSharedUpload(')+'\n({shareParams,shareImageParams,shareParamsLine,applyShareParams})',{N,M,getData:()=>data});
 config.novelai_steps=99;config.novelaimode='nai-diffusion-5-full';const old=params.shareImageParams(data.history[0]);assert.equal(old.steps,result.sent.params.steps);assert.equal(old.model,'nai-diffusion-4-5-full');assert.equal(old.width,1024);
