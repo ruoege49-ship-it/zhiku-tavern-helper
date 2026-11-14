@@ -11308,9 +11308,11 @@ function showPose(r) {
     const st = ui.studio;
     const all = [...(r.people || []).map(p => ({ ...p, g: '人数性别' })), ...(r.concept || []).map(p => ({ ...p, g: '特殊构图' })), ...r.pose.map(p => ({ ...p, g: '姿势' })), ...r.composition.map(p => ({ ...p, g: '构图' })), ...(r.props || []).map(p => ({ ...p, g: '物件' })), ...(r.background || []).map(p => ({ ...p, g: '背景' })), ...(r.nsfw || []).map(p => ({ ...p, g: 'NSFW' }))];
     const picked = new Set(all.map((_, i) => i));
+    let note = '', noteBusy = false;
     const box = modal('<div data-pose></div>');
+    box.addEventListener('input', ev => { if (ev.target.matches?.('[data-pose-note]')) note = ev.target.value; });
     const draw = () => {
-        const grp = g => all.map((p, i) => [p, i]).filter(([p]) => p.g === g).map(([p, i]) => `<button class="pc-pair-pick ${picked.has(i) ? 'on' : ''}" data-pi="${i}"><span class="mono">${esc(p.en)}</span>${p.zh ? `<em>${esc(p.zh)}</em>` : ''}</button>`).join('') || '<span class="pc-dim small">没读出来</span>';
+        const grp = g => all.map((p, i) => [p, i]).filter(([p]) => p.g === g).map(([p, i]) => `<button class="pc-pair-pick ${picked.has(i) ? 'on' : ''}" data-pi="${i}" ${noteBusy ? 'disabled' : ''}><span class="mono">${esc(p.en)}</span>${p.zh ? `<em>${esc(p.zh)}</em>` : ''}</button>`).join('') || '<span class="pc-dim small">没读出来</span>';
         box.querySelector('[data-pose]').innerHTML = `<style>.pc-pair-pick{display:inline-flex;align-items:baseline;gap:6px;margin:0 6px 6px 0;padding:6px 11px;border-radius:999px;border:1.5px dashed var(--pc-dash);background:transparent;color:var(--pc-ink);font-family:var(--pc-font);font-size:13px;cursor:pointer}.pc-pair-pick em{font-style:normal;font-size:12px;color:var(--pc-ink-soft)}.pc-pair-pick.on{border-style:solid;border-color:var(--pc-ink);background:var(--pc-paper-2)}</style>
           <h3 class="pc-h3">图里的姿势和构图</h3>${r.look ? `<details class="pc-details"><summary class="pc-dim small">AI 看到的画面（中文）</summary><div class="small" style="line-height:1.7">${esc(r.look)}</div></details>` : ''}<div class="pc-dim small">点标签选上 / 取消，选上的才会用。不想要背景就把「背景」那组点掉。</div>
           ${all.some(p => p.g === '人数性别') ? `<div class="pc-label">人数性别</div><div>${grp('人数性别')}</div>` : ''}
@@ -11320,18 +11322,65 @@ function showPose(r) {
           ${all.some(p => p.g === '物件') ? `<div class="pc-label">物件</div><div>${grp('物件')}</div>` : ''}
           ${all.some(p => p.g === '背景') ? `<div class="pc-label">背景</div><div>${grp('背景')}</div>` : ''}
           ${all.some(p => p.g === 'NSFW') ? `<div class="pc-label">NSFW（默认选上，不要就点掉）</div><div>${grp('NSFW')}</div>` : ''}
+          <div class="pc-label">我的补充</div>
+          <div class="pc-dim small">AI 读错、读漏的，用一句话告诉它，比如「那只手是镜头前的人的，在捏他下巴」「他在手机屏幕里」。转好的标签放进下面这组，和它对不上的标签会自动取消选。</div>
+          <textarea class="pc-textarea small" data-pose-note placeholder="中文英文都行" style="margin-top:6px">${esc(note)}</textarea>
+          <div class="pc-actions" style="margin-top:6px"><button class="pc-btn" data-pa="note" ${noteBusy ? 'disabled' : ''}>${noteBusy ? '<span class="pc-busy">转换中</span>' : '转成标签加进去'}</button></div>
+          ${all.some(p => p.g === '我的补充') ? `<div style="margin-top:6px">${grp('我的补充')}</div>` : ''}
           <div class="pc-actions wrap">
-            <button class="pc-btn dark" data-pa="pos">接在正面后面</button>
-            <button class="pc-btn" data-pa="scene">换成固定提示词</button>
-            <button class="pc-btn" data-pa="copy">复制</button>
+            <button class="pc-btn dark" data-pa="pos" ${noteBusy ? 'disabled' : ''}>接在正面后面</button>
+            <button class="pc-btn" data-pa="scene" ${noteBusy ? 'disabled' : ''}>换成固定提示词</button>
+            <button class="pc-btn" data-pa="copy" ${noteBusy ? 'disabled' : ''}>复制</button>
             <button class="pc-btn" data-pa="no">算了</button></div>`;
     };
     box.addEventListener('click', async ev => {
         const pi = ev.target.closest('[data-pi]');
+        if (pi && noteBusy) return;
         if (pi) { const i = Number(pi.dataset.pi); picked.has(i) ? picked.delete(i) : picked.add(i); draw(); return; }
         const a = ev.target.closest('[data-pa]')?.dataset.pa;
         if (!a) return;
         if (a === 'no') { box.closeModal(); return; }
+        if (noteBusy) return;
+        if (ui.studio !== st) { toastr.info('生图草稿已切换，请重新打开识图结果', '姿势构图'); box.closeModal(); return; }
+        if (a === 'note') {
+            note = String(box.querySelector('[data-pose-note]')?.value || '').trim();
+            if (!note) { toastr.info('先写一句补充', '我的补充'); return; }
+            if (noteBusy) return;
+            const requestedNote = note;
+            noteBusy = true; draw();
+            try {
+                const cur = all.map((p, i) => [p, i]).filter(([, i]) => picked.has(i)).map(([p]) => p.en).join(', ');
+                const sys = `用户在看一张图的识图结果，觉得 AI 读错或读漏了，写了一句补充。把补充翻成 NovelAI / Danbooru 标签。
+- add：补充里说到的内容，写细：谁、在干什么、在哪、镜头怎么拍。画面外的人的手写 pov、pov hands 和互动标签（hand on another's chin、holding another's wrist 等）；在屏幕 / 取景框里写 viewfinder、phone screen、frame within a frame；大小反差写 size difference、giant、minigirl 等。
+- remove：现有标签里和补充矛盾的，原样写出来（比如补充说手是别人的，就把 chin rest、head on hand、hand on own chin 放进 remove）。没有就 []。
+只用常见的 Danbooru 标签。每个 add 写成 {"en": "英文标签", "zh": "简短中文"}。
+只输出 JSON：{"add": [...], "remove": ["..."]}`;
+                const j = T.pickJson(await T.askLLM(sys, `现有标签：${cur || '（空）'}\n我的补充：${note}`, { maxTokens: 800, fn: 'tr' }));
+                if (!box.isConnected || ui.studio !== st) return;
+                if (note.trim() !== requestedNote) { toastr.info('补充内容改过了，请再点一次转换', '我的补充'); return; }
+                const key = t => String(typeof t === 'object' ? t?.en || '' : t || '').replace(/_/g, ' ').trim().toLowerCase();
+                const rm = new Set((Array.isArray(j?.remove) ? j.remove : []).map(key).filter(Boolean));
+                let off = 0;
+                all.forEach((p, i) => { if (rm.has(key(p)) && picked.has(i)) { picked.delete(i); off++; } });
+                const have = new Map(all.map((p, i) => [key(p), i]));
+                let added = 0;
+                for (const x of Array.isArray(j?.add) ? j.add : []) {
+                    const raw = typeof x === 'string' ? x : x?.en;
+                    const en = typeof raw === 'string' ? raw.trim() : '', zh = typeof x?.zh === 'string' ? x.zh.trim() : '';
+                    if (!en || T.hasChinese(en) || rm.has(key(en))) continue;
+                    if (have.has(key(en))) { picked.add(have.get(key(en))); continue; }
+                    all.push({ en, zh, g: '我的补充' }); picked.add(all.length - 1); have.set(key(en), all.length - 1); added++;
+                }
+                // 补充排在最前面，优先排列；不修改标签权重
+                const order = all.map((p, i) => [p, i]).sort(([a], [b]) => (b.g === '我的补充') - (a.g === '我的补充'));
+                const was = new Set([...picked].map(i => all[i]));
+                all.splice(0, all.length, ...order.map(([p]) => p));
+                picked.clear(); all.forEach((p, i) => { if (was.has(p)) picked.add(i); });
+                toastr.success(`加了 ${added} 个${off ? `，取消了 ${off} 个对不上的` : ''}`, '我的补充', { timeOut: 2200 });
+            } catch (e) { if (box.isConnected && ui.studio === st && e?.name !== 'AbortError') toastr.error('转换失败：' + e.message, '我的补充'); }
+            finally { noteBusy = false; if (box.isConnected) draw(); }
+            return;
+        }
         const tags = all.filter((_, i) => picked.has(i)).map(p => p.en).join(', ');
         if (!tags) { toastr.info('一个都没选', '姿势构图'); return; }
         if (a === 'copy') { try { await navigator.clipboard.writeText(tags); toastr.success('复制好了', '姿势构图', { timeOut: 1200 }); } catch { toastr.info(tags, '复制不了，自己长按复制'); } return; }
