@@ -1,3 +1,4 @@
+import {applyComfyChatCompatibility} from './comfy-chat-compat.mjs';
 import {applyPoseNoteCompatibility} from './pose-note-compat.mjs';
 import {applyMetaReviewCompatibility} from './meta-review-compat.mjs';
 import {applySceneNameCompatibility} from './scene-name-compat.mjs';
@@ -5347,6 +5348,7 @@ s=applyChatArtistCheckCompatibility(s);
 s=applyLobbyFixCompatibility(s);
 // 0.8.60：分享画师串带上模型等出图参数
 s=applyShareParamsCompatibility(s);
+s=applyComfyChatCompatibility(s);
 s=applySiteCompatibility(s);
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {

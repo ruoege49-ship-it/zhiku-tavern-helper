@@ -23,10 +23,22 @@ const data=M.emptyData();data.vibeActive='v';data.vibeGroups.v={vibes:[{path:'ne
 const E=vm.runInNewContext(between('const __mod_engine =','// ───── translate.js')+'\n__mod_engine',{
  __mod_model:M,__mod_nai:N,__mod_store:{getData:()=>data,commit(){},urlToDataUrl:async()=>assert.fail('Comfy should not load NAI references')},crypto:webcrypto,toastr:{warning(){}}});
 try {
+ // An explicit Comfy selection must never become a paid NAI request just because its URL is missing.
+ for (const enabled of [true,'true']) {
+  config.comfyChat=enabled;
+  for (const url of ['', '   ']) {
+   config.comfyUrl=url;const count=requests.length;
+   assert.equal(N.chatBackend(),'comfy');
+   await assert.rejects(()=>E.generateFull({backend:N.chatBackend(),positive:'fixture',negative:''}),/还没连上 ComfyUI/);
+   assert.equal(requests.length,count,'missing Comfy URL must not send any generation request');
+  }
+ }
+ for(const disabled of [false,'false',undefined]){config.comfyChat=disabled;assert.equal(N.chatBackend(),'nai');}
+ config.comfyChat=true;
  N.comfyAutoConfig();assert.equal(config.comfyUrl,'http://comfy.invalid:8188');assert(saved);config.comfyQuality='';config.comfyNeg='';config.comfySeed='0';
- const info=await N.comfyConnect();assert.equal(info.models.length,1);assert.equal(info.workflows[0],'scene.json');
+ assert.equal(N.chatBackend(),'comfy');const info=await N.comfyConnect();assert.equal(info.models.length,1);assert.equal(info.workflows[0],'scene.json');
  assert.equal(N.naiToSd('1.2::artist:alpha::, {rain}, [cloud], 0::skip::, -1::remove::, sky'),'('+ 'alpha:1.2), (rain:1.05), (cloud:0.95), sky');
- await E.generateFull({backend:'comfy',positive:'artist:alpha, 1.2::rain::, literal %seed%',negative:'blur',chars:[{prompt:'black hair',uc:'hat'}],width:832,height:1216,director:[{data:'skip'}]});
+ await E.generateFull({backend:N.chatBackend(),positive:'artist:alpha, 1.2::rain::, literal %seed%',negative:'blur',chars:[{prompt:'black hair',uc:'hat'}],width:832,height:1216,director:[{data:'skip'}]});
  const sent=requests.at(-1);assert.equal(sent.url,'/api/sd/comfy/generate');const wf=JSON.parse(sent.body.prompt).prompt;
  assert.equal(wf[3].inputs.seed,0);assert.equal(wf[5].inputs.width,832);assert.match(wf[6].inputs.text,/alpha.*rain:1.2.*literal %seed%.*black hair/);assert.equal(wf[7].inputs.text,'blur, hat');assert.equal(E.runtime.lastSent.director,0);assert.equal(E.runtime.lastSent.vibes,null);
  assert(!requests.some(r=>r.url.includes('novelai')||r.url.includes('encode-vibe')));
@@ -39,7 +51,7 @@ try {
  // Explicit linked primitives do not consume widget slots when forceInput is set.
  const force=N.uiToApi({nodes:[{id:1,type:'Test',widgets_values:['hi']}],links:[]},{Test:{input:{required:{linked:['INT',{forceInput:true}],text:['STRING',{}]}}}});assert.equal(force[1].inputs.text,'hi');assert.equal(force[1].inputs.linked,undefined);
  Object.assign(config,JSON.parse(persisted));await E.generateFull({backend:'comfy',positive:'forest',negative:'fog',width:1024,height:1024});assert.equal(JSON.parse(requests.at(-1).body.prompt).prompt[2].inputs.text,'forest');
- responseData='';await assert.rejects(E.generateFull({backend:'comfy',positive:'forest',negative:''}),/没有返回图片/);
+ const count=requests.length;responseData='';await assert.rejects(E.generateFull({backend:N.chatBackend(),positive:'forest',negative:''}),/没有返回图片/);assert.equal(requests.length,count+1);assert.equal(requests.at(-1).url,'/api/sd/comfy/generate');assert.equal(N.chatBackend(),'comfy');
  await N.comfyUseWorkflow('');assert.equal(config.comfyWf,'');assert.equal(config.comfyWfApi,'');
 } finally {N.stopQueue();}
 // Full history survives former limits, including more than six characters.
@@ -48,4 +60,4 @@ const history={history:[]};const record=vm.runInNewContext(between('async functi
 const text='x'.repeat(9000),chars=Array.from({length:8},(_,i)=>({prompt:i+text}));
 await record({url:'saved.png',raw:text,sent:{prompt:text,negative:text,chars},from:'comfy'});
 const reloaded=JSON.parse(JSON.stringify(history));assert.equal(reloaded.history[0].raw,text);assert.equal(reloaded.history[0].negative,text);assert.equal(reloaded.history[0].chars.length,8);assert.equal(reloaded.history[0].chars[7],'7'+text);
-console.log('PASS: ST 1.14 Comfy payload, built-in/custom workflow conversion and filling, zero seed/weights, no NAI calls, failed import preservation, reload, empty-image rejection and complete history.');
+console.log('PASS: explicit Comfy route/missing URL failure without NAI fallback, ST 1.14 Comfy payload, built-in/custom workflow conversion and filling, zero seed/weights, no NAI calls, failed import preservation, reload, empty-image rejection and complete history.');

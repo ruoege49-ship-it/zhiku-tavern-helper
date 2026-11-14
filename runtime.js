@@ -3106,7 +3106,7 @@ const COMFY_WORKFLOW = {
 };
 const comfyUrl = (s = settings()) => String(s.comfyUrl || '').trim().replace(/\/+$/, '');
 const comfyReady = (s = settings()) => !!comfyUrl(s);
-const chatBackend = (s = settings()) => String(s.comfyChat) === 'true' && comfyReady(s) ? 'comfy' : 'nai';
+const chatBackend = (s = settings()) => String(s.comfyChat) === 'true' ? 'comfy' : 'nai';
 /** 没填过的话，从酒馆自带「图片生成」插件的 ComfyUI 设置里搬过来；那边也没有就用本机 8188 */
 function comfyAutoConfig() {
     const s = settings();
