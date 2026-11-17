@@ -1712,7 +1712,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.89（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.90（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1778,7 +1778,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.89';
+globalThis.__PC_VERSION = '0.8.90';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -6514,9 +6514,15 @@ function createMarkerController({context,getData,generate,upload,notify,document
         const w=doc.defaultView||globalThis,tag='pc'+Date.now()+Math.random();let pushed=false,done=false;
         try{w.history.pushState({...(w.history.state&&typeof w.history.state==='object'?w.history.state:{}),pcPreview:tag},'');pushed=true;}catch{}
         // 祖先有 transform 时 fixed 会跟着页面滚动跑：量一下实际位置，偏了就拉回屏幕左上角
-        const fit=()=>{if(done)return;el.style.removeProperty('top');el.style.removeProperty('left');const r=el.getBoundingClientRect();if(Math.abs(r.top)>0.5)el.style.setProperty('top',(-r.top)+'px','important');if(Math.abs(r.left)>0.5)el.style.setProperty('left',(-r.left)+'px','important');};
-        fit();try{w.addEventListener('scroll',fit);w.addEventListener('resize',fit);w.visualViewport?.addEventListener('resize',fit);}catch{}
-        const close=(fromPop=false)=>{if(done)return;done=true;el.remove();overlays.delete(el);try{w.removeEventListener('popstate',onPop);w.removeEventListener('scroll',fit);w.removeEventListener('resize',fit);w.visualViewport?.removeEventListener('resize',fit);}catch{}
+        // 0.8.90：尺寸也按看得见的那块屏幕（visualViewport）算成像素，不靠 vw/vh；底色写在元素上，样式没套上也是暗的
+        const fit=()=>{if(done)return;const vv=w.visualViewport,W=Math.round(vv?.width||w.innerWidth||0),H=Math.round(vv?.height||w.innerHeight||0);
+            el.style.setProperty('position','fixed','important');el.style.setProperty('background','rgba(0,0,0,.9)','important');el.style.setProperty('z-index','2147483600','important');
+            if(W>0&&H>0){el.style.setProperty('width',W+'px','important');el.style.setProperty('height',H+'px','important');el.style.setProperty('max-height',H+'px','important');}
+            el.style.removeProperty('top');el.style.removeProperty('left');el.style.setProperty('right','auto','important');el.style.setProperty('bottom','auto','important');
+            const r=el.getBoundingClientRect(),ty=(vv?.offsetTop||0)-r.top,tx=(vv?.offsetLeft||0)-r.left;
+            el.style.setProperty('top',(Math.abs(ty)>0.5?ty:0)+'px','important');el.style.setProperty('left',(Math.abs(tx)>0.5?tx:0)+'px','important');};
+        fit();try{w.addEventListener('scroll',fit);w.addEventListener('resize',fit);w.visualViewport?.addEventListener('resize',fit);w.visualViewport?.addEventListener('scroll',fit);}catch{}
+        const close=(fromPop=false)=>{if(done)return;done=true;el.remove();overlays.delete(el);try{w.removeEventListener('popstate',onPop);w.removeEventListener('scroll',fit);w.removeEventListener('resize',fit);w.visualViewport?.removeEventListener('resize',fit);w.visualViewport?.removeEventListener('scroll',fit);}catch{}
             if(pushed&&!fromPop&&w.history.state?.pcPreview===tag)try{w.history.replaceState({...w.history.state,pcPreview:null},'');}catch{}};
         const onPop=()=>{if(w.history.state?.pcPreview!==tag)close(true);};
         try{w.addEventListener('popstate',onPop);}catch{}
