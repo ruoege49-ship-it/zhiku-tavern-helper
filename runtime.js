@@ -296,6 +296,56 @@ async function comicPresetSet(ctx, add) {
     ctx.saveSettingsDebounced?.();
     return { shown, preset: cs.preset_settings_openai || '' };
 }
+/** 0.8.95：加进哪个酒馆预设可以自己选（不一定是现在在用的那个）。改预设文件本身并存好，不用再手动点保存 */
+function comicPresetApply(cs, add) {
+    if (!cs || !Array.isArray(cs.prompts) || !Array.isArray(cs.prompt_order)) throw new Error('这个预设不是对话补全预设，或者没有条目列表');
+    if (add) {
+        if (!cs.prompts.some(p => p && p.identifier === COMIC_PRESET_ID)) cs.prompts.push({ identifier: COMIC_PRESET_ID, name: COMIC_PRESET_NAME, role: 'system', content: '{{zhikuComic}}', system_prompt: false, marker: false, injection_position: 0, injection_depth: 4, forbid_overrides: false });
+        for (const o of cs.prompt_order) {
+            if (!Array.isArray(o?.order)) continue;
+            const hit = o.order.find(x => x && x.identifier === COMIC_PRESET_ID);
+            if (hit) { hit.enabled = true; continue; }
+            const k = o.order.findIndex(x => x && x.identifier === 'chatHistory');
+            o.order.splice(k >= 0 ? k + 1 : o.order.length, 0, { identifier: COMIC_PRESET_ID, enabled: true });
+        }
+    } else {
+        cs.prompts = cs.prompts.filter(p => !(p && p.identifier === COMIC_PRESET_ID));
+        for (const o of cs.prompt_order) if (Array.isArray(o?.order)) o.order = o.order.filter(x => !(x && x.identifier === COMIC_PRESET_ID));
+    }
+    return cs;
+}
+/** 酒馆里所有对话补全预设（用酒馆内存里那份，跟预设下拉框一致） */
+function comicPresetList(ctx) {
+    const cur = ctx?.chatCompletionSettings?.preset_settings_openai || '';
+    try {
+        const l = ctx?.getPresetManager?.('openai')?.getPresetList?.();
+        if (l && l.presets && l.preset_names) {
+            const keyed = Array.isArray(l.preset_names);
+            const names = keyed ? l.preset_names : Object.keys(l.preset_names);
+            const out = names.map(n => { const idx = keyed ? l.preset_names.indexOf(n) : l.preset_names[n]; return { name: n, idx, list: l, data: l.presets[idx], current: n === cur }; }).filter(x => x.data && typeof x.data === 'object');
+            if (out.length) return out;
+        }
+    } catch (e) { console.warn('[智库] 读酒馆预设列表', e); }
+    return cur || ctx?.chatCompletionSettings ? [{ name: cur || '（现在用的预设）', data: null, current: true }] : [];
+}
+/** 某个预设现在有没有这条：在用的那个看酒馆内存里的（可能还没保存），别的看文件 */
+function comicPresetItemState(ctx, item) {
+    return comicPresetState(item.current ? ctx.chatCompletionSettings : item.data);
+}
+async function comicPresetSetNamed(ctx, name, add) {
+    const item = comicPresetList(ctx).find(x => x.name === name);
+    if (!item) throw new Error('找不到预设「' + name + '」');
+    let saved = false, shown = false;
+    if (item.data) {
+        const data = comicPresetApply(JSON.parse(JSON.stringify(item.data)), add);
+        const res = await fetch('/api/presets/save', { method: 'POST', headers: ctx.getRequestHeaders?.() || { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiId: 'openai', name, preset: data }) });
+        if (!res.ok) throw new Error('预设「' + name + '」保存失败（' + res.status + '）');
+        item.list.presets[item.idx] = data;
+        saved = true;
+    }
+    if (item.current) shown = (await comicPresetSet(ctx, add)).shown;
+    return { saved, shown, current: item.current, name };
+}
 let comicMacroText = '';
 let comicMacroOn = false;
 function comicRegisterMacro(ctx) {
@@ -1014,7 +1064,7 @@ function createComicController(deps) {
               <div class="pc-label">分镜从哪来</div>
               ${seg('comicSrc', [['extract', '只用写好的'], ['inline', '正文顺便写'], ['ai', '没写就让 AI 写']], 'ai')}
               <div class="pc-hint">${opts().comicSrc === 'inline' ? '往正文的提示词里加一段分镜写法，正文模型写完回复后在末尾顺便写分镜，写好就自动画：不多调一次 AI，也不用换漫画台预设。分镜在聊天里会自动藏起来，也不会再发回给 AI。回复会长一些；正文模型没写出来就不画，可以在楼层里点「画成漫画」补。' : opts().comicSrc === 'extract' ? '只画回复里已经写好的 &lt;image&gt;@page 分镜（漫画台预设会让正文模型写）；回复里没有分镜就不自动画，要画就在楼层里点「画成漫画」让 AI 写。' : '回复里有写好的分镜（漫画台预设）就照着画；没有就让 AI 把这一楼改编成分镜再画（每楼多一次 AI 调用，只管最新一楼、每楼只写一次）。'}</div>
-              ${opts().comicSrc === 'inline' ? (() => { const st = comicPresetState(getContext().chatCompletionSettings), name = getContext().chatCompletionSettings?.preset_settings_openai || ''; return `<div class="pc-hint">${st.has ? `已经加进酒馆预设${name ? '「' + esc(name) + '」' : ''}，叫「${COMIC_PRESET_NAME}」：可以在预设里拖到想要的位置${st.on ? '' : '（现在在预设里是关着的，打开才会写）'}。要永久存进预设文件，在酒馆里点一下保存预设。` : '现在是插件自己把说明塞在最后面。用自己的破限预设、想控制位置的话，可以把它加进酒馆预设。'}</div><div class="pc-row-between" style="justify-content:flex-start;gap:8px;margin-top:6px"><button class="pc-btn small" data-cpreset="${st.has ? 'del' : 'add'}">${st.has ? '从酒馆预设里拿掉' : '加进酒馆预设'}</button></div>`; })() : ''}
+              ${opts().comicSrc === 'inline' ? comicPresetPanel() : ''}
               <div class="pc-hint">${opts().comicSrc === 'inline' ? '楼层里「画成漫画」补分镜用的 AI' : '写分镜用的 AI'}：${esc(typeof __mod_translate !== 'undefined' ? __mod_translate.apiFor('comic').from || '' : '')}。要换接口、模型或者加要求，到智库「设置 → AI 预设 → 各个功能 → 漫画改编」。</div>
               <div class="pc-label">画风</div>
               <select class="pc-input" data-cstyle><option value="">跟正文画师串一样${d.active ? `（现在是「${esc(M.ticketName(d, d.active))}」）` : '（还没选）'}</option>
@@ -1064,8 +1114,9 @@ function createComicController(deps) {
             if (pr) {
                 const add = pr.dataset.cpreset === 'add';
                 if (add && !comicRegisterMacro(getContext())) { (deps.notifyError || notify)('这个酒馆版本不支持插件宏，加不进预设；插件自己塞的方式照样能用'); return; }
-                comicPresetSet(getContext(), add).then(r => {
-                    notify(add ? `加好了：预设${r.preset ? '「' + r.preset + '」' : ''}里多了「${COMIC_PRESET_NAME}」${r.shown ? '' : '（刷新后能在预设列表里看到）'}，要永久保存记得点保存预设` : '已经从预设里拿掉，改回插件自己塞');
+                const name = presetPick || (comicPresetList(getContext()).find(x => x.current) || {}).name || '';
+                comicPresetSetNamed(getContext(), name, add).then(r => {
+                    notify((add ? `加好了：预设「${r.name}」里多了「${COMIC_PRESET_NAME}」` : `已经从预设「${r.name}」里拿掉`) + (r.saved ? '，已经存进预设文件' : '，要永久保存记得在酒馆里点保存预设') + (r.current && !r.shown ? '（刷新后能在预设列表里看到）' : ''));
                     syncPrompt('normal'); draw();
                 }, e => { (deps.notifyError || notify)(e?.message || String(e)); });
                 return;
@@ -1080,7 +1131,7 @@ function createComicController(deps) {
             if (t.dataset.cw) { opts()[t.dataset.cw] = t.checked; commit(); draw(); renderAll(); }
             else if (t.matches('[data-cstyle]')) { opts().comicStyle = t.value; commit(); draw(); }
         });
-        root.addEventListener('input', ev => { const t = ev.target; if (t.dataset.cstr) { opts()[t.dataset.cstr] = t.value; commit(); } });
+        root.addEventListener('input', ev => { const t = ev.target; if (t.dataset.cpresetpick !== undefined) { presetPick = t.value; draw(); return; } if (t.dataset.cstr) { opts()[t.dataset.cstr] = t.value; commit(); } });
         draw();
         return box;
     }
@@ -1177,6 +1228,20 @@ function createComicController(deps) {
         if (typeof pcGallery !== 'function') return null;
         const items = pageItems();
         return pcGallery(doc, items, Math.max(0, items.findIndex(x => x.id === id && x.key === key)));
+    }
+    // 0.8.95：选一个酒馆预设，把「智库 · 漫画分镜」加进去 / 拿掉
+    let presetPick = '';
+    function comicPresetPanel() {
+        const ctx = getContext(), list = comicPresetList(ctx);
+        if (!list.length) return '<div class="pc-hint">现在不是对话补全（Chat Completion）模式，加不进酒馆预设；插件自己把说明塞在最后面，照样能用。</div>';
+        if (!list.some(x => x.name === presetPick)) presetPick = (list.find(x => x.current) || list[0]).name;
+        const pick = list.find(x => x.name === presetPick), st = comicPresetItemState(ctx, pick);
+        const added = list.filter(x => comicPresetItemState(ctx, x).has).map(x => x.name);
+        const cur = list.find(x => x.current), curHas = cur && comicPresetItemState(ctx, cur).has;
+        return `<div class="pc-label">用自己的酒馆预设（破限预设）</div>
+              <select class="pc-input" data-cpresetpick>${list.map(x => `<option value="${esc(x.name)}" ${x.name === presetPick ? 'selected' : ''}>${esc(x.name)}${x.current ? '（在用）' : ''}${comicPresetItemState(ctx, x).has ? ' · 已加' : ''}</option>`).join('')}</select>
+              <div class="pc-hint">${st.has ? `「${esc(pick.name)}」里已经有「${COMIC_PRESET_NAME}」，放在聊天记录后面，可以在预设里拖位置${st.on ? '' : '（现在在预设里是关着的，打开才会写）'}。` : `加进「${esc(pick.name)}」以后，用这个预设聊天时正文就会顺便写分镜，破限还是这个预设自己的条目管。`}${added.length ? `<br>已经加了的预设：${added.map(esc).join('、')}` : ''}<br>${curHas ? '在用的预设里有这条，插件就不再自己另塞一份。' : '在用的预设里没有这条时，插件自己把说明塞在最后面。'}</div>
+              <div class="pc-row-between" style="justify-content:flex-start;gap:8px;margin-top:6px"><button class="pc-btn small" data-cpreset="${st.has ? 'del' : 'add'}">${st.has ? '从这个预设里拿掉' : '加进这个预设'}</button></div>`;
     }
     async function openBook() {
         if (stopped) return;
@@ -2021,7 +2086,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.94（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.95（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -2088,7 +2153,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.94';
+globalThis.__PC_VERSION = '0.8.95';
 
 // ───── model.js ─────
 const __mod_model = (() => {
