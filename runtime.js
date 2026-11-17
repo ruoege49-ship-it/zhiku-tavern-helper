@@ -239,6 +239,45 @@ function storyText(mes) {
         .replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '')
         .replace(/\n{3,}/g, '\n\n').trim();
 }
+/** 0.8.92「正文顺便写」：往正文的提示词里加一段分镜写法，正文模型写完回复后在末尾顺便写 <comic_plan> + <image>@page 分镜 */
+const COMIC_INLINE_KEY = 'zhiku_comic';
+const COMIC_INLINE_SHOW_ID = 'zhiku-comic-inline-hide';
+const COMIC_INLINE_SEND_ID = 'zhiku-comic-inline-nosend';
+// 没写完（流式输出中）的分镜也先藏起来，免得聊天里闪一大段英文
+const COMIC_INLINE_FIND = '/<comic_plan\\b[^>]*>[\\s\\S]*?(?:<\\/comic_plan>|$)|<image\\b[^>]*>\\s*@(?:page|position)\\b[\\s\\S]*?(?:<\\/image>|$)/gi';
+function comicInlineInjection({ pages = 0, panels = '', cast = '', before = '', color = 'color', extra = '' } = {}) {
+    const fmt = adaptRequest('', {}).system
+        .replace(/^你是漫画分镜导演[^。]*。/, '')
+        .replace('只输出这些块，不要任何解释。', '');
+    return '【智库 · 漫画分镜】这条回复照常写完正文以后，在回复最末尾另起一段，把这条回复里发生的事画成'
+        + (pages ? ` ${pages} 页` : '若干页（短的 1–2 页，长的 3–6 页，剧情每个转折都要有画面）')
+        + (color === 'mono' ? '黑白网点' : '彩色') + '漫画，' + (panels ? `每页 ${panels} 格` : '每页 2–5 格') + '，给 NovelAI V5 出图用。'
+        + '分镜只放在正文最后，不要插进正文中间，正文里也不要提到分镜或这段要求；分镜写完就结束这条回复。'
+        + fmt
+        + (cast ? `\n\n角色资料（人物外貌照这个写）：\n${cast}` : '')
+        + (before ? `\n\n上一页的分镜（人物衣着、场景接着画）：\n${before}` : '')
+        + (String(extra || '').trim() ? `\n\n额外要求：${String(extra).trim()}` : '');
+}
+/** 分镜在聊天里不显示、不再发回给 AI（只在选了「正文顺便写」时生效） */
+function syncComicInlineRegex(c, on) {
+    const rules = c?.extensionSettings ? (c.extensionSettings.regex ||= []) : null;
+    if (!rules) return false;
+    const base = { findRegex: COMIC_INLINE_FIND, replaceString: '', trimStrings: [], placement: [2], disabled: !on, runOnEdit: false, substituteRegex: 0, minDepth: null, maxDepth: null };
+    const want = [
+        { ...base, id: COMIC_INLINE_SHOW_ID, scriptName: '智库 · 漫画分镜不显示', markdownOnly: true, promptOnly: false },
+        { ...base, id: COMIC_INLINE_SEND_ID, scriptName: '智库 · 漫画分镜不发送', markdownOnly: false, promptOnly: true },
+    ];
+    let changed = false;
+    for (const item of want) {
+        const i = rules.findIndex(r => r && r.id === item.id);
+        if (i < 0 && !on) continue;
+        if (i >= 0 && JSON.stringify(rules[i]) === JSON.stringify(item)) continue;
+        if (i < 0) rules.push(item); else rules[i] = item;
+        changed = true;
+    }
+    if (changed) c.saveSettingsDebounced?.();
+    return changed;
+}
 /** 「把这一楼画成漫画」的请求：读这一楼的正文，改编成几页漫画分镜 */
 function adaptRequest(story, { pages = 0, panels = '', cast = '', before = '', color = 'color', extra = '' } = {}) {
     const system = '你是漫画分镜导演，把小说 / 角色扮演的正文改编成日式漫画页，给 NovelAI V5 出图用。'
@@ -509,7 +548,7 @@ function createComicController(deps) {
         if (!blocks.length) {
             // 正文没有分镜：自动让 AI 改编（只管最新一楼，每楼只试一次，免得翻旧聊天时一楼楼改）
             const k = `${chatKey(getContext())}:${id}:${msg.send_date || ''}:${msg.swipe_id ?? 0}`;
-            if (!manual && opts().comicSrc !== 'extract' && id === (getContext().chat?.length || 0) - 1 && !autoAdapted.has(k) && String(msg.mes || '').trim().length > 40) {
+            if (!manual && !['extract', 'inline'].includes(opts().comicSrc) && id === (getContext().chat?.length || 0) - 1 && !autoAdapted.has(k) && String(msg.mes || '').trim().length > 40) {
                 autoAdapted.add(k);
                 try { await adapt(id, { draw: false }); if (getContext().chat?.[id] === msg && comicBlocks(srcOf(msg)).length) await process(id); } catch (e) { console.warn('[智库] 漫画自动改编', e); }
             }
@@ -760,9 +799,9 @@ function createComicController(deps) {
               ${sw('comicOn', '漫画模式', '打开后角色的回复会画成漫画：AI 自己写分镜；用了漫画台预设、回复里已经有 &lt;image&gt;@page 分镜的就直接画。楼层里的「画成漫画」不开也能用')}
               ${sw('comicAuto', '回复写完自动出漫画', '关掉的话，在楼层里点「画成漫画」「生成这一页」再画', true)}
               <div class="pc-label">分镜从哪来</div>
-              ${seg('comicSrc', [['extract', '只用写好的'], ['ai', '没写就让 AI 写']], 'ai')}
-              <div class="pc-hint">${opts().comicSrc === 'extract' ? '只画回复里已经写好的 &lt;image&gt;@page 分镜（漫画台预设会让正文模型写）；回复里没有分镜就不自动画，要画就在楼层里点「画成漫画」让 AI 写。' : '回复里有写好的分镜（漫画台预设）就照着画；没有就让 AI 把这一楼改编成分镜再画（每楼多一次 AI 调用，只管最新一楼、每楼只写一次）。'}</div>
-              <div class="pc-hint">写分镜用的 AI：${esc(typeof __mod_translate !== 'undefined' ? __mod_translate.apiFor('comic').from || '' : '')}。要换接口、模型或者加要求，到智库「设置 → AI 预设 → 各个功能 → 漫画改编」。</div>
+              ${seg('comicSrc', [['extract', '只用写好的'], ['inline', '正文顺便写'], ['ai', '没写就让 AI 写']], 'ai')}
+              <div class="pc-hint">${opts().comicSrc === 'inline' ? '往正文的提示词里加一段分镜写法，正文模型写完回复后在末尾顺便写分镜，写好就自动画：不多调一次 AI，也不用换漫画台预设。分镜在聊天里会自动藏起来，也不会再发回给 AI。回复会长一些；正文模型没写出来就不画，可以在楼层里点「画成漫画」补。' : opts().comicSrc === 'extract' ? '只画回复里已经写好的 &lt;image&gt;@page 分镜（漫画台预设会让正文模型写）；回复里没有分镜就不自动画，要画就在楼层里点「画成漫画」让 AI 写。' : '回复里有写好的分镜（漫画台预设）就照着画；没有就让 AI 把这一楼改编成分镜再画（每楼多一次 AI 调用，只管最新一楼、每楼只写一次）。'}</div>
+              <div class="pc-hint">${opts().comicSrc === 'inline' ? '楼层里「画成漫画」补分镜用的 AI' : '写分镜用的 AI'}：${esc(typeof __mod_translate !== 'undefined' ? __mod_translate.apiFor('comic').from || '' : '')}。要换接口、模型或者加要求，到智库「设置 → AI 预设 → 各个功能 → 漫画改编」。</div>
               <div class="pc-label">画风</div>
               <select class="pc-input" data-cstyle><option value="">跟正文画师串一样${d.active ? `（现在是「${esc(M.ticketName(d, d.active))}」）` : '（还没选）'}</option>
                 ${groups.map(g => `<option value="group:${esc(g.id)}" ${o.comicStyle === 'group:' + g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>
@@ -1099,10 +1138,29 @@ function createComicController(deps) {
         build();
     }
 
+    // 0.8.92：「正文顺便写」——每次正文生成前把分镜写法塞进提示词（后台的 quiet 生成、帮用户代写时不塞）
+    function syncPrompt(type) {
+        const c = getContext();
+        const on = !stopped && enabled() && opts().comicSrc === 'inline';
+        try { syncComicInlineRegex(c, on); } catch (e) { console.warn('[智库] 漫画分镜正则', e); }
+        if (typeof c.setExtensionPrompt !== 'function') return '';
+        let text = '';
+        if (on && !['quiet', 'impersonate'].includes(type)) {
+            let chat = (c.chat || []).slice();
+            if (['swipe', 'regenerate'].includes(type) && chat.length && !chat.at(-1)?.is_user) chat = chat.slice(0, -1);
+            const prev = chat.reverse().find(m => m && !m.is_user && !m.is_system && comicBlocks(srcOf(m)).length);
+            const before = prev ? comicBlocks(srcOf(prev)).slice(-1).map(b => b.inner).join('') : '';
+            text = comicInlineInjection({ pages: Number(opts().comicPages) || 0, panels: opts().comicPanels || '', cast: deps.castText?.() || '', before, color: opts().comicColor === 'mono' ? 'mono' : 'color', extra: opts().comicExtra || '' });
+        }
+        c.setExtensionPrompt(COMIC_INLINE_KEY, text, 1, 0, false, 0);
+        return text;
+    }
+
     return {
-        process, render, renderAll, openBook, generateOne, adapt, unadapt, openSettings,
+        process, render, renderAll, openBook, generateOne, adapt, unadapt, openSettings, syncPrompt,
         stop() {
             stopped = true;
+            try { getContext().setExtensionPrompt?.(COMIC_INLINE_KEY, '', 1, 0, false, 0); } catch {}
             cancelPress({type:'stop'});
             for (const close of [...panels]) close();
             doc.removeEventListener('click', onClick, true);
@@ -1712,7 +1770,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.91（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.92（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1779,7 +1837,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.91';
+globalThis.__PC_VERSION = '0.8.92';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -14020,6 +14078,12 @@ async function start() {
         notify: m => toastr.info(m, '智库 · 漫画', { timeOut: 1500 }), notifyError: m => toastr.error(m, '智库 · 漫画', { timeOut: 9000 }), naiMode: () => N.settings().naiMode, modal: UI.modal, esc: UI.esc,
     });
     globalThis.__zhikuComic = comic;
+    {
+        const syncComic = type => { try { comic.syncPrompt(type); } catch (e) { console.warn('[智库] 漫画分镜提示词', e); } };
+        syncComic();
+        cleanups.push(onChange(() => syncComic()));
+        if (event_types.GENERATION_STARTED) { eventSource.on(event_types.GENERATION_STARTED, syncComic); cleanups.push(() => eventSource.removeListener?.(event_types.GENERATION_STARTED, syncComic)); }
+    }
     cleanups.push(() => { comic.stop(); if (globalThis.__zhikuComic === comic) globalThis.__zhikuComic = null; });
     cleanups.push(onChange(() => comic.renderAll()));
     {
