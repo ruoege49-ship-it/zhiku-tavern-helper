@@ -1712,7 +1712,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.90（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.91（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1721,6 +1721,7 @@ function pcFitFixed() {
     try {
         for (const el of DOC.querySelectorAll('#pc-root.open, .pc-modal-backdrop, .pc-sheet-backdrop, .pc-viewer, .pc-comic-book')) {
             if (getComputedStyle(el).position !== 'fixed') continue;
+            if (el.classList.contains('pc-viewer')) { const vv = (DOC.defaultView || globalThis).visualViewport, W = Math.round(vv?.width || innerWidth), H = Math.round(vv?.height || innerHeight); if (W > 0 && H > 0) { el.style.setProperty('width', W + 'px', 'important'); el.style.setProperty('height', H + 'px', 'important'); el.style.setProperty('right', 'auto', 'important'); el.style.setProperty('bottom', 'auto', 'important'); const im = el.querySelector('img'); if (im) { im.style.maxWidth = Math.round(W * .94) + 'px'; im.style.maxHeight = Math.round(H * .84) + 'px'; } } }
             el.style.removeProperty('top'); el.style.removeProperty('left');
             const r = el.getBoundingClientRect();
             if (Math.abs(r.top) > 0.5) el.style.setProperty('top', (-r.top) + 'px', 'important');
@@ -1778,7 +1779,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.90';
+globalThis.__PC_VERSION = '0.8.91';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -6509,7 +6510,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
         for(const name of ['pointerup','pointercancel','pointerleave'])el.addEventListener(name,cancel);
         el.addEventListener('contextmenu',ev=>{ev.preventDefault();ev.stopPropagation();cancel();el._pcHeld=true;action();});
     }
-    function pcTopLayer(el){
+    function pcTopLayer(el,box){
         (doc.documentElement||doc.body).appendChild(el);overlays.add(el);
         const w=doc.defaultView||globalThis,tag='pc'+Date.now()+Math.random();let pushed=false,done=false;
         try{w.history.pushState({...(w.history.state&&typeof w.history.state==='object'?w.history.state:{}),pcPreview:tag},'');pushed=true;}catch{}
@@ -6526,9 +6527,22 @@ function createMarkerController({context,getData,generate,upload,notify,document
             if(pushed&&!fromPop&&w.history.state?.pcPreview===tag)try{w.history.replaceState({...w.history.state,pcPreview:null},'');}catch{}};
         const onPop=()=>{if(w.history.state?.pcPreview!==tag)close(true);};
         try{w.addEventListener('popstate',onPop);}catch{}
+        if(box){
+            // 点到这一层外面（位置偏了、点到了后面的页面）也关，并且不让这下点到后面
+            const onDoc=ev=>{if(done)return;const t=ev.target;if(t&&el.contains(t))return;ev.preventDefault();ev.stopPropagation();close();};
+            setTimeout(()=>{if(!done)try{doc.addEventListener('click',onDoc,true);}catch{}},0);
+            // 往下拖一段就关（从输入框、按钮上拖不算）
+            let y0=null,dy=0;
+            const ts=ev=>{if(ev.touches.length!==1||ev.target.closest?.('textarea,input,select,button,a')||box.scrollTop>0){y0=null;return;}y0=ev.touches[0].clientY;dy=0;};
+            const tm=ev=>{if(y0==null)return;dy=ev.touches[0].clientY-y0;if(dy>0){box.style.transform='translateY('+dy+'px)';box.style.opacity=String(Math.max(.35,1-dy/400));}};
+            const te=()=>{if(y0==null)return;y0=null;if(dy>90){close();return;}box.style.transform='';box.style.opacity='';};
+            try{box.addEventListener('touchstart',ts,{passive:true});box.addEventListener('touchmove',tm,{passive:true});box.addEventListener('touchend',te);box.addEventListener('touchcancel',te);}catch{}
+            const prevClose=close;
+            return (fromPop)=>{try{doc.removeEventListener('click',onDoc,true);}catch{}prevClose(fromPop);};
+        }
         return close;
     }
-    function dialog(){const back=doc.createElement('div'),box=doc.createElement('div'),close=doc.createElement('button');back.className='pc-image-preview';box.className='pc-image-dialog';close.type='button';close.textContent='关闭';box.append(close);back.append(box);const dismiss=pcTopLayer(back);close.onclick=dismiss;back.onclick=e=>{if(e.target===back)dismiss();};return {box,dismiss};}
+    function dialog(){const back=doc.createElement('div'),box=doc.createElement('div'),close=doc.createElement('button');back.className='pc-image-preview';box.className='pc-image-dialog';close.type='button';close.textContent='关闭';box.append(close);back.append(box);const dismiss=pcTopLayer(back,box);close.onclick=dismiss;back.onclick=e=>{if(e.target===back)dismiss();};return {box,dismiss};}
     async function deleteResult(id,msg,token){
         if(pending.has(msg))throw new Error('请等本楼生成结束');
         if(context().chat?.[id]!==msg)throw new Error('聊天已变化，请重新操作');
@@ -6583,7 +6597,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
                 const picture=doc.createElement('img'),close=doc.createElement('button');
                 picture.src=img.src;close.type='button';close.textContent='关闭';
                 overlay.append(picture,close);
-                const dismiss=pcTopLayer(overlay);
+                const dismiss=pcTopLayer(overlay,picture);
                 close.onclick=dismiss;overlay.onclick=e=>{if(e.target===overlay)dismiss();};
             };
             view.onclick=open;img.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();open();});
@@ -13654,11 +13668,29 @@ function openViewer(src, list = []) {
         if (v === 'dl') return;
         if (v === '-1' || v === '1') { ev.stopPropagation(); go(Number(v)); return; }
         if (ev.target.tagName === 'IMG') return; // 点图本身不关
-        back.remove();
+        pcViewerClose();
     });
-    let sx = null;
-    back.addEventListener('touchstart', ev => { sx = ev.touches[0].clientX; }, { passive: true });
-    back.addEventListener('touchend', ev => { if (sx == null) return; const dx = ev.changedTouches[0].clientX - sx; sx = null; if (Math.abs(dx) > 50 && all.length > 1) go(dx < 0 ? 1 : -1); });
+    let sx = null, sy = null;
+    back.addEventListener('touchstart', ev => { sx = ev.touches[0].clientX; sy = ev.touches[0].clientY; }, { passive: true });
+    back.addEventListener('touchmove', ev => { if (sy == null) return; const dy = ev.touches[0].clientY - sy, img = back.querySelector('img'); if (img && dy > 0 && Math.abs(ev.touches[0].clientX - sx) < 60) img.style.transform = 'translateY(' + dy + 'px)'; }, { passive: true });
+    back.addEventListener('touchend', ev => {
+        if (sx == null) return;
+        const dx = ev.changedTouches[0].clientX - sx, dy = ev.changedTouches[0].clientY - sy; sx = sy = null;
+        const img = back.querySelector('img'); if (img) img.style.transform = '';
+        if (dy > 90 && Math.abs(dx) < 60) { pcViewerClose(); return; }
+        if (Math.abs(dx) > 50 && all.length > 1) go(dx < 0 ? 1 : -1);
+    });
+    const w = DOC.defaultView || globalThis, tag = 'pcv' + Date.now();
+    let closed = false, pushed = false;
+    const onDoc = ev => { if (closed || back.contains(ev.target)) return; ev.preventDefault(); ev.stopPropagation(); pcViewerClose(); };
+    const onPop = () => { if (w.history.state?.pcViewer !== tag) pcViewerClose(true); };
+    function pcViewerClose(fromPop = false) {
+        if (closed) return; closed = true; back.remove();
+        try { DOC.removeEventListener('click', onDoc, true); w.removeEventListener('popstate', onPop); } catch {}
+        if (pushed && !fromPop && w.history.state?.pcViewer === tag) try { w.history.replaceState({ ...w.history.state, pcViewer: null }, ''); } catch {}
+    }
+    try { w.history.pushState({ ...(w.history.state && typeof w.history.state === 'object' ? w.history.state : {}), pcViewer: tag }, ''); pushed = true; w.addEventListener('popstate', onPop); } catch {}
+    setTimeout(() => { if (!closed) try { DOC.addEventListener('click', onDoc, true); } catch {} }, 0);
     pcMount(back);
 }
 
