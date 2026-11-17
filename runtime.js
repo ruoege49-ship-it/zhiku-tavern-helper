@@ -1712,7 +1712,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.86（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.87（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1778,7 +1778,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.86';
+globalThis.__PC_VERSION = '0.8.87';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -6334,13 +6334,25 @@ const MARKER_REGEX_ID = '72c57f73-46af-46ac-a28e-bf31b131332a';
 const MARKER_DISPLAY_ID = '6ba93a8e-cabb-494c-a7e8-6c9dfcf5fb80';
 function escapeMarker(value) { return value.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'); }
 function markerPattern(start, end) { return escapeMarker(start) + '[\\s\\S]*?' + escapeMarker(end); }
+const PC_THINK_RE=/<(think|thinking|thoughts?|reasoning|reason|cot|inner[_-]?thoughts?|analysis|思考|思维链?|推理)(?:\s[^>]*)?>[\s\S]*?(?:<\/\1\s*>|$)/gi;
+function pcMarkerSkipRanges(text){
+    const t=String(text||''),out=[];
+    for(const m of t.matchAll(PC_THINK_RE))out.push([m.index,m.index+m[0].length]);
+    for(const m of t.matchAll(/```[\s\S]*?(?:```|$)/g))out.push([m.index,m.index+m[0].length]);
+    for(const m of t.matchAll(/`[^`\n]+`/g))out.push([m.index,m.index+m[0].length]);
+    return out;
+}
+// 只有省略号、x、「提示词」这类占位的不画
+function pcPlaceholderPrompt(p){const t=String(p||'').replace(/[\s.。…·•_\-—~～,，、]+/g,'');return !t||/^(x+|tags?|prompts?|提示词|标签|内容|英文标签|英文提示词|tag内容)$/i.test(t);}
 function parseImageMarkers(text, start, end) {
     if (!start || !end) return [];
-    const result=[];
+    const result=[],src=String(text || ''),skip=pcMarkerSkipRanges(src);
     const regex=new RegExp(escapeMarker(start)+'([\\s\\S]*?)'+escapeMarker(end),'g');
-    for (const m of String(text || '').matchAll(regex)) {
+    for (const m of src.matchAll(regex)) {
         const prompt=m[1].trim();
-        if (prompt) result.push({raw:m[0],prompt,index:m.index});
+        if (!prompt||pcPlaceholderPrompt(prompt)) continue;
+        if (skip.some(([a,b])=>m.index>=a&&m.index<b)) continue;
+        result.push({raw:m[0],prompt,index:m.index});
     }
     return result;
 }
