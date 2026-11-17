@@ -1712,12 +1712,29 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.83（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.84（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
 const DOC = P.document;
-const pcMount = el => (DOC.documentElement || DOC.body).appendChild(el);
+function pcFitFixed() {
+    try {
+        for (const el of DOC.querySelectorAll('#pc-root.open, .pc-modal-backdrop, .pc-sheet-backdrop, .pc-viewer, .pc-comic-book')) {
+            if (getComputedStyle(el).position !== 'fixed') continue;
+            el.style.removeProperty('top'); el.style.removeProperty('left');
+            const r = el.getBoundingClientRect();
+            if (Math.abs(r.top) > 0.5) el.style.setProperty('top', (-r.top) + 'px', 'important');
+            if (Math.abs(r.left) > 0.5) el.style.setProperty('left', (-r.left) + 'px', 'important');
+        }
+    } catch {}
+}
+let pcFitHooked = false;
+function pcFitHook() {
+    if (pcFitHooked) return; pcFitHooked = true;
+    const w = DOC.defaultView || globalThis;
+    try { w.addEventListener('scroll', pcFitFixed); w.addEventListener('resize', pcFitFixed); w.visualViewport?.addEventListener('resize', pcFitFixed); } catch {}
+}
+const pcMount = el => { const out = (DOC.documentElement || DOC.body).appendChild(el); pcFitHook(); try { (DOC.defaultView || globalThis).requestAnimationFrame(pcFitFixed); } catch {} return out; };
 const stToastr = P.toastr || window.toastr;
 /** 智库开着的时候，提示显示在智库自己的界面里（不跑到酒馆那边、不被美化改样子）；关着就交给酒馆 */
 const zkPanelOpen = () => !!DOC.querySelector('.pc-overlay.open, .pc-comic-book, .pc-modal-backdrop, .pc-viewer');
@@ -1761,7 +1778,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.83';
+globalThis.__PC_VERSION = '0.8.84';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -6443,7 +6460,20 @@ function createMarkerController({context,getData,generate,upload,notify,document
         for(const name of ['pointerup','pointercancel','pointerleave'])el.addEventListener(name,cancel);
         el.addEventListener('contextmenu',ev=>{ev.preventDefault();ev.stopPropagation();cancel();el._pcHeld=true;action();});
     }
-    function dialog(){const back=doc.createElement('div'),box=doc.createElement('div'),close=doc.createElement('button');back.className='pc-image-preview';box.className='pc-image-dialog';close.type='button';close.textContent='关闭';box.append(close);back.append(box);doc.body.append(back);overlays.add(back);const dismiss=()=>{back.remove();overlays.delete(back);};close.onclick=dismiss;back.onclick=e=>{if(e.target===back)dismiss();};return {box,dismiss};}
+    function pcTopLayer(el){
+        (doc.documentElement||doc.body).appendChild(el);overlays.add(el);
+        const w=doc.defaultView||globalThis,tag='pc'+Date.now()+Math.random();let pushed=false,done=false;
+        try{w.history.pushState({...(w.history.state&&typeof w.history.state==='object'?w.history.state:{}),pcPreview:tag},'');pushed=true;}catch{}
+        // 祖先有 transform 时 fixed 会跟着页面滚动跑：量一下实际位置，偏了就拉回屏幕左上角
+        const fit=()=>{if(done)return;el.style.removeProperty('top');el.style.removeProperty('left');const r=el.getBoundingClientRect();if(Math.abs(r.top)>0.5)el.style.setProperty('top',(-r.top)+'px','important');if(Math.abs(r.left)>0.5)el.style.setProperty('left',(-r.left)+'px','important');};
+        fit();try{w.addEventListener('scroll',fit);w.addEventListener('resize',fit);w.visualViewport?.addEventListener('resize',fit);}catch{}
+        const close=(fromPop=false)=>{if(done)return;done=true;el.remove();overlays.delete(el);try{w.removeEventListener('popstate',onPop);w.removeEventListener('scroll',fit);w.removeEventListener('resize',fit);w.visualViewport?.removeEventListener('resize',fit);}catch{}
+            if(pushed&&!fromPop&&w.history.state?.pcPreview===tag)try{w.history.replaceState({...w.history.state,pcPreview:null},'');}catch{}};
+        const onPop=()=>{if(w.history.state?.pcPreview!==tag)close(true);};
+        try{w.addEventListener('popstate',onPop);}catch{}
+        return close;
+    }
+    function dialog(){const back=doc.createElement('div'),box=doc.createElement('div'),close=doc.createElement('button');back.className='pc-image-preview';box.className='pc-image-dialog';close.type='button';close.textContent='关闭';box.append(close);back.append(box);const dismiss=pcTopLayer(back);close.onclick=dismiss;back.onclick=e=>{if(e.target===back)dismiss();};return {box,dismiss};}
     async function deleteResult(id,msg,token){
         if(pending.has(msg))throw new Error('请等本楼生成结束');
         if(context().chat?.[id]!==msg)throw new Error('聊天已变化，请重新操作');
@@ -6497,8 +6527,8 @@ function createMarkerController({context,getData,generate,upload,notify,document
                 const overlay=doc.createElement('div');overlay.className='pc-image-preview';
                 const picture=doc.createElement('img'),close=doc.createElement('button');
                 picture.src=img.src;close.type='button';close.textContent='关闭';
-                overlay.append(picture,close);doc.body.append(overlay);overlays.add(overlay);
-                const dismiss=()=>{overlay.remove();overlays.delete(overlay);};
+                overlay.append(picture,close);
+                const dismiss=pcTopLayer(overlay);
                 close.onclick=dismiss;overlay.onclick=e=>{if(e.target===overlay)dismiss();};
             };
             view.onclick=open;img.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();open();});
@@ -6879,6 +6909,7 @@ function openWindow(view) {
     root.classList.add('open');
     DOC.body.classList.add('pc-lock');
     render();
+    pcFitFixed();
     if (ui.view === 'lobby' && !getData().options.lobbyAsked) askLobbyPrefs();
     if (ui.view === 'lobby' && !ui.lobby.items.length) loadLobby();
 }
@@ -13694,7 +13725,7 @@ async function start() {
     for (const id of ['pc-root', 'pc-stub', 'pc-chip', 'pc-menu-btn']) DOC.getElementById(id)?.remove();
 
     injectCss();
-    const compactStyle=DOC.createElement('style');compactStyle.id='pc-compact-image-style';compactStyle.textContent=".mes_text .pc-marker-slot{display:flex;gap:8px;margin:6px 0;padding:4px 8px;border-radius:6px;width:fit-content;max-width:100%;font-size:12px;line-height:1.5}.mes_text .pc-marker-slot summary,.mes_text .pc-image-actions summary{font-size:12px;cursor:pointer}.mes_text .pc-marker-generate,.mes_text .pc-image-actions button{font-size:12px;line-height:1.5;padding:3px 8px;min-height:28px;width:auto;margin:0}.mes_text .pc-marker-slot pre,.mes_text .pc-image-actions pre{font:12px/1.5 sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;max-height:140px;overflow:auto;scrollbar-width:none}.mes_text .pc-image-actions pre::-webkit-scrollbar{display:none}.mes_text .pc-chat-img{display:block;max-width:min(100%,360px);max-height:480px;object-fit:contain;cursor:zoom-in}.pc-image-actions{display:flex;align-items:start;gap:8px;flex-wrap:wrap;margin:4px 0 8px}.pc-image-actions details{max-width:100%}.pc-image-preview{position:fixed;top:0;right:0;bottom:0;left:0;z-index:40000;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center}.pc-image-preview img{max-width:95vw;max-height:90vh;object-fit:contain}.pc-image-preview button{position:absolute;right:16px;top:16px;padding:8px 16px}";DOC.head.append(compactStyle);cleanups.push(()=>compactStyle.remove());
+    const compactStyle=DOC.createElement('style');compactStyle.id='pc-compact-image-style';compactStyle.textContent=".mes_text .pc-marker-slot{display:flex;gap:8px;margin:6px 0;padding:4px 8px;border-radius:6px;width:fit-content;max-width:100%;font-size:12px;line-height:1.5}.mes_text .pc-marker-slot summary,.mes_text .pc-image-actions summary{font-size:12px;cursor:pointer}.mes_text .pc-marker-generate,.mes_text .pc-image-actions button{font-size:12px;line-height:1.5;padding:3px 8px;min-height:28px;width:auto;margin:0}.mes_text .pc-marker-slot pre,.mes_text .pc-image-actions pre{font:12px/1.5 sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;max-height:140px;overflow:auto;scrollbar-width:none}.mes_text .pc-image-actions pre::-webkit-scrollbar{display:none}.mes_text .pc-chat-img{display:block;max-width:min(100%,360px);max-height:480px;object-fit:contain;cursor:zoom-in}.pc-image-actions{display:flex;align-items:start;gap:8px;flex-wrap:wrap;margin:4px 0 8px}.pc-image-actions details{max-width:100%}.pc-image-preview{position:fixed;top:0;right:0;bottom:0;left:0;z-index:40000;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center}html>.pc-image-preview{position:fixed!important;top:0!important;left:0!important;right:0!important;bottom:0!important;width:100vw!important;height:100vh!important;height:100dvh!important;max-width:none!important;max-height:none!important;margin:0!important;padding:0!important;transform:none!important;box-sizing:border-box!important;z-index:2147483600!important;overflow:auto;overscroll-behavior:contain}html>.pc-image-preview>button{position:absolute!important;top:max(12px,env(safe-area-inset-top))!important;right:12px!important;z-index:2147483601!important}html>.pc-image-preview .pc-image-dialog{max-height:calc(100dvh - 24px)}.pc-image-preview img{max-width:95vw;max-height:90vh;object-fit:contain}.pc-image-preview button{position:absolute;right:16px;top:16px;padding:8px 16px}";DOC.head.append(compactStyle);cleanups.push(()=>compactStyle.remove());
     const markerStyle=DOC.createElement('style');markerStyle.id='pc-marker-ui-style';
     markerStyle.textContent='.pc-marker-slot{display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap;margin:10px 0;padding:12px;border-radius:12px;background:var(--SmartThemeBlurTintColor,rgba(0,0,0,.15));border:1px solid var(--SmartThemeBorderColor,rgba(128,128,128,.35))}.pc-marker-slot details{flex:1;min-width:120px}.pc-marker-slot summary{cursor:pointer;font-size:14px}.pc-marker-slot pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;font-size:13px;margin:10px 0 0;scrollbar-width:none}.pc-marker-slot pre::-webkit-scrollbar{display:none}.pc-marker-generate{cursor:pointer;padding:6px 12px;border-radius:8px;color:inherit;background:var(--SmartThemeBlurTintColor,transparent);border:1px solid var(--SmartThemeBorderColor,#888);font:inherit}.pc-marker-generate:disabled{opacity:.6;cursor:wait}#pc-menu-btn .pc-menu-picture{display:inline-flex;align-items:center;justify-content:center;font-size:22px;width:26px;line-height:1}';
     /* reference-marker-ui */ markerStyle.textContent += "/* Button styles adapted from st-chatu8/styles/send_data.css; original attribution retained in README. */\r\n.mes_text .pc-marker-slot .pc-marker-generate {\r\n    display: inline-block;\r\n    padding: 6px 12px;\r\n    background-color: var(--st-chatu8-accent-primary, #4a90d9);\r\n    color: var(--st-chatu8-text-highlight, white);\r\n    border: 1px solid var(--st-chatu8-border-color, transparent);\r\n    border-radius: 4px;\r\n    cursor: pointer;\r\n    font-size: 14px;\r\n    margin-left: 0;\r\n    font-family: inherit;\r\n    line-height: 1.4;\r\n    text-decoration: none;\r\n    box-sizing: border-box;\r\n    transition: all 0.3s ease;\r\n}\r\n\r\n.mes_text .pc-marker-slot .pc-marker-generate:hover {\r\n    background-color: var(--st-chatu8-accent-secondary, #357abd);\r\n}\r\n\r\n\r\n\r\n.mes_text .pc-marker-slot{display:flex;align-items:center;gap:6px;flex-wrap:wrap;width:auto;padding:0;border:0;background:transparent;margin:8px 0}\r\n.mes_text .pc-marker-slot>details:not(.pc-result-collapse){flex:0 1 auto;min-width:0;max-width:100%}\r\n.mes_text .pc-marker-slot summary{font-size:13px;line-height:1.4}\r\n.mes_text .pc-marker-slot pre{font:13px/1.5 sans-serif;max-height:140px;overflow:auto;white-space:pre-wrap;scrollbar-width:none}\r\n.mes_text .pc-marker-slot pre::-webkit-scrollbar{display:none}\r\n.mes_text .pc-marker-slot .pc-result-collapse{flex-basis:100%;margin:8px 0;border-radius:8px;background:transparent;border:none}\r\n.mes_text .pc-result-collapse>summary{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;user-select:none;background:linear-gradient(135deg,rgba(74,144,226,.15),rgba(74,144,226,.08));font-size:13px;color:#a8c8f0;border-radius:8px}\r\n.mes_text .pc-result-collapse>summary:before{content:'▸'}\r\n.mes_text .pc-result-collapse[open]>summary:before{content:'▾'}\r\n.mes_text .pc-result-image{display:block;max-width:100%;max-height:520px;object-fit:contain;cursor:zoom-in;touch-action:pan-y}\r\n.pc-image-preview{position:fixed;top:0;right:0;bottom:0;left:0;z-index:40000;background:rgba(0,0,0,.95);display:flex;align-items:center;justify-content:center}\r\n.pc-image-dialog{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:center;width:min(96vw,850px);max-height:96vh;overflow:auto;background:#1a1a2e;color:#fff;padding:12px;border-radius:8px;scrollbar-width:none}\r\n.pc-image-dialog::-webkit-scrollbar{display:none}\r\n.pc-image-dialog img{flex-basis:100%;max-width:100%;max-height:75vh;object-fit:contain}\r\n.pc-image-dialog textarea{flex-basis:100%;width:100%;min-height:160px;font:14px/1.5 sans-serif;scrollbar-width:none}\r\n.pc-image-dialog button{position:static;padding:6px 12px;min-height:32px;width:auto;font-size:14px}\r\n";
