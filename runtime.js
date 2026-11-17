@@ -258,6 +258,54 @@ function comicInlineInjection({ pages = 0, panels = '', cast = '', before = '', 
         + (before ? `\n\n上一页的分镜（人物衣着、场景接着画）：\n${before}` : '')
         + (String(extra || '').trim() ? `\n\n额外要求：${String(extra).trim()}` : '');
 }
+/** 0.8.94：把「正文顺便写」的分镜说明加进酒馆自己的对话补全预设（用户自己的破限预设也能用）。
+ *  条目内容是宏 {{zhikuComic}}，每次生成时插件填上最新的说明（角色、上一页、页数这些）；漫画模式关掉或没选「正文顺便写」时宏是空的 */
+const COMIC_PRESET_ID = 'zhikuComic';
+const COMIC_PRESET_NAME = '智库 · 漫画分镜';
+function comicPresetOrder(cs) {
+    const orders = Array.isArray(cs?.prompt_order) ? cs.prompt_order : [];
+    return orders.find(o => String(o.character_id) === '100001') || orders.at(-1) || null;
+}
+/** 预设里有没有这条、开没开 */
+function comicPresetState(cs) {
+    const has = Array.isArray(cs?.prompts) && cs.prompts.some(p => p && p.identifier === COMIC_PRESET_ID);
+    const o = comicPresetOrder(cs)?.order?.find(x => x && x.identifier === COMIC_PRESET_ID);
+    return { has: has && !!o, on: has && !!o && o.enabled !== false };
+}
+/** 加进 / 拿掉：改的是酒馆现在用着的预设（内存里），要永久存进预设文件还得在酒馆里点保存预设 */
+async function comicPresetSet(ctx, add) {
+    const cs = ctx?.chatCompletionSettings;
+    if (!cs || !Array.isArray(cs.prompts) || !Array.isArray(cs.prompt_order)) throw new Error('现在不是对话补全（Chat Completion）模式，找不到酒馆预设');
+    if (add) {
+        if (!cs.prompts.some(p => p && p.identifier === COMIC_PRESET_ID)) cs.prompts.push({ identifier: COMIC_PRESET_ID, name: COMIC_PRESET_NAME, role: 'system', content: '{{zhikuComic}}', system_prompt: false, marker: false, injection_position: 0, injection_depth: 4, forbid_overrides: false });
+        for (const o of cs.prompt_order) {
+            if (!Array.isArray(o?.order)) continue;
+            const hit = o.order.find(x => x && x.identifier === COMIC_PRESET_ID);
+            if (hit) { hit.enabled = true; continue; }
+            // 放在聊天记录后面（跟破限 / 后置指令一样的位置），用户可以自己拖
+            const k = o.order.findIndex(x => x && x.identifier === 'chatHistory');
+            o.order.splice(k >= 0 ? k + 1 : o.order.length, 0, { identifier: COMIC_PRESET_ID, enabled: true });
+        }
+    } else {
+        cs.prompts = cs.prompts.filter(p => !(p && p.identifier === COMIC_PRESET_ID));
+        for (const o of cs.prompt_order) if (Array.isArray(o?.order)) o.order = o.order.filter(x => !(x && x.identifier === COMIC_PRESET_ID));
+    }
+    // 让酒馆的预设列表马上显示出来；拿不到就只存设置，刷新后也能看到
+    let shown = false;
+    try { const m = await import('/scripts/openai.js'); const pm = m?.promptManager; if (pm && pm.serviceSettings === cs) { pm.render?.(false); shown = true; } } catch { /* 旧版或路径不同 */ }
+    ctx.saveSettingsDebounced?.();
+    return { shown, preset: cs.preset_settings_openai || '' };
+}
+let comicMacroText = '';
+let comicMacroOn = false;
+function comicRegisterMacro(ctx) {
+    if (comicMacroOn) return true;
+    try {
+        if (typeof ctx?.registerMacro === 'function') { ctx.registerMacro('zhikuComic', () => comicMacroText, '智库漫画：正文顺便写分镜的说明'); comicMacroOn = true; }
+        else if (typeof ctx?.macros?.register === 'function') { ctx.macros.register('zhikuComic', { handler: () => comicMacroText, description: '智库漫画：正文顺便写分镜的说明' }); comicMacroOn = true; }
+    } catch (e) { console.warn('[智库] 注册 {{zhikuComic}} 宏失败', e); }
+    return comicMacroOn;
+}
 /** 分镜在聊天里不显示、不再发回给 AI（只在选了「正文顺便写」时生效） */
 function syncComicInlineRegex(c, on) {
     const rules = c?.extensionSettings ? (c.extensionSettings.regex ||= []) : null;
@@ -966,6 +1014,7 @@ function createComicController(deps) {
               <div class="pc-label">分镜从哪来</div>
               ${seg('comicSrc', [['extract', '只用写好的'], ['inline', '正文顺便写'], ['ai', '没写就让 AI 写']], 'ai')}
               <div class="pc-hint">${opts().comicSrc === 'inline' ? '往正文的提示词里加一段分镜写法，正文模型写完回复后在末尾顺便写分镜，写好就自动画：不多调一次 AI，也不用换漫画台预设。分镜在聊天里会自动藏起来，也不会再发回给 AI。回复会长一些；正文模型没写出来就不画，可以在楼层里点「画成漫画」补。' : opts().comicSrc === 'extract' ? '只画回复里已经写好的 &lt;image&gt;@page 分镜（漫画台预设会让正文模型写）；回复里没有分镜就不自动画，要画就在楼层里点「画成漫画」让 AI 写。' : '回复里有写好的分镜（漫画台预设）就照着画；没有就让 AI 把这一楼改编成分镜再画（每楼多一次 AI 调用，只管最新一楼、每楼只写一次）。'}</div>
+              ${opts().comicSrc === 'inline' ? (() => { const st = comicPresetState(getContext().chatCompletionSettings), name = getContext().chatCompletionSettings?.preset_settings_openai || ''; return `<div class="pc-hint">${st.has ? `已经加进酒馆预设${name ? '「' + esc(name) + '」' : ''}，叫「${COMIC_PRESET_NAME}」：可以在预设里拖到想要的位置${st.on ? '' : '（现在在预设里是关着的，打开才会写）'}。要永久存进预设文件，在酒馆里点一下保存预设。` : '现在是插件自己把说明塞在最后面。用自己的破限预设、想控制位置的话，可以把它加进酒馆预设。'}</div><div class="pc-row-between" style="justify-content:flex-start;gap:8px;margin-top:6px"><button class="pc-btn small" data-cpreset="${st.has ? 'del' : 'add'}">${st.has ? '从酒馆预设里拿掉' : '加进酒馆预设'}</button></div>`; })() : ''}
               <div class="pc-hint">${opts().comicSrc === 'inline' ? '楼层里「画成漫画」补分镜用的 AI' : '写分镜用的 AI'}：${esc(typeof __mod_translate !== 'undefined' ? __mod_translate.apiFor('comic').from || '' : '')}。要换接口、模型或者加要求，到智库「设置 → AI 预设 → 各个功能 → 漫画改编」。</div>
               <div class="pc-label">画风</div>
               <select class="pc-input" data-cstyle><option value="">跟正文画师串一样${d.active ? `（现在是「${esc(M.ticketName(d, d.active))}」）` : '（还没选）'}</option>
@@ -1011,6 +1060,16 @@ function createComicController(deps) {
               <div class="pc-hint">改了以后对新画的页生效；已经画好的页点一下图 →「重画这一页」。</div>`;
         };
         root.addEventListener('click', ev => {
+            const pr = ev.target.closest('[data-cpreset]');
+            if (pr) {
+                const add = pr.dataset.cpreset === 'add';
+                if (add && !comicRegisterMacro(getContext())) { (deps.notifyError || notify)('这个酒馆版本不支持插件宏，加不进预设；插件自己塞的方式照样能用'); return; }
+                comicPresetSet(getContext(), add).then(r => {
+                    notify(add ? `加好了：预设${r.preset ? '「' + r.preset + '」' : ''}里多了「${COMIC_PRESET_NAME}」${r.shown ? '' : '（刷新后能在预设列表里看到）'}，要永久保存记得点保存预设` : '已经从预设里拿掉，改回插件自己塞');
+                    syncPrompt('normal'); draw();
+                }, e => { (deps.notifyError || notify)(e?.message || String(e)); });
+                return;
+            }
             const b = ev.target.closest('[data-cs]');
             if (b) { const v = b.dataset.v; opts()[b.dataset.cs] = /^\d+$/.test(v) && b.dataset.cs === 'comicPages' ? Number(v) : v; commit(); draw(); if (b.dataset.cs === 'comicCapSize') renderAll(); return; }
             if (ev.target.closest('[data-cnegreset]')) { delete opts().comicNeg; commit(); draw(); return; }
@@ -1332,7 +1391,7 @@ function createComicController(deps) {
         const c = getContext();
         const on = !stopped && enabled() && opts().comicSrc === 'inline';
         try { syncComicInlineRegex(c, on); } catch (e) { console.warn('[智库] 漫画分镜正则', e); }
-        if (typeof c.setExtensionPrompt !== 'function') return '';
+        if (typeof c.setExtensionPrompt !== 'function') { comicMacroText = ''; return ''; }
         let text = '';
         if (on && !['quiet', 'impersonate'].includes(type)) {
             let chat = (c.chat || []).slice();
@@ -1341,7 +1400,10 @@ function createComicController(deps) {
             const before = prev ? comicBlocks(srcOf(prev)).slice(-1).map(b => b.inner).join('') : '';
             text = comicInlineInjection({ pages: Number(opts().comicPages) || 0, panels: opts().comicPanels || '', cast: deps.castText?.() || '', before, color: opts().comicColor === 'mono' ? 'mono' : 'color', extra: opts().comicExtra || '' });
         }
-        c.setExtensionPrompt(COMIC_INLINE_KEY, text, 1, 0, false, 0);
+        comicRegisterMacro(c);
+        comicMacroText = text;
+        const viaPreset = !!text && comicMacroOn && comicPresetState(c.chatCompletionSettings).has;
+        c.setExtensionPrompt(COMIC_INLINE_KEY, viaPreset ? '' : text, 1, 0, false, 0);
         return text;
     }
 
@@ -1959,7 +2021,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.93（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.94（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -2026,7 +2088,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.93';
+globalThis.__PC_VERSION = '0.8.94';
 
 // ───── model.js ─────
 const __mod_model = (() => {
