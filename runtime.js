@@ -1712,7 +1712,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.87（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.88（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1778,7 +1778,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.87';
+globalThis.__PC_VERSION = '0.8.88';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -3164,12 +3164,38 @@ function comicNaiModel(s = settings()) {
     if (m === 'follow' && /^nai-diffusion-(4|5)/.test(String(s.novelaimode || ''))) return s.novelaimode;
     return 'nai-diffusion-5-full';
 }
+// ───── 0.8.88：V4.5 权重块太多会满屏纹理，转成括号写法
+function countWeightBlocks(t) { return (String(t || '').match(/(?:^|[^\w.])-?\d+(?:\.\d+)?::[\s\S]*?::/g) || []).length; }
+/** N::…:: 换成差不多强度的 {} / []（1.05 一层，最多 max 层）；0 和负权重去掉 */
+function toBraces(text, max = 4) {
+    return String(text || '').replace(/(^|[^\w.])(-?\d+(?:\.\d+)?)::([\s\S]*?)::/g, (all, pre, ws, inner) => {
+        const w = Number(ws), body = inner.trim().replace(/^,\s*|,\s*$/g, '');
+        if (!body || !(w > 0)) return pre;
+        let k = Math.round(Math.log(w) / Math.log(1.05));
+        k = Math.max(-max, Math.min(max, k));
+        if (!k) return pre + body;
+        return pre + (k > 0 ? '{'.repeat(k) + body + '}'.repeat(k) : '['.repeat(-k) + body + ']'.repeat(-k));
+    }).replace(/,\s*(,\s*)+/g, ', ').replace(/^\s*,\s*|\s*,\s*$/g, '');
+}
+/** 正面里写成负权重的词（-1.5::cel shading::）：转写时挪进负面 */
+function negWeighted(text) { return [...String(text || '').matchAll(/(?:^|[^\w.])-\d+(?:\.\d+)?::([\s\S]*?)::/g)].map(m => m[1].trim().replace(/^,\s*|,\s*$/g, '')).filter(Boolean); }
+var pcBracesToasted = false;
 function buildParameters({ positive, negative, width, height, seed, chars = [], refs = null, director = null, comic = false }) {
     chars=normalizeNaiChars(chars);
     const s = comic ? comicSettings(settings()) : settings();
     const model = comic ? comicNaiModel(s) : s.novelaimode;
     const isV3 = model === 'nai-diffusion-3';
     const isV5 = model.includes('nai-diffusion-5');
+    if (typeof countWeightBlocks === 'function' && /nai-diffusion-4-5/.test(model) && String(s.v45Braces) !== 'false') {
+        const total = countWeightBlocks(positive) + (chars || []).reduce((n, c) => n + countWeightBlocks(c.prompt), 0);
+        if (total >= 8) {
+            const moved = negWeighted(positive);
+            positive = toBraces(positive);
+            negative = [countWeightBlocks(negative) >= 8 ? toBraces(negative) : negative, moved.join(', ')].filter(x => String(x || '').trim()).join(', ');
+            chars = chars.map(c => ({ ...c, prompt: toBraces(c.prompt), uc: c.uc && countWeightBlocks(c.uc) >= 4 ? toBraces(c.uc) : c.uc }));
+            if (!pcBracesToasted) { pcBracesToasted = true; try { toastr.info(`V4.5 碰到 ${total} 个「N::」权重块容易满屏纹理，这次出图自动换成了括号写法。不想要可以在生图页「更多参数」里关掉`, '智库', { timeOut: 6000 }); } catch {} }
+        }
+    }
     const w = Number(width || s.novelai_width) || 832;
     const h = Number(height || s.novelai_height) || 1216;
     const sd = Number(seed ?? s.novelai_seed);
@@ -3746,6 +3772,7 @@ async function generateRequestInner(opts, recordNai = () => {}, responseInfo = {
     const model = opts.comic ? comicNaiModel(s) : s.novelaimode;
     if (opts.comic && s.naiMode === 'tavern') throw new Error('漫画要用自己的 NovelAI key：酒馆通道画不了分人物和画进图里的文字。到智库「设置 → NovelAI」改成自己填 key');
     const params = buildParameters(opts);
+    { const pcPos = params.v4_prompt?.caption?.base_caption; if (typeof pcPos === 'string' && pcPos !== opts.positive && countWeightBlocks(opts.positive) > countWeightBlocks(pcPos)) opts = { ...opts, positive: pcPos, negative: params.negative_prompt ?? opts.negative }; }
     // 垫图（img2img）：底图已经裁成这次的尺寸
     if (opts.i2i?.image) {
         if (s.naiMode === 'tavern') throw new Error('「用酒馆里的 key」不能垫图，到智库设置 → NovelAI 改成「填我的 key」');
@@ -4186,7 +4213,7 @@ async function inpaintRequest({ image, mask, prompt, negative, width, height, st
     return imageFromResponse(buf);
 }
 
-return { withModel, anlasRefresh, anlasNow: () => pcAnlas, onAnlas: f => { pcAnlasSubs.add(f); return () => pcAnlasSubs.delete(f); }, adoptModelParams, comfyReady, chatBackend, comfyAutoConfig, comfyConnect, comfyUseWorkflow, naiToSd, uiToApi, fillWorkflow, COMFY_Q, COMFY_UC, stopQueue:()=>{siteStopped=true;__naiGate.stop();stopGpt();}, MODELS, SAMPLERS, SCHEDULES, settings, save, isReady, ucpValue, buildParameters, generate, unzipFirstImage, testConnection, importFromZhihuiji, encKey, vibeSupported, encodeVibe, parseVibeFile, charRefSupported, inpaintModel, inpaint };
+return { toBraces, countWeightBlocks, negWeighted, withModel, anlasRefresh, anlasNow: () => pcAnlas, onAnlas: f => { pcAnlasSubs.add(f); return () => pcAnlasSubs.delete(f); }, adoptModelParams, comfyReady, chatBackend, comfyAutoConfig, comfyConnect, comfyUseWorkflow, naiToSd, uiToApi, fillWorkflow, COMFY_Q, COMFY_UC, stopQueue:()=>{siteStopped=true;__naiGate.stop();stopGpt();}, MODELS, SAMPLERS, SCHEDULES, settings, save, isReady, ucpValue, buildParameters, generate, unzipFirstImage, testConnection, importFromZhihuiji, encKey, vibeSupported, encodeVibe, parseVibeFile, charRefSupported, inpaintModel, inpaint };
 })();
 
 // ───── engine.js ─────
@@ -7618,7 +7645,8 @@ function paramFields(s, { withSize = false } = {}) {
         <label class="pc-field span2"><span>噪声表</span><select data-st="Schedule">${N.SCHEDULES.map(([v, t]) => `<option value="${v}" ${v === s.Schedule ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
         <label class="pc-field span2"><span>CFG 修正</span><input type="number" step="0.01" data-st="cfg_rescale" value="${esc(s.cfg_rescale)}"></label>
       </div>
-      <label class="pc-switch"><input type="checkbox" data-st-check="nai3Variety" ${String(s.nai3Variety) === 'true' ? 'checked' : ''}><span></span>多样性加强（Variety+）<small>画面更多变化，偶尔会乱</small></label>`;
+      <label class="pc-switch"><input type="checkbox" data-st-check="nai3Variety" ${String(s.nai3Variety) === 'true' ? 'checked' : ''}><span></span>多样性加强（Variety+）<small>画面更多变化，偶尔会乱</small></label>
+      ${/nai-diffusion-4-5/.test(s.novelaimode || '') ? `<label class="pc-switch"><input type="checkbox" data-st-check="v45Braces" ${String(s.v45Braces) !== 'false' ? 'checked' : ''}><span></span>V4.5 权重太多时自动换成括号写法<small>「N::」超过 8 个会满屏纹理，出图前换成 {} 写法，存下来的串不改</small></label>` : ''}`;
 }
 
 /** 没写 artist: 的画师名：开头一串名字（遇到普通词就停），加上画师库里已有的名字 */
@@ -7886,6 +7914,7 @@ function viewStudio(d) {
       <div id="pc-pos-ban">${banWarn(d, st.pos)}${lintHtml(st.pos)}</div>
       <label class="pc-label" for="pc-neg">负面提示词</label>
       <textarea id="pc-neg" class="pc-textarea small mono" data-bind="studio.neg" placeholder="不想出现的东西，比如 1girl, text">${esc(st.neg)}</textarea>
+      <div id="pc-neg-lint">${lintHtml(st.neg, 'neg')}</div>
       <div class="pc-mini pc-mt-s">${sceneFold()}${castFold()}${i2iFold(s)}</div>
       <div class="pc-row-between" style="margin-top:10px">
         <div class="pc-chips" style="margin:0">${sizeBtn(832, 1216, '竖')}${sizeBtn(1216, 832, '横')}${sizeBtn(1024, 1024, '方')}</div>
@@ -7955,7 +7984,14 @@ function markStr(d, str) {
 }
 /** 找出会让 NovelAI 把后面一大段都按错权重读的写法；fixed 是能自动改好的版本 */
 function lintPrompt(text) {
-    const t = String(text || '');
+    const t0 = String(text || '');
+    // 「2:Mommyfy::」少一个冒号：先补上再查，免得后面的「::」被当成多余的
+    const singleRe = /(^|[,\s{\[(])(-?\d+(?:\.\d+)?):(?!:)(\s*[^,:\n]+?)::/g;
+    const singles = [...t0.matchAll(singleRe)];
+    const t = t0.replace(singleRe, '$1$2::$3::');
+    const pcExtra = singles.map(m => `「${m[2]}:${m[3].trim()}::」少了一个冒号，应该是 ${m[2]}::${m[3].trim()}::`);
+    for (const m of t0.matchAll(/(^|[,\s])([a-z][a-z ]{2,}[a-z])!(?=\s*(,|$))/gi)) pcExtra.push(`「${m[2]}!」像是打错了（后面多了个 !）`);
+
     const issues = [], cut = [];
     let open = null;
     for (const m of t.matchAll(/(-?\d+(?:\.\d+)?)?::/g)) {
@@ -7975,13 +8011,15 @@ function lintPrompt(text) {
     let fixed = t;
     for (const [at, len] of cut.sort((a, b) => b[0] - a[0])) fixed = fixed.slice(0, at) + fixed.slice(at + len);
     fixed = fixed.replace(/,\s*,/g, ',').replace(/\s{2,}/g, ' ');
-    return { issues, sd, fixed, canFix: cut.length > 0 };
+    return { issues: [...pcExtra, ...issues], sd, fixed, canFix: cut.length > 0 || singles.length > 0 };
 }
-function lintHtml(text) {
+function lintHtml(text, field = 'pos') {
     const r = lintPrompt(text);
-    if (!r.issues.length && !r.sd) return '';
-    return `<div class="pc-banwarn">${r.issues.map(x => `<div>⚠ ${esc(x)}</div>`).join('')}${r.sd ? `<div>ⓘ 有 ${r.sd} 处 SD 写法的 (词:1.3)，发送时会自动换成 1.3::词::</div>` : ''}${r.canFix ? '<button class="pc-pill dashed tiny" data-act="lintfix" style="margin-top:6px">一键修正</button>' : ''}</div>`;
+    const s = N.settings(), v45 = /nai-diffusion-4-5/.test(s.novelaimode || ''), blocks = v45 ? N.countWeightBlocks(text) : 0, many = blocks >= 8;
+    if (!r.issues.length && !r.sd && !many) return '';
+    return `<div class="pc-banwarn">${r.issues.map(x => `<div>⚠ ${esc(x)}</div>`).join('')}${r.sd ? `<div>ⓘ 有 ${r.sd} 处 SD 写法的 (词:1.3)，发送时会自动换成 1.3::词::</div>` : ''}${many ? `<div>ⓘ V4.5 碰到这么多「N::」权重块（${blocks} 个）容易画成满屏纹理。${String(s.v45Braces) !== 'false' ? '出图时会自动换成括号写法。' : '设置里关掉了自动转写，建议手动转。'}</div>` : ''}<div class="pc-actions wrap" style="margin-top:6px">${r.canFix ? `<button class="pc-pill dashed tiny" data-act="lintfix" data-f="${field}">一键修正</button>` : ''}${many ? `<button class="pc-pill dashed tiny" data-act="lintbraces" data-f="${field}">现在就转成括号写法</button>` : ''}</div></div>`;
 }
+
 function banWarn(d, str) {
     const list = M.bannedIn(d, str);
     if (!list.length) return '';
@@ -8365,7 +8403,7 @@ function viewGroup(d) {
     ${galleryHtml(d, ref)}
     <section class="pc-card pc-pad pc-mt">
       ${label('画师串（发送的就是这一串）')}
-      <div class="pc-actions wrap"><button class="pc-pill dashed" data-act="editstring" data-id="${g.id}">改写原串</button><button class="pc-pill dashed danger" data-act="delete" ${refAttr(ref)}>删除整串</button></div>
+      <div class="pc-actions wrap"><button class="pc-pill dashed" data-act="editstring" data-id="${g.id}">改写原串</button>${N.countWeightBlocks(M.ticketString(d, { type: 'group', id: g.id })) ? `<button class="pc-pill dashed" data-act="bracestring" data-id="${g.id}">转成括号写法（V4.5）</button>` : ''}<button class="pc-pill dashed danger" data-act="delete" ${refAttr(ref)}>删除整串</button></div>
       <div class="pc-strrow"><p class="pc-quote small mono">${markStr(d, str)}</p><button class="pc-round dashed" data-act="copytext" data-text="${esc(str)}" aria-label="复制">${SYM.copy}</button></div>
       <label class="pc-field pc-mt-s"><span>负面（选这串时一起换上，可不填）</span><textarea class="pc-textarea small mono" data-bind-group="${g.id}" data-field="neg" placeholder="比如 1girl, text">${esc(g.neg || '')}</textarea></label>
       <label class="pc-field pc-mt-s"><span>绑定模型（这串当正文画师串时自动换成这个模型）</span><select class="pc-input" data-bind-group="${g.id}" data-field="model"><option value="">不绑，跟设置走</option>${N.MODELS.map(([v, t]) => `<option value="${v}" ${g.model === v ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
@@ -10530,7 +10568,7 @@ async function onClick(ev, outside = false) {
                 render();
                 break;
             }
-            case 'lintfix': ui.studio.pos = lintPrompt(ui.studio.pos).fixed; saveStudio(); render(); toastr.success('改好了，发送前再看一眼', '智库', { timeOut: 2000 }); break;
+            case 'lintfix': { const f = el.dataset.f === 'neg' ? 'neg' : 'pos'; ui.studio[f] = lintPrompt(ui.studio[f]).fixed; } saveStudio(); render(); toastr.success('改好了，发送前再看一眼', '智库', { timeOut: 2000 }); break;
             case 'clearresult': ui.studio.result = null; ui.studio.sent = null; render(); break;
             case 'histselect': { const h = ui.hist ||= { select: false, picked: [], show: 60 }; h.select = !h.select; h.picked = []; render(); break; }
             case 'histall': { const h = ui.hist; const all = histList().map(x => x.id || x.url); h.picked = h.picked.length === all.length ? [] : all; render(); break; }
@@ -10656,6 +10694,35 @@ async function onClick(ev, outside = false) {
                     if (!g.members.some(x => x.artistId === a.id)) g.members.push({ artistId: a.id, weight: m.weight });
                 }
                 commit();
+                break;
+            }
+            case 'lintbraces': {
+                const f = el.dataset.f === 'neg' ? 'neg' : 'pos', before = ui.studio[f] || '', moved = f === 'pos' ? N.negWeighted(before) : [];
+                ui.studio[f] = N.toBraces(before);
+                if (moved.length) ui.studio.neg = [ui.studio.neg, moved.join(', ')].filter(s => String(s || '').trim()).join(', ');
+                saveStudio(); render();
+                toastr.success(`换成括号写法了${moved.length ? `，${moved.length} 处负权重挪进了负面` : ''}，发送前再看一眼`, '智库', { timeOut: 2500 });
+                break;
+            }
+            case 'bracestring': {
+                const g = d.groups[el.dataset.id];
+                if (!g) break;
+                const raw = M.ticketString(d, { type: 'group', id: g.id });
+                if (!N.countWeightBlocks(raw)) { toastr.info('这串没有「N::」权重，不用转', '智库'); break; }
+                const moved = N.negWeighted(raw);
+                const text = await promptText(`转成括号写法（V4.5 用，可以再改）${moved.length ? ` · 去掉了 ${moved.length} 处负权重：${moved.join('、')}，建议写进这串的负面` : ''}`, N.toBraces(raw), true);
+                if (text == null || !text.trim()) break;
+                const mode = await chooseBox('保存画师串', ['覆盖原串：' + g.name, '另存为新画师串']);
+                if (mode == null) break;
+                const neg = moved.length ? [g.neg, moved.join(', ')].filter(s => String(s || '').trim()).join(', ') : g.neg;
+                if (mode === 0) M.overwriteGroup(d, { type: 'group', id: g.id }, text, neg);
+                else {
+                    const name = await promptText('新画师串的名字', g.name + ' · 括号版');
+                    if (name == null) break;
+                    const ref = M.createFromString(d, { name, text, neg, forceGroup: true });
+                    if (ref) { ui.detailId = ref.id; ui.view = 'group'; }
+                }
+                await commit({ immediate: true });
                 break;
             }
             case 'editstring': {
@@ -11651,6 +11718,7 @@ function onInput(ev) {
         }
         if (el.dataset.bind === 'studio.sceneQ' || el.dataset.bind === 'combine.q') { clearTimeout(onInput.sq); onInput.sq = setTimeout(render, 250); }
         if (el.dataset.bind === 'studio.pos') { const w = root.querySelector('#pc-pos-ban'); if (w) w.innerHTML = banWarn(getData(), el.value) + lintHtml(el.value); }
+        if (el.dataset.bind === 'studio.neg') { const w = root.querySelector('#pc-neg-lint'); if (w) w.innerHTML = lintHtml(el.value, 'neg'); }
         if (el.dataset.bind === 'batchCharQ') { const q = el.value.trim().toLowerCase(); root.querySelectorAll('#pc-bcharmore [data-name]').forEach(b => { b.style.display = q && !b.dataset.name.toLowerCase().includes(q) ? 'none' : ''; }); }
         if (el.dataset.bind === 'outPeopleQ') { const q = el.value.trim().toLowerCase(); root.querySelectorAll('#pc-outmore [data-name]').forEach(b => { b.style.display = q && !b.dataset.name.toLowerCase().includes(q) ? 'none' : ''; }); }
         if (el.dataset.bind === 'batch.text') { const w = root.querySelector('#pc-batch-ban'); if (w) w.innerHTML = batchBanWarn(getData(), el.value); }
