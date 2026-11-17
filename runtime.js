@@ -1712,7 +1712,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.85（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.86（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -1778,7 +1778,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.85';
+globalThis.__PC_VERSION = '0.8.86';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -2085,9 +2085,13 @@ function tokenize(text) {
             tokens.push({ text: t, weight: round2(weight * outer), isArtist: /^artist\s*:/i.test(t), raw: outer === 1 ? raw : null });
         }
     };
+    let gid = 0;
     while ((m = re.exec(src))) {
         pushPlain(src.slice(last, m.index));
+        const before = tokens.length;
         pushPlain(m[2], Number(m[1]));
+        const grp = { id: ++gid, raw: m[0], n: tokens.length - before };
+        for (let i = before; i < tokens.length; i++) Object.defineProperty(tokens[i], 'grp', { value: grp, enumerable: false });
         last = re.lastIndex;
     }
     pushPlain(src.slice(last));
@@ -2409,7 +2413,13 @@ function findTicketForString(data, text) {
 function mergeTags(...texts) {
     const seen = new Set();
     const out = [];
-    for (const t of tokenize(texts.filter(Boolean).join(', '))) {
+    const toks = tokenize(texts.filter(Boolean).join(', '));
+    for (let i = 0; i < toks.length; i++) {
+        const t = toks[i];
+        if (t.grp && t.grp.n > 1) {
+            const members = toks.slice(i, i + t.grp.n).filter(x => x.grp === t.grp), keys = members.map(tokKey);
+            if (members.length === t.grp.n && keys.every(k => !seen.has(k))) { keys.forEach(k => seen.add(k)); out.push(t.grp.raw.trim()); i += members.length - 1; continue; }
+        }
         const k = tokKey(t);
         if (seen.has(k)) continue;
         seen.add(k);
