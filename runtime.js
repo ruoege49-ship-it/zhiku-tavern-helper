@@ -2677,7 +2677,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.97（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.98（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -2744,7 +2744,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.97';
+globalThis.__PC_VERSION = '0.8.98';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -3942,27 +3942,85 @@ function thumbPump() {
             .finally(() => { thumbPending.delete(url); thumbBusy--; thumbPump(); });
     }
 }
+/** 0.8.98：列表小图存进浏览器（IndexedDB），下次打开共享不用再下原图、再缩一遍；服务器有小图就直接下小图 */
+let thumbDbP = null, thumbPuts = 0;
+function thumbDb() {
+    if (thumbDbP) return thumbDbP;
+    thumbDbP = new Promise((res, rej) => {
+        if (typeof indexedDB === 'undefined') return rej(new Error('no idb'));
+        const r = indexedDB.open('zhiku-thumbs', 1);
+        r.onupgradeneeded = () => { if (!r.result.objectStoreNames.contains('t')) r.result.createObjectStore('t'); };
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => { thumbDbP = null; rej(r.error); };
+    });
+    return thumbDbP;
+}
+async function thumbDbGet(k) {
+    try { const db = await thumbDb(); return await new Promise(res => { const q = db.transaction('t').objectStore('t').get(k); q.onsuccess = () => res(q.result?.b || null); q.onerror = () => res(null); }); } catch { return null; }
+}
+async function thumbDbPut(k, b) {
+    try {
+        const db = await thumbDb();
+        await new Promise(res => { const tx = db.transaction('t', 'readwrite'); tx.objectStore('t').put({ b, at: Date.now() }, k); tx.oncomplete = tx.onerror = tx.onabort = res; });
+        if (++thumbPuts % 60 === 0) void thumbDbPrune();
+    } catch { /* 存不了就算了，下次重新做 */ }
+}
+/** 最多留 1500 张，多了删最早的 */
+async function thumbDbPrune() {
+    try {
+        const db = await thumbDb(), all = [];
+        await new Promise(res => { const q = db.transaction('t').objectStore('t').openCursor(); q.onsuccess = () => { const c = q.result; if (!c) return res(); all.push([c.key, c.value?.at || 0]); c.continue(); }; q.onerror = res; });
+        if (all.length <= 1500) return;
+        all.sort((a, b) => a[1] - b[1]);
+        const tx = db.transaction('t', 'readwrite'), st = tx.objectStore('t');
+        for (const [k] of all.slice(0, all.length - 1200)) st.delete(k);
+    } catch { /* 无所谓 */ }
+}
+/** 上传时顺手做一张 480 宽的小图一起传（新服务器存下来，列表就只下小图） */
+async function thumbFromData(dataUrl) {
+    const blob = await (await fetch(dataUrl)).blob();
+    const bmp = await createImageBitmap(blob);
+    const scale = Math.min(1, 480 / bmp.width);
+    const c = DOC.createElement('canvas');
+    c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    bmp.close?.();
+    let q = 0.8, out = '';
+    for (let i = 0; i < 4; i++) { out = c.toDataURL('image/jpeg', q); if (out.length < 190000) break; q -= 0.15; }
+    return out.length < 260000 ? out : undefined;
+}
+const thumbSrc = new Map();
 async function makeThumb(url) {
+    const kept = await thumbDbGet(url);
+    if (kept) return URL.createObjectURL(kept);
+    if (thumbStopped) throw new Error('stopped');
+    const made = await makeThumbFresh(url);
+    return made;
+}
+async function makeThumbFresh(url) {
     const controller = new AbortController(); thumbControllers.add(controller);
     const timer = setTimeout(() => controller.abort(), 30000);
     try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(thumbSrc.get(url) || url, { signal: controller.signal });
     if (!response.ok) throw new Error('图片 HTTP ' + response.status);
     const blob = await response.blob();
     const bmp = await createImageBitmap(blob);
     const scale = Math.min(1, 480 / bmp.width);
-    if (scale === 1 && blob.size < 300000) { bmp.close?.(); return URL.createObjectURL(blob); }
+    if (scale === 1 && blob.size < 300000) { bmp.close?.(); void thumbDbPut(url, blob); return URL.createObjectURL(blob); }
     const c = DOC.createElement('canvas');
     c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
     c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
     bmp.close?.();
     const small = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.82));
+    if (small) { void thumbDbPut(url, small); thumbMade.get(url)?.(small); }
     return URL.createObjectURL(small || blob);
     } finally { clearTimeout(timer); thumbControllers.delete(controller); }
 }
 /** 卡片里的 <img> 属性：有小图直接用，没有就先空着，等小图做好再填进去 */
-function lobbyThumbAttr(u) {
+const thumbMade = new Map();
+function lobbyThumbAttr(u, t) {
     const url = lobbyImgUrl(u);
+    if (t) thumbSrc.set(url, lobbyImgUrl(t));
     const hit = thumbCache.get(url);
     if (!thumbStopped && !hit && !thumbPending.has(url)) { thumbPending.add(url); thumbWait.push(url); setTimeout(thumbPump, 0); }
     const esc = x => String(x).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -3974,15 +4032,41 @@ const listPosts = ({ sort = 'new', tag = '', kind = '', q = '', nsfw = false, mi
     call(`/lobby/posts?${new URLSearchParams({ sort, tag, kind, q, nsfw: nsfw ? '1' : '0', mine: mine ? '1' : '0', offset, limit })}`);
 const listTags = () => call('/lobby/tags');
 // 每条分享都带编辑记录：第一条是发布
-const createPost = body => call('/lobby/posts', { method: 'POST', body: { nickname: getData().lobby.nickname, ...body, content: { ...(body.content || {}), history: Array.isArray(body.content?.history) && body.content.history.length ? body.content.history : [{ at: Date.now(), publish: true, what: '发布' }] } } });
+const createPost = async body => { if (Array.isArray(body?.images)) body = { ...body, images: await Promise.all(body.images.map(async i => i && typeof i.data === 'string' && !i.thumb ? { ...i, thumb: await thumbFromData(i.data).catch(() => undefined) } : i)) }; return createPostRaw(body); };
+const createPostRaw = body => call('/lobby/posts', { method: 'POST', body: { nickname: getData().lobby.nickname, ...body, content: { ...(body.content || {}), history: Array.isArray(body.content?.history) && body.content.history.length ? body.content.history : [{ at: Date.now(), publish: true, what: '发布' }] } } });
 const likePost = id => call(`/lobby/posts/${id}/like`, { method: 'POST' });
 const copyPost = id => call(`/lobby/posts/${id}/copy`, { method: 'POST' });
 const reportPost = id => call(`/lobby/posts/${id}/report`, { method: 'POST' });
 const deletePost = id => call(`/lobby/posts/${id}`, { method: 'DELETE' });
 /** 改自己分享的：服务器支持 PUT 就直接改；不支持的话由调用方重新上传 */
 const updatePost = (id, body) => call(`/lobby/posts/${id}`, { method: 'PUT', body });
+let thumbCaps = null;
+const thumbBackfilled = new Set();
+/** 自己分享的、服务器上还没小图的：等这张小图做好后传上去（一次一张，失败就算了） */
+async function backfillThumbs(posts) {
+    try {
+        thumbCaps ??= await health().then(h => (h?.capabilities || []).includes('thumbs')).catch(() => false);
+        if (!thumbCaps) return;
+        for (const p of posts || []) {
+            if (!p?.mine) continue;
+            for (const img of p.images || []) {
+                if (img.thumb || !img.url || thumbBackfilled.has(img.url)) continue;
+                const id = String(img.url).split('/').pop();
+                thumbBackfilled.add(img.url);
+                const url = lobbyImgUrl(img.url);
+                thumbMade.set(url, async blob => {
+                    thumbMade.delete(url);
+                    try {
+                        const data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(blob); });
+                        if (String(data).length < 260000) await call(`/images/${id}/thumb`, { method: 'POST', body: { data } });
+                    } catch (e) { console.warn('[智库] 补传小图', e?.message || e); }
+                });
+            }
+        }
+    } catch { /* 不影响列表 */ }
+}
 
-return { serverBase, lobbyImgUrl, lobbyThumbAttr, stopThumbs, health, listPosts, listTags, createPost, likePost, copyPost, reportPost, deletePost, updatePost };
+return { serverBase, lobbyImgUrl, lobbyThumbAttr, backfillThumbs, stopThumbs, health, listPosts, listTags, createPost, likePost, copyPost, reportPost, deletePost, updatePost };
 })();
 
 // ───── nai.js ─────
@@ -11064,7 +11148,7 @@ function lobbyGridCard(p) {
     const img = p.images[lobbyImgIdx(p)];
     const banned = p.content?.artistString && M.bannedIn(getData(), p.content.artistString).length;
     return `<article class="pc-ticket ${p.copied ? 'saved' : ''} ${banned ? 'banned' : ''}" data-act="lobbyopen" data-id="${p.id}" data-lp="lpost">${banned ? '<span class="pc-banbadge">含黑名单画师</span>' : ''}
-      <div class="pc-ticket-img ${lobbySpoiled(p) ? 'pc-spoiler' : ''}" ${p.images.length > 1 && !lobbySpoiled(p) ? `data-act="lobbyimgnext" data-id="${p.id}"` : ''} style="position:relative">${img ? `<img ${L.lobbyThumbAttr(img.url)} decoding="async" alt="">` : '<span>无图</span>'}${lobbySpoiled(p) ? `<button class="pc-spoil-btn" data-act="lobbyreveal" data-id="${p.id}">剧透 · 点一下看</button>` : ''}${p.images.length > 1 ? `<em class="pc-imgno">${lobbyImgIdx(p) + 1}/${p.images.length}</em>` : ''}</div>
+      <div class="pc-ticket-img ${lobbySpoiled(p) ? 'pc-spoiler' : ''}" ${p.images.length > 1 && !lobbySpoiled(p) ? `data-act="lobbyimgnext" data-id="${p.id}"` : ''} style="position:relative">${img ? `<img ${L.lobbyThumbAttr(img.url, img.thumb)} decoding="async" alt="">` : '<span>无图</span>'}${lobbySpoiled(p) ? `<button class="pc-spoil-btn" data-act="lobbyreveal" data-id="${p.id}">剧透 · 点一下看</button>` : ''}${p.images.length > 1 ? `<em class="pc-imgno">${lobbyImgIdx(p) + 1}/${p.images.length}</em>` : ''}</div>
       <span class="pc-kind">${KIND_NAME[p.kind] || p.kind}</span>
       <button class="pc-use ${p.copied ? 'on dark' : ''}" data-act="lobbycopy" data-id="${p.id}" aria-label="保存">${p.copied ? SYM.check : SYM.down}</button>
       <div class="pc-ticket-text"><b>${esc(p.name)}</b><div class="pc-row-between pc-meta"><span>${esc(p.nickname)}</span><span>♡ ${p.likes} · ${p.copies} 存</span></div></div>
@@ -11219,7 +11303,7 @@ function toggleBlockTag(tag) {
 function lobbyCard(p) {
     const img = p.images[lobbyImgIdx(p)];
     return `<article class="pc-lobby-card" data-lp="lpost" data-id="${p.id}">
-      <div class="pc-lobby-img ${lobbySpoiled(p) ? 'pc-spoiler' : ''}" ${img && !lobbySpoiled(p) ? (p.images.length > 1 ? `data-act="lobbyimgnext" data-id="${p.id}"` : `data-act="viewimg" data-src="${esc(L.lobbyImgUrl(img.url))}"`) : ''}>${img ? `<img ${L.lobbyThumbAttr(img.url)} decoding="async" alt="">` : '<span>无图</span>'}${lobbySpoiled(p) ? `<button class="pc-spoil-btn" data-act="lobbyreveal" data-id="${p.id}">剧透 · 点一下看</button>` : ''}${p.images.length > 1 ? `<em>${lobbyImgIdx(p) + 1}/${p.images.length}</em>` : ''}</div>
+      <div class="pc-lobby-img ${lobbySpoiled(p) ? 'pc-spoiler' : ''}" ${img && !lobbySpoiled(p) ? (p.images.length > 1 ? `data-act="lobbyimgnext" data-id="${p.id}"` : `data-act="viewimg" data-src="${esc(L.lobbyImgUrl(img.url))}"`) : ''}>${img ? `<img ${L.lobbyThumbAttr(img.url, img.thumb)} decoding="async" alt="">` : '<span>无图</span>'}${lobbySpoiled(p) ? `<button class="pc-spoil-btn" data-act="lobbyreveal" data-id="${p.id}">剧透 · 点一下看</button>` : ''}${p.images.length > 1 ? `<em>${lobbyImgIdx(p) + 1}/${p.images.length}</em>` : ''}</div>
       <div class="pc-lobby-text">
         <div class="pc-row-between"><span class="pc-label">${esc(p.nickname)} · ${KIND_NAME[p.kind] || p.kind}</span>
           ${p.mine ? `<button class="pc-icon-btn small" data-act="lobbydel" data-id="${p.id}" aria-label="删除我分享的">×</button>` : `<button class="pc-icon-btn small" data-act="lobbyreport" data-id="${p.id}" aria-label="举报">${ICON.flag}</button>`}</div>
@@ -11266,6 +11350,7 @@ async function loadLobby({ more = false } = {}) {
             more ? Promise.resolve(null) : L.listTags().catch(() => null),
         ]);
         lb.items = more ? [...lb.items, ...res.items] : res.items;
+        void L.backfillThumbs(res.items);
         lb.total = res.total;
         if (tags) lb.tags = tags.tags;
     } catch (e) {
@@ -12586,7 +12671,7 @@ async function onClick(ev, outside = false) {
                 } catch (e) { toastr.error(e.message, '修改失败'); }
                 break;
             }
-            case 'lobbyimgnext': { const p = ui.lobby.items.find(x => x.id === el.dataset.id); if (!p?.images?.length) break; (ui.lobbyImg ||= {})[p.id] = (lobbyImgIdx(p) + 1) % p.images.length; render(); break; }
+            case 'lobbyimgnext': { const p = ui.lobby.items.find(x => x.id === el.dataset.id); if (!p?.images?.length) break; (ui.lobbyImg ||= {})[p.id] = (lobbyImgIdx(p) + 1) % p.images.length; const card = el.closest('.pc-ticket,.pc-lobby-card'), im = el.querySelector('img'), next = p.images[lobbyImgIdx(p)]; if (card && im && next) { const box = DOC.createElement('div'); box.innerHTML = `<img ${L.lobbyThumbAttr(next.url, next.thumb)}>`; const fresh = box.firstElementChild; for (const a of ['data-lthumb', 'src', 'class']) { const v = fresh.getAttribute(a); if (v === null) im.removeAttribute(a); else im.setAttribute(a, v); } const no = el.querySelector('.pc-imgno'); if (no) no.textContent = `${lobbyImgIdx(p) + 1}/${p.images.length}`; } else render(); break; }
             case 'lobbydel': {
                 if (!(await confirmBox('删除你分享的这一条？'))) break;
                 await L.deletePost(el.dataset.id);

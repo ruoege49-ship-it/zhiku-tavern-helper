@@ -25,7 +25,9 @@ if (db.posts.some(p => p.images.some(i => typeof i.data === 'string'))) {
     }
     save();
 }
-let imageBytes = db.posts.reduce((sum,p) => sum + p.images.reduce((n,i) => n + (i.size || fs.statSync(imagePath(i.id)).size),0),0);
+let imageBytes = db.posts.reduce((sum,p) => sum + p.images.reduce((n,i) => n + (i.size || fs.statSync(imagePath(i.id)).size) + (i.thumbSize || 0),0),0);
+// 共享空间上限（例图 + 数据）：默认 64MB，可以用环境变量 MAX_MB 调大
+const MAX_BYTES = Math.max(16, Number(process.env.MAX_MB) || 64) * 1024 * 1024;
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 const str = (v, max = 200) => typeof v === 'string' ? v.trim().slice(0, max) : '';
 const rates = new Map();
@@ -36,13 +38,39 @@ function limit(key, max) {
     if (!v || v.until < now) { rates.set(key, { count: 1, until: now + 3600000 }); return; }
     if (++v.count > max) fail(429, '操作太频繁，请稍后再试');
 }
-function view(p, uid) {
+// 点赞 / 保存数一次扫完所有记录（以前每条分享各扫一遍，分享和记录多了以后列表很慢）
+function actionStats(uid, postId) {
+    const m = new Map();
+    for (const a of db.actions) {
+        if (postId && a.post !== postId) continue;
+        let s = m.get(a.post);
+        if (!s) m.set(a.post, s = { likes: 0, copies: 0, liked: false, copied: false });
+        if (a.kind === 'like') { s.likes++; if (a.uid === uid) s.liked = true; }
+        else if (a.kind === 'copy') { s.copies++; if (a.uid === uid) s.copied = true; }
+    }
+    return m;
+}
+const NO_STATS = { likes: 0, copies: 0, liked: false, copied: false };
+function view(p, uid, stats) {
     const { owner, hidden, ...out } = p;
-    out.images = p.images.map(({ id, nsfw }) => ({ url: '/images/' + id, nsfw }));
-    const acts = db.actions.filter(a => a.post === p.id);
-    return { ...out, mine: owner === uid, likes: acts.filter(a => a.kind === 'like').length,
-        copies: acts.filter(a => a.kind === 'copy').length,
-        liked: acts.some(a => a.kind === 'like' && a.uid === uid), copied: acts.some(a => a.kind === 'copy' && a.uid === uid) };
+    out.images = p.images.map(({ id, nsfw, thumb }) => ({ url: '/images/' + id, nsfw, ...(thumb ? { thumb: '/images/' + id + '?t=1' } : {}) }));
+    const s = (stats || actionStats(uid, p.id)).get(p.id) || NO_STATS;
+    return { ...out, mine: owner === uid, likes: s.likes, copies: s.copies, liked: s.liked, copied: s.copied };
+}
+function findImage(id) {
+    for (const p of db.posts) { if (p.hidden) continue; for (const i of p.images) if (i.id === id) return { img: i, post: p }; }
+    return null;
+}
+const thumbPath = id => imagePath(id) + '.t';
+/** 小图：只收 JPEG / WebP，200KB 以内 */
+function thumbBytes(data) {
+    const m = typeof data === 'string' && data.match(/^data:image\/(jpeg|webp);base64,([A-Za-z0-9+/=]+)$/);
+    if (!m) fail(400, '小图仅支持 JPEG、WebP');
+    const bytes = Buffer.from(m[2], 'base64');
+    if (bytes.length > 200 * 1024) fail(413, '小图不能超过 200KB');
+    const ok = m[1] === 'jpeg' ? bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255 : bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP';
+    if (!ok) fail(400, '小图格式与内容不一致');
+    return { bytes, mime: 'image/' + m[1] };
 }
 async function body(req) {
     const chunks = []; let size = 0;
@@ -57,7 +85,9 @@ function image(i) {
     if (bytes.length > 1024 * 1024) fail(413, '每张例图不能超过 1MB');
     const valid = m[1] === 'png' ? bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) : m[1] === 'jpeg' ? bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255 : bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP';
     if (!valid) fail(400, '例图格式与内容不一致');
-    return { id: randomUUID(), bytes, size: bytes.length, mime: 'image/' + m[1], nsfw: !!i.nsfw };
+    const out = { id: randomUUID(), bytes, size: bytes.length, mime: 'image/' + m[1], nsfw: !!i.nsfw };
+    if (i.thumb !== undefined && i.thumb !== null) { try { const t = thumbBytes(i.thumb); out.thumbBytesBuf = t.bytes; out.thumbMime = t.mime; } catch { /* 小图不对就不要小图，原图照收 */ } }
+    return out;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -70,13 +100,14 @@ const server = http.createServer(async (req, res) => {
         const u = new URL(req.url, 'http://localhost');
         const uid = hash(String(req.headers['x-piaoce-uid'] || ''));
         const ip = String(req.headers['x-real-ip'] || req.socket.remoteAddress);
-        if (req.method === 'GET' && u.pathname === '/health') return send(200, { ok: true, posts: db.posts.filter(p => !p.hidden).length, invite: false, capabilities: ['edit-post'] });
+        if (req.method === 'GET' && u.pathname === '/health') return send(200, { ok: true, posts: db.posts.filter(p => !p.hidden).length, invite: false, capabilities: ['edit-post', 'thumbs'] });
         if (req.method === 'GET' && /^\/images\/[\w-]+$/.test(u.pathname)) {
             const id = u.pathname.split('/')[2];
-            const img = db.posts.filter(p => !p.hidden).flatMap(p => p.images).find(i => i.id === id);
+            const img = findImage(id)?.img;
             if (!img) fail(404, '图片不存在');
-            const bytes = await readFile(imagePath(img.id));
-            res.writeHead(200, { ...headers, 'Content-Type': img.mime, 'Cache-Control': 'public, max-age=31536000, immutable' }); res.end(bytes); return;
+            const small = u.searchParams.get('t') === '1' && img.thumb;
+            const bytes = await readFile(small ? thumbPath(img.id) : imagePath(img.id));
+            res.writeHead(200, { ...headers, 'Content-Type': small ? (img.thumbMime || 'image/jpeg') : img.mime, 'Cache-Control': 'public, max-age=31536000, immutable' }); res.end(bytes); return;
         }
         if (req.method === 'GET' && u.pathname === '/lobby/tags') {
             const tags = new Map();
@@ -85,12 +116,14 @@ const server = http.createServer(async (req, res) => {
         }
         if (req.method === 'GET' && u.pathname === '/lobby/posts') {
             const q = u.searchParams; const term = (q.get('q') || '').toLowerCase();
-            let posts = db.posts.filter(p => !p.hidden && (q.get('nsfw') === '1' || !p.nsfw) &&
+            const stats = actionStats(uid), copies = p => (stats.get(p.id) || NO_STATS).copies;
+            const posts = db.posts.filter(p => !p.hidden && (q.get('nsfw') === '1' || !p.nsfw) &&
                 (!q.get('kind') || p.kind === q.get('kind')) && (!q.get('tag') || p.tags.includes(q.get('tag'))) &&
-                (q.get('mine') !== '1' || p.owner === uid) && (!term || [p.name,p.note,p.nickname,...p.tags,p.content.artistString || ''].join(' ').toLowerCase().includes(term))).map(p => view(p, uid));
-            posts.sort(q.get('sort') === 'hot' ? (a,b) => b.copies-a.copies || b.createdAt-a.createdAt : (a,b) => b.createdAt-a.createdAt);
+                (q.get('mine') !== '1' || p.owner === uid) && (!term || [p.name,p.note,p.nickname,...p.tags,p.content.artistString || ''].join(' ').toLowerCase().includes(term)));
+            posts.sort(q.get('sort') === 'hot' ? (a,b) => copies(b)-copies(a) || b.createdAt-a.createdAt : (a,b) => b.createdAt-a.createdAt);
             const offset = Math.max(0, parseInt(q.get('offset')) || 0), count = Math.min(50, Math.max(1, parseInt(q.get('limit')) || 20));
-            return send(200, { total: posts.length, items: posts.slice(offset, offset+count) });
+            // 只把这一页做成返回的样子
+            return send(200, { total: posts.length, items: posts.slice(offset, offset+count).map(p => view(p, uid, stats)) });
         }
         if (!/^[\w-]{16,128}$/.test(String(req.headers['x-piaoce-uid'] || ''))) fail(401, '缺少有效的用户标识');
         if (req.method === 'POST' && u.pathname === '/lobby/posts') {
@@ -101,20 +134,41 @@ const server = http.createServer(async (req, res) => {
             if (['artist','group'].includes(b.kind) && (!str(b.content.artistString,20000) || !Array.isArray(b.content.members) || !b.content.members.length)) fail(400, '请提供画师串');
             if (!Array.isArray(b.images) || b.images.length > 6) fail(400, '最多上传 6 张例图');
             const images = b.images.map(image);
-            const addedBytes = images.reduce((n,i) => n+i.size,0);
-            if (db.posts.length >= 10000 || imageBytes + addedBytes + (fs.existsSync(file) ? fs.statSync(file).size : 0) + JSON.stringify(b.content).length > 64*1024*1024) fail(507, '共享空间已满，请联系管理员');
+            const addedBytes = images.reduce((n,i) => n+i.size+(i.thumbBytesBuf?.length || 0),0);
+            if (db.posts.length >= 10000 || imageBytes + addedBytes + (fs.existsSync(file) ? fs.statSync(file).size : 0) + JSON.stringify(b.content).length > MAX_BYTES) fail(507, '共享空间已满，请联系管理员');
             const p = { id: randomUUID(), owner: uid, kind: b.kind, name: str(b.name), nickname: str(b.nickname,24), note: str(b.note,5000),
                 tags: [...new Set((Array.isArray(b.tags) ? b.tags : []).map(t => str(t,40)).filter(Boolean))].slice(0,20),
                 nsfw: !!b.nsfw || images.some(i=>i.nsfw), content: b.content, images, createdAt: Date.now(), hidden: false };
             try {
-                for (const i of images) { fs.writeFileSync(imagePath(i.id), i.bytes, { mode: 0o600 }); delete i.bytes; }
+                for (const i of images) {
+                    fs.writeFileSync(imagePath(i.id), i.bytes, { mode: 0o600 }); delete i.bytes;
+                    if (i.thumbBytesBuf) { fs.writeFileSync(thumbPath(i.id), i.thumbBytesBuf, { mode: 0o600 }); i.thumb = true; i.thumbSize = i.thumbBytesBuf.length; }
+                    delete i.thumbBytesBuf; if (!i.thumb) delete i.thumbMime;
+                }
                 db.posts.push(p); save(); imageBytes += addedBytes;
             } catch (e) {
                 db.posts = db.posts.filter(x => x !== p);
-                for (const i of images) { try { fs.unlinkSync(imagePath(i.id)); } catch {} }
+                for (const i of images) { try { fs.unlinkSync(imagePath(i.id)); } catch {} try { fs.unlinkSync(thumbPath(i.id)); } catch {} }
                 throw e;
             }
             return send(201, view(p,uid));
+        }
+        // 自己分享的旧例图补一张小图（只能是自己的分享）
+        const tm = req.method === 'POST' && u.pathname.match(/^\/images\/([\w-]+)\/thumb$/);
+        if (tm) {
+            limit('thumb:'+ip, 600);
+            const hit = findImage(tm[1]);
+            if (!hit) fail(404, '图片不存在');
+            if (hit.post.owner !== uid) fail(403, '只能给自己的分享补小图');
+            const b = await body(req);
+            const t = thumbBytes(b.data);
+            if (!findImage(tm[1])) fail(404, '图片不存在');
+            const old = hit.img.thumbSize || 0;
+            fs.writeFileSync(thumbPath(hit.img.id), t.bytes, { mode: 0o600 });
+            Object.assign(hit.img, { thumb: true, thumbMime: t.mime, thumbSize: t.bytes.length });
+            imageBytes += t.bytes.length - old;
+            save();
+            return send(200, { ok: true, thumb: '/images/' + hit.img.id + '?t=1' });
         }
         const m = u.pathname.match(/^\/lobby\/posts\/([\w-]+)(?:\/(like|copy|report))?$/);
         if (m) {
@@ -146,7 +200,7 @@ const server = http.createServer(async (req, res) => {
                 next.content={...b.content,history:[...history,entry].slice(-30),editedAt:at};
                 if(JSON.stringify(next.content).length>100000) fail(400,'编辑记录和分享内容过长');
                 const growth=Buffer.byteLength(JSON.stringify(next))-Buffer.byteLength(JSON.stringify(old));
-                if(imageBytes+(fs.existsSync(file)?fs.statSync(file).size:0)+growth>64*1024*1024) fail(507,'共享空间已满，请联系管理员');
+                if(imageBytes+(fs.existsSync(file)?fs.statSync(file).size:0)+growth>MAX_BYTES) fail(507,'共享空间已满，请联系管理员');
                 Object.assign(p,next);
                 try { save(); } catch(e) { Object.assign(p,old); throw e; }
                 return send(200,view(p,uid));
@@ -156,7 +210,7 @@ const server = http.createServer(async (req, res) => {
                 const oldPosts=db.posts, oldActions=db.actions;
                 db.posts = db.posts.filter(x => x !== p); db.actions = db.actions.filter(a => a.post !== p.id);
                 try { save(); } catch(e) { db.posts=oldPosts; db.actions=oldActions; throw e; }
-                for (const i of p.images) { try { fs.unlinkSync(imagePath(i.id)); } catch(e) { console.error(e); } imageBytes-=i.size || 0; }
+                for (const i of p.images) { try { fs.unlinkSync(imagePath(i.id)); } catch(e) { console.error(e); } if (i.thumb) { try { fs.unlinkSync(thumbPath(i.id)); } catch {} } imageBytes-=(i.size || 0)+(i.thumbSize || 0); }
                 return send(200,{ok:true});
             }
             if (req.method === 'POST' && m[2]) {
