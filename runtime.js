@@ -2677,7 +2677,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.98（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.99（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -2744,7 +2744,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.98';
+globalThis.__PC_VERSION = '0.8.99';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -4393,7 +4393,7 @@ function createNaiGate({sleep=ms=>new Promise(r=>setTimeout(r,ms)),now=()=>Date.
    const delay=next-now();if(delay>0)await Promise.race([sleep(delay),stopping]);
    if(stopped)throw new Error('生图已停止');
    try{return await fn();}
-   catch(e){if(e?.name==='AbortError'||(e.status!==429&&!(retryServer&&(e.retryable||(e.status>=500&&e.status<=504))))||attempt>=2)throw e;
+   catch(e){if(e?.name==='AbortError'||(e.status!==429&&!(retryServer&&(e.retryable||(e.status>=500&&e.status<=504))))||attempt>=(e.maxRetry??2))throw e;
     const seconds=Number(e.retryAfter),date=Date.parse(e.retryAfter);
     const retry=Number.isFinite(seconds)&&seconds>0?seconds*1000:Number.isFinite(date)?Math.max(0,date-now()):0;
     next=now()+Math.max(retry,5000*2**attempt);const wait=Math.ceil((next-now())/1000);
@@ -4852,7 +4852,7 @@ async function generateRequestInner(opts, recordNai = () => {}, responseInfo = {
         recordNai(body);
         const r = await http('/api/novelai/generate-image', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });
         const text = await r.text();
-        if (!r.ok) throw Object.assign(new Error(explain(r.status, text, true)),{status:r.status,retryAfter:r.headers?.get('Retry-After'),retryable:r.status===500});
+        if (!r.ok) throw Object.assign(new Error(r.status === 500 ? tavern500(params, model) : explain(r.status, text, true)),{status:r.status,retryAfter:r.headers?.get('Retry-After'),retryable:r.status===500,maxRetry:1});
         let b64 = text.trim();
         try { const j = JSON.parse(b64); b64 = j.images?.[0] || j.image || j.data || b64; } catch { /* 原样就是 base64 */ }
         anlasSoon();
@@ -4879,6 +4879,14 @@ function toDataUrl(b64) {
 }
 
 /** 把常见的错误码翻成人话 */
+/** 酒馆转发返回 500：真正的原因在酒馆后台，列出最常见的几种 */
+function tavern500(params, model) {
+    const w = Number(params?.width) || 0, h = Number(params?.height) || 0, steps = Number(params?.steps) || 0;
+    const paid = w * h > 1024 * 1024 || steps > 28;
+    return '酒馆转发 NovelAI 时出错（500）。酒馆会把 NovelAI 的报错都显示成 500，真正的原因在运行酒馆的后台窗口（黑框 / Termux）里「NovelAI returned an error」那一行。最常见的是：'
+        + (paid ? `这次是 ${w}×${h}、${steps} 步，超出 Opus 免费范围要扣点，点数（Anlas）用完了就会这样（改回 1024×1024 以内、28 步以内试试）；` : '点数（Anlas）用完了；')
+        + '同一个账号正在别处生成（官网、别的插件）；酒馆版本太旧不认这个模型' + (String(model || '').includes('nai-diffusion-5') ? '（V5）' : '') + '。到智库「设置 → NovelAI」改成「填我的 key」，就能直接看到 NovelAI 的原话。';
+}
 function explain(status, text, viaTavern = false) {
     let msg = text;
     try { const j = JSON.parse(text); msg = j.message || j.error?.message || (typeof j.error === 'string' ? j.error : JSON.stringify(j.error)) || text; } catch { /* 不是 JSON */ }

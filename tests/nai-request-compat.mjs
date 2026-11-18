@@ -37,7 +37,7 @@ before=calls.length;responses=[new TypeError('network failed'),new TypeError('ne
 config.naiMode='key';config.naiKey='fixture-key';before=calls.length;responses=[new TypeError('network failed')];await assert.rejects(()=>N.generate(opts));assert.equal(calls.length-before,1);config.naiMode='site';
 before=calls.length;responses=[{status:504},{status:504},{status:504}];await assert.rejects(()=>N.generate({...opts,chars:[]}));assert.equal(calls.length-before,3);
 // Tavern transport logs its own body, which does not contain divided-character parameters.
-config.naiMode='tavern';before=calls.length;responses=[{status:500},{status:500},{status:500}];await assert.rejects(()=>N.generate({positive:'tavern input',chars:opts.chars}));assert.equal(calls.length-before,3);assert.equal(calls.at(-1).body.parameters,undefined);assert(logs.filter(l=>l[0]==='生图失败').at(-1)[2].includes('"prompt": "tavern input"'));
+config.naiMode='tavern';before=calls.length;responses=[{status:500},{status:500},{status:500}];await assert.rejects(()=>N.generate({positive:'tavern input',chars:opts.chars}),/酒馆转发 NovelAI 时出错（500）/);assert.equal(calls.length-before,2,'0.8.99：酒馆转发的 500 只重试一次（酒馆把所有 NovelAI 报错都变成 500）');assert.equal(calls.at(-1).body.parameters,undefined);assert(logs.filter(l=>l[0]==='生图失败').at(-1)[2].includes('"prompt": "tavern input"'));
 N.stopQueue();
 // Gate source and generated gate share status handling, backoff and cancellation behavior.
 const gate=createNaiGate({now:()=>time,sleep:async ms=>{time+=ms;waits.push(ms);}});let attempts=0;
