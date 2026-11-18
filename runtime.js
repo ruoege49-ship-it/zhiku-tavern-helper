@@ -2677,7 +2677,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.8.96（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.8.97（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -2744,7 +2744,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.8.96';
+globalThis.__PC_VERSION = '0.8.97';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -8004,7 +8004,7 @@ function renderView() {
     const body = root.querySelector('.pc-body');
     const scroll = body ? body.scrollTop : 0;
     ensureCfyCss();
-    const navs = [['studio', '生图'], ['comfy', 'Comfy'], ['comic', '漫画'], ['video', '视频'], ['book', '画师库'], ['vibe', '氛围'], ['cast', '角色'], ['lobby', '共享']];
+    const navHid = pcNavHidden(getData()), navs = PC_NAV_ALL.filter(([k]) => !navHid.includes(k));
     const mainView = ['artist', 'group', 'batch'].includes(ui.view) ? 'book' : ['charedit', 'outfit', 'combine'].includes(ui.view) ? 'cast' : ui.view;
     root.innerHTML = `
     <div class="pc-shell">
@@ -8021,7 +8021,7 @@ function renderView() {
           <button class="pc-icon-btn ${ui.view === 'settings' ? 'on' : ''}" data-act="nav" data-view="settings" aria-label="设置">${SYM.gear}</button>
           <button class="pc-icon-btn" data-act="close" aria-label="关闭">${ICON.close}</button>
         </div>
-        <nav class="pc-nav"><span class="pc-nav-ind" aria-hidden="true"></span>${navs.map(([k, t]) => `<button class="pc-pill ${mainView === k ? 'on' : ''}" data-act="nav" data-view="${k}">${t}</button>`).join('')}</nav>
+        <nav class="pc-nav ${pcNavEdit ? 'editing' : ''}" style="--pc-navn:${navs.length + 1}"><span class="pc-nav-ind" aria-hidden="true"></span>${navs.map(([k, t]) => pcNavEdit ? `<button class="pc-pill ed ${mainView === k ? 'on' : ''}" data-navk="${k}">${t}${k === 'studio' ? '' : `<span class="pc-nav-x" data-act="navhide" data-k="${k}" aria-label="收起${t}">×</span>`}</button>` : `<button class="pc-pill ${mainView === k ? 'on' : ''}" data-act="nav" data-view="${k}" data-navk="${k}">${t}</button>`).join('')}${pcNavEdit ? '<button class="pc-pill pc-nav-done" data-act="navedit">完成</button>' : '<button class="pc-pill pc-nav-edit" data-act="navedit" aria-label="编辑顶部标签" title="编辑标签（也可以长按标签）">✎</button>'}</nav>
       </header>
       <main class="pc-body"><div class="pc-page ${pageAnim(mainView)}">${VIEWS[ui.view]?.(d) || ''}</div></main>
     </div>`;
@@ -8039,6 +8039,17 @@ function renderView() {
     render.scrollKey = scrollKey;
     if (ui.view === 'comic') { const cv = root.querySelector('#pc-comic-view'); if (cv) globalThis.__zhikuComic?.openSettings(cv); }
     if (ui.view === 'video') { const vv = root.querySelector('#pc-video-view'); if (vv) void globalThis.__zhikuVideo?.open(vv); }
+    {
+        const nav = root.querySelector('.pc-nav');
+        if (nav && !pcNavEdit) {
+            let t = 0, sx = 0, sy = 0;
+            const clear = () => { clearTimeout(t); t = 0; };
+            nav.addEventListener('pointerdown', e => { if (!e.target.closest('[data-navk]')) return; sx = e.clientX; sy = e.clientY; clear(); t = setTimeout(() => { t = 0; pcNavEdit = true; buzz(); render(); }, 550); });
+            nav.addEventListener('pointermove', e => { if (t && Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) > 10) clear(); });
+            ['pointerup', 'pointercancel', 'pointerleave'].forEach(n => nav.addEventListener(n, clear));
+            nav.addEventListener('contextmenu', e => { if (e.target.closest('[data-navk]')) e.preventDefault(); });
+        }
+    }
     // 导航底色从上一个位置滑过来
     const ind = root.querySelector('.pc-nav-ind'), on = root.querySelector('.pc-nav .pc-pill.on');
     if (ind && on) {
@@ -8766,7 +8777,7 @@ function comfyConnectNow(force = false) {
 function ensureCfyCss() {
     if (!DOC.getElementById('pc-comfy-css')) {
         const st = DOC.createElement('style'); st.id = 'pc-comfy-css';
-        st.textContent = `.pc-nav{grid-template-columns:repeat(8,minmax(0,1fr))!important;gap:2px!important}
+        st.textContent = `.pc-nav{grid-template-columns:repeat(var(--pc-navn,8),minmax(0,1fr))!important;gap:2px!important}.pc-nav .pc-pill.ed{border-style:dashed!important;overflow:visible!important}.pc-nav-x{position:absolute;top:-7px;right:-5px;width:17px;height:17px;border-radius:50%;background:var(--pc-paper,#fff);border:1px solid currentColor;font-size:11px;line-height:15px;text-align:center;z-index:3;cursor:pointer}.pc-nav.editing{overflow:visible!important;padding-top:6px}.pc-nav .pc-nav-edit,.pc-nav .pc-nav-done{padding:0!important;opacity:.85}
 .pc-nav .pc-pill{white-space:nowrap!important;font-size:12px!important;padding:0 1px!important;letter-spacing:0!important}
 .pc-cf-conn{display:flex;align-items:center;gap:12px}.pc-cf-dot{flex:none;width:12px;height:12px;border-radius:50%;background:#9a948b}
 .pc-cf-dot.ok{background:#7fae79;box-shadow:0 0 0 4px rgba(127,174,121,.18)}.pc-cf-dot.err{background:#c0675c;box-shadow:0 0 0 4px rgba(192,103,92,.18)}.pc-cf-dot.busy{background:#c9a24a;animation:pc-cf-blink 1s infinite}
@@ -11384,7 +11395,10 @@ function viewSettings(d) {
     const look = setFold('look', '外观', { day: '日间', night: '夜间', auto: '跟随酒馆' }[nightMode] || '日间', `
       <div class="pc-seg three">${[['day', '日间'], ['night', '夜间'], ['auto', '跟随酒馆']].map(([v, t]) => `<button class="${nightMode === v ? 'on' : ''}" data-act="nightmode" data-mode="${v}">${t}</button>`).join('')}</div>
       ${nightMode !== 'day' ? `<div class="pc-dim small pc-mt-s">夜间配色</div><div class="pc-chips wrap">${[['mono', '黑与白', '#131112', '#e6e6e6'], ['sea', '黑蓝深海', '#101828', '#8fb0dc']].map(([v, t, bg, ac]) => `<button class="pc-pill ${(['mono', 'sea'].includes(d.options.nightTheme) ? d.options.nightTheme : 'mono') === v ? 'on' : 'dashed'}" data-act="nighttheme" data-theme="${v}"><span style="display:inline-block;width:14px;height:14px;border-radius:50%;background:${bg};box-shadow:inset 0 0 0 4px ${ac};margin-right:6px;vertical-align:-2px"></span>${t}</button>`).join('')}</div>` : ''}
-      <div class="pc-hint">「跟随酒馆」：酒馆用深色主题时自动换成夜间，每次打开智库时检查一次。</div>`);
+      <div class="pc-hint">「跟随酒馆」：酒馆用深色主题时自动换成夜间，每次打开智库时检查一次。</div>
+      <div class="pc-dim small pc-mt">顶部标签</div>
+      ${PC_NAV_ALL.filter(([k]) => k !== 'studio').map(([k, t]) => `<label class="pc-switch"><input type="checkbox" data-act="navshow" data-k="${k}" ${pcNavHidden(d).includes(k) ? '' : 'checked'}><span></span>${t}</label>`).join('')}
+      <div class="pc-hint">关掉的标签不显示，页面和里面的东西都还在。也可以点顶部标签最后的「✎」或长按标签，直接点 × 收起。「生图」一直留着。</div>`);
 
     const entry = setFold('entry', '入口', ['魔棒', d.options.showStub ? '小票根' : '', d.options.showChip ? '输入框上方' : ''].filter(Boolean).join(' · '), `
       ${sw('showStub', '界面上显示小票根', '点一下切换画师串，长按打开画师库，可以上下拖动')}
@@ -11453,6 +11467,9 @@ function viewComic(d) {
       <div style="height:24px"></div>`;
 }
 /** 视频页 */
+let pcNavEdit = false;
+const PC_NAV_ALL = [['studio', '生图'], ['comfy', 'Comfy'], ['comic', '漫画'], ['video', '视频'], ['book', '画师库'], ['vibe', '氛围'], ['cast', '角色'], ['lobby', '共享']];
+function pcNavHidden(d) { const h = d?.options?.navHidden; return Array.isArray(h) ? h.filter(k => k !== 'studio') : []; }
 function viewVideo() {
     return `<h2 class="pc-pagetitle">视频</h2>
       <section class="pc-card pc-pad"><div id="pc-video-view"><div class="pc-dim small">读取中…</div></div></section>
@@ -11548,6 +11565,15 @@ async function onClick(ev, outside = false) {
             case 'illprompt-save': case 'illprompt-default': case 'illprompt-preview': case 'illprompt-last':
                 await illustrationEditor(act); break;
             case 'illmode': { getData().options.illustMode = el.dataset.mode; commit(); render(); break; }
+            case 'navedit': pcNavEdit = !pcNavEdit; render(); break;
+            case 'navhide': case 'navshow': {
+                const o = getData().options, k = el.dataset.k, h = pcNavHidden(getData());
+                if (!k || k === 'studio') break;
+                if (el.dataset.act === 'navhide') o.navHidden = [...new Set([...h, k])];
+                else o.navHidden = h.includes(k) ? h.filter(x => x !== k) : [...h, k];
+                if (el.dataset.act === 'navhide') toastr.info('收起来了，到「设置 → 外观 → 顶部标签」能拿回来', '智库', { timeOut: 2200 });
+                commit(); render(); break;
+            }
             case 'nightmode': { getData().options.nightMode = el.dataset.mode; commit(); render(); break; }
             case 'newsampleseed': getData().options.sampleSeed = Math.floor(Math.random() * 4294967294) + 1; commit(); render(); break;
             case 'comicsize': getData().options.comicSize = el.dataset.size; commit(); render(); break;
