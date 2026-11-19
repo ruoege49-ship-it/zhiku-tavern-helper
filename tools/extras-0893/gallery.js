@@ -82,35 +82,37 @@ function pcZoomable(stage, getTarget, { onSwipe, onClose, onTap } = {}) {
     };
 }
 
-const PC_GALLERY_CSS = `.pc-gallery{position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:2147483600;background:rgba(10,9,8,.97);color:#f3eee2;font-family:'Noto Serif SC','Songti SC',serif;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
-.pc-gallery,.pc-gallery *{text-shadow:none!important;box-sizing:border-box}
-.pc-gallery-stage{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:none}
-.pc-gallery-page{position:relative;line-height:0;transform-origin:center center;will-change:transform}
-.pc-gallery-page img{display:block;max-width:var(--pc-gw,100vw);max-height:var(--pc-gh,100vh);width:auto;height:auto;-webkit-user-drag:none;pointer-events:none}
-.pc-gallery-page .pc-comic-caps{line-height:1.35}
-.pc-gallery-x{position:absolute!important;top:12px;right:12px;width:42px;height:42px;border-radius:50%;border:1.5px solid rgba(243,238,226,.8)!important;background:rgba(20,18,16,.6)!important;color:#f3eee2!important;font-size:20px;line-height:1;display:grid;place-items:center;cursor:pointer;z-index:3;padding:0!important;margin:0!important}
-.pc-gallery-nav{position:absolute!important;top:50%;transform:translateY(-50%);width:38px;height:58px;border-radius:19px;border:0!important;background:rgba(243,238,226,.14)!important;color:#f3eee2!important;font-size:26px;cursor:pointer;z-index:3;padding:0!important;margin:0!important}
-.pc-gallery-nav.l{left:6px}.pc-gallery-nav.r{right:6px}
-.pc-gallery-bar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:10px;padding:10px 14px max(12px,env(safe-area-inset-bottom));background:linear-gradient(transparent,rgba(10,9,8,.85));font-size:12.5px;letter-spacing:.06em;z-index:3;pointer-events:none}
-.pc-gallery-bar>*{pointer-events:auto}
-.pc-gallery-n{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.pc-gallery-tip{opacity:.6;font-size:11px}
-.pc-gallery-dl{padding:6px 14px;border-radius:999px;border:1.5px solid rgba(243,238,226,.8);color:#f3eee2!important;text-decoration:none;font-size:12.5px}
-@media (hover:none){.pc-gallery-nav{display:none}}`;
+const PC_GALLERY_CSS = `.pc-zv{position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:2147483600;background:rgba(10,9,8,.97);color:#f3eee2;font-family:'Noto Serif SC','Songti SC',serif;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+.pc-zv,.pc-zv *{text-shadow:none!important;box-sizing:border-box}
+.pc-zv-stage{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:none}
+.pc-zv-page{position:relative;line-height:0;transform-origin:center center;will-change:transform}
+.pc-zv-page img{display:block;max-width:var(--pc-gw,100vw);max-height:var(--pc-gh,100vh);width:auto;height:auto;-webkit-user-drag:none;pointer-events:none}
+.pc-zv-page .pc-comic-caps{line-height:1.35}
+.pc-zv-x{position:absolute!important;top:12px;right:12px;width:42px;height:42px;border-radius:50%;border:1.5px solid rgba(243,238,226,.8)!important;background:rgba(20,18,16,.6)!important;color:#f3eee2!important;font-size:20px;line-height:1;display:grid;place-items:center;cursor:pointer;z-index:3;padding:0!important;margin:0!important}
+.pc-zv-nav{position:absolute!important;top:50%;transform:translateY(-50%);width:38px;height:58px;border-radius:19px;border:0!important;background:rgba(243,238,226,.14)!important;color:#f3eee2!important;font-size:26px;cursor:pointer;z-index:3;padding:0!important;margin:0!important}
+.pc-zv-nav.l{left:6px}.pc-zv-nav.r{right:6px}
+.pc-zv-bar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:10px;padding:10px 14px max(12px,env(safe-area-inset-bottom));background:linear-gradient(transparent,rgba(10,9,8,.85));font-size:12.5px;letter-spacing:.06em;z-index:3;pointer-events:none}
+.pc-zv-bar>*{pointer-events:auto}
+.pc-zv-n{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pc-zv-tip{opacity:.6;font-size:11px}
+.pc-zv-dl{padding:6px 14px;border-radius:999px;border:1.5px solid rgba(243,238,226,.8);color:#f3eee2!important;text-decoration:none;font-size:12.5px}
+@media (hover:none){.pc-zv-nav{display:none}}`;
 
 /** 全屏看图：items = [{ src: 地址或返回地址的函数, caps: 叠在图上的对白 HTML, label }]；能放大、左右滑、返回键 / 往下拖 / 点空白处关 */
 function pcGallery(doc, items, start = 0, { onClose } = {}) {
     items = (items || []).filter(Boolean);
     if (!doc || !items.length) return null;
     const w = doc.defaultView || globalThis;
-    if (!doc.getElementById('pc-gallery-style')) { const st = doc.createElement('style'); st.id = 'pc-gallery-style'; st.textContent = PC_GALLERY_CSS; (doc.head || doc.documentElement).appendChild(st); }
+    // 0.9.0：旧版用的类名 pc-gallery 跟画师详情页的例图那一排撞名了（打开过看大图以后，那一排会变成整屏黑色遮罩），换掉旧样式
+    doc.getElementById('pc-gallery-style')?.remove();
+    if (!doc.getElementById('pc-zv-style')) { const st = doc.createElement('style'); st.id = 'pc-zv-style'; st.textContent = PC_GALLERY_CSS; (doc.head || doc.documentElement).appendChild(st); }
     let i = Math.max(0, Math.min(items.length - 1, Number(start) || 0)), done = false, box = null;
     const el = doc.createElement('div');
-    el.className = 'pc-gallery'; el.setAttribute('role', 'dialog');
-    el.innerHTML = '<div class="pc-gallery-stage"></div><button type="button" class="pc-gallery-x" aria-label="关闭">✕</button>'
-        + (items.length > 1 ? '<button type="button" class="pc-gallery-nav l" aria-label="上一张">‹</button><button type="button" class="pc-gallery-nav r" aria-label="下一张">›</button>' : '')
-        + '<div class="pc-gallery-bar"><span class="pc-gallery-n"></span><span class="pc-gallery-tip">双指或双击放大</span><a class="pc-gallery-dl" download>下载</a></div>';
-    const stage = el.querySelector('.pc-gallery-stage'), dl = el.querySelector('.pc-gallery-dl'), num = el.querySelector('.pc-gallery-n');
+    el.className = 'pc-zv'; el.setAttribute('role', 'dialog');
+    el.innerHTML = '<div class="pc-zv-stage"></div><button type="button" class="pc-zv-x" aria-label="关闭">✕</button>'
+        + (items.length > 1 ? '<button type="button" class="pc-zv-nav l" aria-label="上一张">‹</button><button type="button" class="pc-zv-nav r" aria-label="下一张">›</button>' : '')
+        + '<div class="pc-zv-bar"><span class="pc-zv-n"></span><span class="pc-zv-tip">双指或双击放大</span><a class="pc-zv-dl" download>下载</a></div>';
+    const stage = el.querySelector('.pc-zv-stage'), dl = el.querySelector('.pc-zv-dl'), num = el.querySelector('.pc-zv-n');
     const fit = () => {
         if (done) return;
         const vv = w.visualViewport, W = Math.round(vv?.width || w.innerWidth || 0), H = Math.round(vv?.height || w.innerHeight || 0);
@@ -123,7 +125,7 @@ function pcGallery(doc, items, start = 0, { onClose } = {}) {
     };
     const show = () => {
         const it = items[i];
-        box = doc.createElement('div'); box.className = 'pc-gallery-page';
+        box = doc.createElement('div'); box.className = 'pc-zv-page';
         const img = doc.createElement('img'); img.alt = it.label || ''; img.draggable = false;
         box.appendChild(img);
         if (it.caps) box.insertAdjacentHTML('beforeend', it.caps);
@@ -151,7 +153,7 @@ function pcGallery(doc, items, start = 0, { onClose } = {}) {
     el.addEventListener('click', ev => {
         const b = ev.target.closest('button'); if (!b) return;
         ev.stopPropagation();
-        if (b.classList.contains('pc-gallery-x')) close(); else if (b.classList.contains('l')) go(-1); else if (b.classList.contains('r')) go(1);
+        if (b.classList.contains('pc-zv-x')) close(); else if (b.classList.contains('l')) go(-1); else if (b.classList.contains('r')) go(1);
     });
     (doc.documentElement || doc.body).appendChild(el);
     show(); fit();
