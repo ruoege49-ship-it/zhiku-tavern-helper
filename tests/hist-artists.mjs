@@ -1,0 +1,22 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+// 历史生图记下画师串：正文画师串优先，其次画师全在提示词里、人数最多的画师组，单个画师记画师名
+const t = fs.readFileSync(new URL('../runtime.js', import.meta.url), 'utf8');
+const a = t.indexOf('const __mod_model = (() => {'), b = t.indexOf('\n})();', t.indexOf('return { DATA_VERSION', a)) + 6;
+const f = t.indexOf('function pcHistArtists'), g = t.indexOf('async function pcRecordImage');
+const ctx = { console, structuredClone };
+vm.runInNewContext(t.slice(a, b).replace('const __mod_model', 'var __mod_model') + '\n' + t.slice(f, g) + ';this.H=pcHistArtists;this.M=__mod_model;', ctx);
+const d = ctx.M.emptyData ? ctx.M.emptyData() : { artists: {}, groups: {} };
+d.artists = { a1: { id: 'a1', tag: 'artist:wlop' }, a2: { id: 'a2', tag: 'artist:ask (askzy)' }, a3: { id: 'a3', tag: 'artist:mika pikazo' } };
+d.groups = { g1: { id: 'g1', name: '水彩', members: [{ artistId: 'a1', weight: 1 }, { artistId: 'a2', weight: 1 }] }, g2: { id: 'g2', name: '只有wlop', members: [{ artistId: 'a1', weight: 1 }] } };
+let r = ctx.H(d, '1girl, artist:wlop, 1.2::artist:ask (askzy)::, smile');
+assert.equal(r.ticket, '水彩'); assert.ok(r.artists.includes('wlop') && r.artists.includes('ask (askzy)'));
+d.active = { type: 'group', id: 'g2' };
+assert.equal(ctx.H(d, '1girl, artist:wlop, artist:ask (askzy)').ticket, '只有wlop');
+d.active = null;
+assert.equal(ctx.H(d, 'artist:mika pikazo, 1girl').ticket, 'mika pikazo');
+assert.equal(ctx.H(d, '1girl, smile').ticket, '');
+assert.equal(ctx.H(d, 'artist:somebody new').ticket, '');
+assert.equal(ctx.H(d, 'x', '指定的').ticket, '指定的');
+console.log('hist-artists ok');

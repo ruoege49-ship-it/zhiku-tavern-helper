@@ -86,13 +86,18 @@ import {applyRegexSyncCompatibility} from './regex-sync-compat.mjs';
 import {applyNavEditCompatibility} from './nav-edit-compat.mjs';
 import {applyLobbyThumbsCompatibility} from './lobby-thumbs-compat.mjs';
 import {applyTavern500Compatibility} from './tavern500-compat.mjs';
+import {applyComicDeepCompatibility} from './comic-deep-compat.mjs';
+import {applyComicStudioCompatibility} from './comic-studio-compat.mjs';
+import {applyComicArtCompatibility} from './comic-art-compat.mjs';
+import {applyExcerptCompatibility} from './excerpt-compat.mjs';
+import {applyHistCompatibility} from './hist-compat.mjs';
 import {fileURLToPath} from 'node:url';
 process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.9.0';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.9.0');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.9.1';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.9.1');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -5481,6 +5486,14 @@ s=applyZoomGalleryCompatibility(s);
 s=applyComicPresetCompatibility(s);
 s=applyComicPresetPickCompatibility(s);
 s=applyVideoCompatibility(s);
+// 0.9.1：兼容层依赖前面的漫画画廊与视频页
+s=applyComicDeepCompatibility(s);
+s=applyComicStudioCompatibility(s);
+s=applyComicArtCompatibility(s);
+// 0.9.1：摘要依赖视频页与视频 AI 入口
+s=applyExcerptCompatibility(s);
+// 0.9.1：历史生图全屏看依赖画廊功能
+s=applyHistCompatibility(s);
 s=applyRegexSyncCompatibility(s);
 s=applyNavEditCompatibility(s);
 s=applyLobbyThumbsCompatibility(s);
@@ -5500,9 +5513,9 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',(prefix+s+'\n}\n').replace(/\r\n/g, '\n'));
 fs.copyFileSync('src/index.js',dir+'/index.js');
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.9.0',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.9.0',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.9.1',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.9.1',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.9.0 built; storage keys and shared upload preserved.');
+console.log('Extension 0.9.1 built; storage keys and shared upload preserved.');

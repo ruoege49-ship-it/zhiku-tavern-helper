@@ -183,14 +183,66 @@ function comicRequest(parsed, { stylePos = '', styleNeg = '', extraNeg = '', wid
     const chars = parsed.chars.map(c => ({ prompt: draw ? c.positive : splitText(c.positive).visual, uc: c.negative, ...(c.center ? { center: c.center } : {}) }));
     return { positive, negative, chars, width: w, height: h };
 }
-/** 叠在图上的对白：每格的字放在这一格（按竖着平分估算）底部，整页旁白放最上面 */
-function captionsHtml(parsed, esc, size = 's') {
+/** 0.9.1：漫画气泡。每句对白单独一个泡：「」/“” 是说话（圆泡带尾巴），（）是心里话（虚线云泡），
+ *  短促的拟声（片假名、全大写、带！的短词）是拟声字，其余是旁白（方框）。日漫顺序：一格里第一句在右上，往左下排。
+ *  vertical = 竖排（黑白日漫的样子）。 */
+function comicLineKind(line) {
+    const t = String(line || '').trim();
+    if (!t) return null;
+    if (/^[「『“"][\s\S]*[」』”"]$/.test(t)) return { kind: 'speech', text: t.replace(/^[「『“"]|[」』”"]$/g, '').trim() };
+    if (/^[（(][\s\S]*[）)]$/.test(t)) return { kind: 'thought', text: t.replace(/^[（(]|[）)]$/g, '').trim() };
+    const bare = t.replace(/[!！?？~～…ー\s]/g, '');
+    if (bare && bare.length <= 6 && (/^[゠-ヿ぀-ゟ]+$/.test(bare) || /^[A-Z]+$/.test(bare) || (/[!！]{1,}$/.test(t) && bare.length <= 4 && !/[，。,.]/.test(t))))
+        return { kind: 'sfx', text: t };
+    return { kind: 'narr', text: t };
+}
+function comicBubblesHtml(parsed, esc, fs, { vertical = false } = {}) {
+    const n = Math.max(1, parsed.panelTexts.length);
+    const boxes = parsed.boxes?.length === parsed.panelTexts.length ? parsed.boxes : null;
+    const base = `font-size:${fs} !important;line-height:1.4 !important;font-family:'Noto Serif SC','Songti SC',serif !important;margin:0 !important;letter-spacing:0 !important;text-indent:0 !important`;
+    const vert = vertical ? 'writing-mode:vertical-rl !important;text-orientation:mixed;' : '';
+    const pct = v => (v * 100).toFixed(2) + '%';
+    const split = arr => arr.map(capLine).filter(Boolean).flatMap(x => x.split(/\n+/)).map(s => s.trim()).filter(Boolean);
+    const out = [];
+    const pageLines = split(parsed.pageTexts || []);
+    if (pageLines.length) out.push(`<div class="pc-cb2 narr page" style="left:6px;top:6px;max-width:70%;${base}">${pageLines.map(esc).join('<br>')}</div>`);
+    parsed.panelTexts.forEach((t, i) => {
+        const lines = split(t).map(comicLineKind).filter(Boolean);
+        if (!lines.length) return;
+        const b = boxes?.[i] || { x: 0, y: i / n, w: 1, h: 1 / n };
+        const talk = lines.filter(l => l.kind === 'speech' || l.kind === 'thought'), m = talk.length;
+        let k = 0, narrAt = 0, sfxAt = 0;
+        for (const l of lines) {
+            const tx = esc(l.text).replace(/\n+/g, '<br>');
+            if (l.kind === 'narr') {
+                // 旁白：这一格左上角的方框
+                out.push(`<div class="pc-cb2 narr" style="left:calc(${pct(b.x)} + 4px);top:calc(${pct(b.y + b.h * 0.04 + narrAt * b.h * 0.16)} + 4px);max-width:calc(${pct(b.w * 0.6)});${base}">${tx}</div>`);
+                narrAt++; continue;
+            }
+            if (l.kind === 'sfx') {
+                out.push(`<div class="pc-cb2 sfx" style="left:${pct(b.x + b.w * (0.5 + 0.18 * (sfxAt % 2 ? -1 : 1)))};top:${pct(b.y + b.h * (0.45 + 0.12 * sfxAt))};${base};font-size:calc(${fs} * 1.9) !important">${tx}</div>`);
+                sfxAt++; continue;
+            }
+            // 说话 / 心里话
+            // 竖排：从右往左一排排开；横排：右上起，左右交替往下
+            const cx = vertical ? b.x + b.w * Math.max(0.12, 0.84 - 0.2 * k) : b.x + b.w * (m === 1 ? 0.7 : k % 2 === 0 ? 0.72 : 0.3);
+            const cy = vertical ? b.y + b.h * (0.05 + 0.08 * (k % 2)) : b.y + b.h * (0.06 + (m > 1 ? 0.62 * k / (m - 1 || 1) : 0));
+            const lim = vertical ? `max-height:${pct(b.h * 0.62)};` : `max-width:${pct(b.w * 0.58)};`;
+            out.push(`<div class="pc-cb2 ${l.kind}${vertical ? ' v' : ''}" style="left:${pct(cx)};top:${pct(cy)};${lim}${vert}${base}">${tx}</div>`);
+            k++;
+        }
+    });
+    return out.join('');
+}
+/** 叠在图上的对白：bubble = 漫画气泡（默认）；box = 原来的字条（每格的字放在这一格底部，整页旁白放最上面） */
+function captionsHtml(parsed, esc, size = 's', { bubble = 'bubble', vertical = false } = {}) {
     if (!parsed?.ok || size === 'hide') return '';
     const n = Math.max(1, parsed.panelTexts.length);
     const boxes = parsed.boxes?.length === parsed.panelTexts.length ? parsed.boxes : null;
     // 字号写在行内并加 !important：聊天楼层里美化常给正文统一设字号，样式表压不住
     const fs = { xs: 'clamp(5px,1.9cqw,10px)', s: 'clamp(6px,2.5cqw,13px)', m: 'clamp(8px,3.2cqw,16px)', l: 'clamp(10px,4cqw,20px)' }[size] || 'clamp(6px,2.5cqw,13px)';
     const font = `font-size:${fs} !important;line-height:1.35 !important;font-family:'Noto Serif SC','Songti SC',serif !important;font-weight:${size === 'xs' ? 500 : 600} !important;padding:.15em .6em !important;margin:0 !important;letter-spacing:0 !important;text-indent:0 !important`;
+    if (bubble !== 'box') { const inner = comicBubblesHtml(parsed, esc, fs, { vertical }); return inner ? `<div class="pc-comic-caps sz-${size}" style="position:absolute !important;top:0 !important;right:0 !important;bottom:0 !important;left:0 !important;container-type:inline-size !important;pointer-events:none;margin:0 !important;padding:0 !important">${inner}</div>` : ''; }
     const box = (t, style, cls = '') => `<div class="pc-comic-cap ${cls}" style="${style};${font}">${t.map(capLine).filter(Boolean).map(x => esc(x).replace(/\n+/g, '<br>')).join('<br>')}</div>`;
     const out = [];
     if (parsed.pageTexts.length) out.push(box(parsed.pageTexts, 'top:8px', 'top'));
@@ -377,7 +429,160 @@ function syncComicInlineRegex(c, on) {
     return changed;
 }
 /** 「把这一楼画成漫画」的请求：读这一楼的正文，改编成几页漫画分镜 */
-function adaptRequest(story, { pages = 0, panels = '', cast = '', before = '', color = 'color', extra = '' } = {}) {
+/** 0.9.2 分镜版式：从好分镜里学来的写法。每种都带一页完整的示范（@page / @panel / @character），
+ *  AI 照着示范写，NAI 才画得出这种分镜——光说「要有艺术感」它画不出来。
+ *  分格选「艺术感」时每页必用一种（发完整示范）；「有变化 / 大胆」时只发说明，合适的页借用。 */
+const COMIC_BOARDS = [
+    {
+        id: 'relay', name: '局部接力', when: '登场、逼近、悬念、冷淡的人出场、重逢',
+        how: '四条横贯整页的长条格从上往下排，全页不出现全身，只拍局部：走路的腿 → 落地的鞋 → 垂下的手 → 最后一格才露出眼睛。一片落叶在格子之间飘落，跨过格线把四格串起来。',
+        page: `@page
+rating:general, 1boy, comic, manga, monochrome, greyscale, screentone, 4 panels, horizontal strip panels stacked vertically, wide panels, white gutters, white background, no full body, a falling leaf crossing panel borders, falling leaves, autumn, cold atmosphere, dramatic shadows
+@panel P1
+strip 1 of 4 at the very top, wide panel, from below, legs walking on wooden floorboards, lower body, out of frame, dappled light, heavy screentone
+@character C1
+boy, black suit, black trousers, black leather shoes, walking, lower body
+@panel P2
+strip 2 of 4, foot focus, a polished leather shoe stepping down, blank white background, a leaf drifting down next to the shoe
+@panel P3
+strip 3 of 4, hand focus, hand hanging relaxed by his side, black suit sleeve, cuff buttons, a leaf passing between the fingers
+@character C1
+boy, black suit sleeve, pale hand, long fingers
+@panel P4
+strip 4 of 4 at the bottom, extreme close-up, eye focus, one sharp eye, bangs over the eye, half face, cold expression, deep shadow on the left
+@character C1
+boy, black hair, grey eyes, sharp eyes, expressionless, close-up
+Text: （……回来了。）`,
+    },
+    {
+        id: 'windows', name: '窗格叠全身', when: '唯美、抒情、角色登场、心境变化、梦一样的片刻',
+        how: '整页白底，一个全身人物斜着飘在整页中间做底图；上面一排开三个竖长小窗格，放脸部特写和一串连续小动作（低头、喝、吐气）；右下角再开一个竖长格放另一个视角。头发、衣摆、花瓣从人物身上流出去，盖过窗格的边。',
+        page: `@page
+rating:general, 1girl, comic, illustration, limited palette, navy blue and white, white background, full body figure floating diagonally across the whole page, three small vertical inset panels in a row at the top, one tall inset panel at the bottom right, very long flowing hair spilling over the panel borders, petals, ornate line art, art nouveau, elegant
+@panel P1
+top left inset panel, close-up, side profile, eyes half closed, navy background
+@character C1
+girl, very long black wavy hair, pale skin, floral kimono, side profile, eyes half closed
+@panel P2
+top middle inset panel, close-up, drinking from a small sake cup, eyes closed, navy background
+@panel P3
+top right inset panel, close-up, exhaling white smoke, looking up, navy background
+@panel P4
+main image behind the panels, full body, floating in the air, hair and sleeves flowing in swirls, holding her own face with both hands, barefoot
+@character C1
+girl, very long black wavy hair flowing everywhere, white kimono with blue floral pattern, floating, barefoot, sad
+@panel P5
+bottom right tall inset panel, from the side, the same girl sinking underwater, bubbles, coral, blue
+Text: 那天的酒是甜的。`,
+    },
+    {
+        id: 'blackflow', name: '黑页流体', when: '孤独、失去、离开、时间流逝、回忆被拉走',
+        how: '整页涂黑。上面两条宽格画远景：很小的人坐在水边，第二格只剩倒影；倒影像液体一样从第二格底边溢出来，顺着黑色一路往下流，滴进最下面一条横格里的特写（闭着的眼睛、头发）。中间一大片只有黑和流下来的白。',
+        page: `@page
+rating:general, 1boy, comic, manga, monochrome, black background, large negative space, 3 panels, two wide panels at the top, one wide panel at the bottom, white liquid dripping out of the second panel and flowing down through the black space into the bottom panel, ink flow, surreal, lonely, quiet
+@panel P1
+top wide panel, extreme wide shot, tiny distant figure sitting on a bench by the water, flowing water lines, empty white space
+@character C1
+boy, tiny figure, sitting, from behind, scarf
+@panel P2
+middle wide panel, the same place, only his dark reflection on the water left, ripples, the reflection melting
+@panel P3
+bottom wide panel, extreme close-up, closed eye, messy black hair, lying down, tear trail, speed lines, screentone
+@character C1
+boy, black hair, closed eyes, lying, close-up, sad
+Text: 等我回头，那里已经没有人了。`,
+    },
+    {
+        id: 'stagger', name: '错位长条加纹样', when: '古风、宫廷、群像、命运感、隔着人群对视',
+        how: '五条宽窄不一的横条左右错开排，交替放人物半身、眼部特写、衣饰细节、另一个人的眼睛，两个人的眼睛隔着几格对望。整页底下铺满一种纹样（花藤、星星、水纹），从格子后面伸出来压过格线。',
+        page: `@page
+rating:general, 1boy, 1girl, comic, illustration, monochrome blue, limited palette, 5 panels, staggered horizontal panels shifted left and right, alternating eye close-up strips, ornate floral vines and flowers growing behind and over the panel borders, patterned background, white background, detailed line art
+@panel P1
+top panel shifted left, upper body, man in a black embroidered coat, crowd of people in the background, looking at viewer
+@character C1
+boy, long black hair, dark eyes, black embroidered coat, upper body, serious
+@panel P2
+second strip shifted right, extreme close-up, his eyes only, eye focus
+@panel P3
+middle panel shifted left, ornate dress detail, pearls, embroidered sleeves, no face
+@panel P4
+fourth panel shifted right, upper body, woman in a pearl headdress, looking back
+@character C2
+girl, black braided hair, pearl headdress, embroidered dress, upper body, looking back
+@panel P5
+bottom strip, extreme close-up, her eyes only between hanging pearls, eye focus, looking up
+Text: 「是你。」`,
+    },
+    {
+        id: 'collage', name: '心理拼贴', when: '崩溃、梦、闪回、内心独白、执念、不安',
+        how: '中间一张占半页的大脸（流泪、空洞的眼睛、头发像燃烧的线），周围散落五六个大小不一的小方框放象征物（蜡烛、照片、手势、星空），再加几条黑色横条，像贴满东西的剪贴本，只用一点点红色。',
+        page: `@page
+rating:general, 1girl, illustration, collage, surreal, greyscale, spot color, red accents, center large face taking half of the page, scattered small frames with symbolic objects around her, black horizontal bars, melting candles on top, torn paper, ink, psychological, unsettling
+@panel P1
+center large panel, close-up, face with hollow eyes, tears, hair turning into tangled lines like smoke, cracks
+@character C1
+girl, messy hair, hollow eyes, tears, expressionless, close-up
+@panel P2
+small frame top left, a single staring eye
+@panel P3
+small frame right, an old photograph with a smiling face scratched out
+@panel P4
+small frame bottom left, a hand making a gesture, black background
+@panel P5
+small frame upper right, night sky with stars through a window
+@panel P6
+bottom, three small red ribbons hanging from a black bar
+Text: （我是不是早就该发现。）`,
+    },
+    {
+        id: 'burst', name: '小格铺垫大格爆发', when: '心动、发现、顿悟、情绪一下子涌上来',
+        how: '上半页两个并排小格：一格交代动作，一格是发现的东西的特写；下半页一个超大格画情绪本身，把心动画成冒泡、星星、发光的心之类的象征物，人物只露一半，旁白放大格右下角的方框里，再配一两个拟声。',
+        page: `@page
+rating:general, 1girl, comic, color, limited palette, blue and black, textured paper, 3 panels, two small panels side by side on top, one huge panel taking the bottom two thirds, symbolic emotion visualization, sparkles, bubbles, glowing heart shape, cute
+@panel P1
+top right small panel, medium shot, she bends down by the shore and picks up a glass marble, sand, foam
+@character C1
+girl, short black hair, blue star-patterned scarf, bending down, curious
+@panel P2
+top left small panel, close-up of the glass marble in the foam, reflected stars and moon, sparkles
+@panel P3
+bottom huge panel, close-up, half of her face cut off by the frame edge, scarf filling the panel, a big glowing heart made of bubbles bursting beside her, stars, sparkles
+@character C1
+girl, short black hair, blue star-patterned scarf, wide eyes, blush, partially out of frame
+Text: 心里有什么东西一下子冒泡了。
+咕嘟`,
+    },
+    {
+        id: 'breakout', name: '出格', when: '对峙、擦肩、告白前一刻、关系转折、动作戏',
+        how: '一条竖线把页面切开：左边格子里是一个人的侧脸，右边的人一半在格里、一半走出格子站在留白上，两人的手隔着格线快碰到；两人之间的空白放竖排对白。动作戏就用重叠的斜格、速度线、大号拟声字，人物越过格线冲向读者。',
+        page: `@page
+rating:general, 2boys, comic, manga, monochrome, 3 panels, vertical split, character breaking out of the panel border, standing on white margin, overlapping panels, hands almost touching across the panel border, vertical speech bubble in the white space, dramatic
+@panel P1
+left tall panel, close-up, side profile looking down, half the face in shadow, screentone background
+@character C1
+boy, short messy white hair, side profile, looking down, tank top
+@panel P2
+right side, full body, a boy walking out of the panel onto the white page margin, reaching his hand toward the left panel
+@character C2
+boy, black spiky hair, sleeveless shirt, shorts, boots, walking, reaching out
+@panel P3
+top right small panel, close-up, looking back over the shoulder, surprised
+Text: 「……别走。」`,
+    },
+];
+const COMIC_CRAFT = '分镜法（照着做，NAI 才画得出好分镜）：①一页只讲一个瞬间，格子是镜头不是插图；②景别要跳，别连着两格一样的景别：大远景交代地方，特写给情绪，局部（手、脚、眼睛、背影、一个物件）给细节；③能用局部讲的就别画全身，最后一格常常只留眼睛或背影；④这页情绪最重的那一刻给最大的格，铺垫用小格；⑤用一个东西把格子串起来（落叶、头发、水、视线、光），并在 @page 里写明它「crossing panel borders」；⑥留白和涂黑也是格子：安静、孤独时敢写 large negative space、black background；⑦@page 要写出整页的版式（几格、格子形状、怎么排、有没有叠在大图上 / 出格 / 纹样），每个 @panel 开头写它在页面的位置（top left、bottom right inset panel；横条一格格往下的写 strip 1 of 4、strip 2 of 4…）；⑧一页颜色收着用：limited palette、monochrome、spot color 比五颜六色更像作品。';
+function comicBoardsText(d, { full = false } = {}) {
+    const off = new Set(d?.options?.comicBoardsOff || []);
+    return [...COMIC_BOARDS, ...(Array.isArray(d?.comicBoards) ? d.comicBoards : [])].filter(b => b && b.how && !off.has(b.id))
+        .map(b => `【${b.name}】适合：${b.when || '都行'}。画法：${b.how}${full && b.page ? `\n示范：\n<image>\n${b.page}\n</image>` : b.tags ? ` 标签：${b.tags}` : ''}`).join('\n\n');
+}
+const COMIC_LAYOUT_HINT = {
+    art: '这一话要有艺术感：每一页从 <storyboards> 里挑一种最合这页剧情的版式（同一话尽量别重复），在 <comic_plan> 开头写明用的是哪种。照它的示范写 <image>：@page 的版式说明和示范一样具体，@panel 的位置和镜头照示范的思路排，但人物、场景、物件、对白全换成这一页的剧情，别照抄示范里的东西。',
+    grid: '分格整齐，横平竖直，格子大小差不多。',
+    vary: '分格要有节奏，别每页都是整齐的方格：大格配小格（一个大格交代场面或情绪，旁边几个小格接动作和反应），偶尔用斜切的分格线、在大格里嵌一个小格，关键瞬间用占大半页或出血到页边的大格，人物可以冲出格子边框；每一页的布局都要不一样。在 @page 里用英文写清布局，比如 dynamic panel layout, one large panel and two small panels, diagonal panel borders, inset panel, character breaking the panel border。',
+    bold: '分格要大胆：每一页都要有一个打破常规的设计——斜切成几块的分格、整页一格的跨页大图、无边框留白、人物越过分格线、重叠的格子、竖长或横长的极端格子；镜头也要夸张（大仰拍、大俯拍、极近特写、鱼眼）。别出现两页一样的布局。在 @page 里用英文写清布局，比如 dynamic panel layout, irregular panels, diagonal panel borders, borderless panel, overlapping panels, character breaking the panel border, splash page。',
+};
+function adaptRequest(story, { pages = 0, panels = '', cast = '', before = '', color = 'color', extra = '', layout = '', boards = '' } = {}) {
     const system = '你是漫画分镜导演，把小说 / 角色扮演的正文改编成日式漫画页，给 NovelAI V5 出图用。'
         + '每一页先写一组 <comic_plan>（这一页讲什么、几格、每格的构图和对白），紧跟着写一组 <image>…</image>。只输出这些块，不要任何解释。'
         + '<image> 用分段文本协议：第一行 @page，下面写这一页的整体：分级（rating:general 或 rating:sensitive）、实际人数词（如 1boy, 1girl, 2boys）、comic page、画格数量与布局、留白、光影、色调。'
@@ -388,7 +593,10 @@ function adaptRequest(story, { pages = 0, panels = '', cast = '', before = '', c
         + '\n\n格式示例：\n<comic_plan>第 1 页：两格。P1 远景交代咖啡馆和雨；P2 近景他看向窗外。</comic_plan>\n<image>\n@page\nrating:general, 1boy, comic page, 2 panels, vertical layout, rainy night, warm indoor light\n@panel P1\ntop half, wide shot, cafe interior, rain on window\n@panel P2\nbottom half, close-up\n@character C1\nboy, black hair, grey eyes, white shirt, black vest, sitting, looking outside, melancholic\nText: 「又下雨了。」\n</image>';
     const user = (cast ? `<characters>\n${cast}\n</characters>\n\n` : '')
         + (before ? `<previous readonly="true">\n${before}\n</previous>\n\n` : '')
-        + `<story>\n${story}\n</story>\n\n把 <story> 改编成${pages ? ` ${pages} 页` : '若干页（按剧情多少自己定：短的 1–2 页，长的可以 5–8 页，剧情每个转折都要有画面，不要压缩成几格）'}${color === 'mono' ? '黑白网点' : '彩色'}漫画，${panels ? `每页 ${panels} 格` : '每页 2–5 格'}。只画 <story> 里发生的事${pages ? `，${pages} 页要把整段剧情从头画到尾，平均分配` : ''}。`
+        + `<story>\n${story}\n</story>\n\n把 <story> 改编成${pages ? ` ${pages} 页` : '若干页（按剧情多少自己定，不设上限：短的 1–2 页，长的就多画几页，剧情每个转折都要有画面，不要压缩成几格）'}${color === 'mono' ? '黑白网点' : '彩色'}漫画，${panels ? `每页 ${panels} 格` : '每页 2–6 格'}。${color === 'mono' ? '黑白日漫的画法：@page 里写 manga, monochrome, screentone；多用集中线（focus lines）、速度线（speed lines）、大面积涂黑和留白、排线阴影表现情绪，每页至少一格大格或特写；拟声词用日式（ドキッ、ザァァ）写进 Text。' : ''}只画 <story> 里发生的事${pages ? `，${pages} 页要把整段剧情从头画到尾，平均分配` : ''}。`
+        + `\n分格：${COMIC_LAYOUT_HINT[layout] || COMIC_LAYOUT_HINT.vary}`
+        + (layout !== 'grid' ? `\n${COMIC_CRAFT}` : '')
+        + (layout !== 'grid' && boards ? `${layout === 'art' ? '' : '\n合适的页面可以借用下面 <storyboards> 里的版式。'}\n<storyboards>\n${boards}\n</storyboards>` : '')
         + (String(extra || '').trim() ? `\n额外要求：${String(extra).trim()}` : '');
     return { system, user };
 }
@@ -434,6 +642,16 @@ const CSS = `
 .pc-comic-caps.sz-l .pc-comic-cap{font-size:13px;font-size:clamp(10px,4cqw,20px)}
 .pc-comic-cap.top{transform:translate(-50%,0);background:#16120f;color:#f4efe4}
 .pc-comic.nocap .pc-comic-caps{display:none}
+.pc-cb2{position:absolute;box-sizing:border-box;width:max-content;color:#16120f;text-align:center;word-break:break-word;font-weight:600;pointer-events:none}
+.pc-cb2.speech{transform:translate(-50%,0);background:#fff;border:1.5px solid #16120f;border-radius:1.6em;padding:.5em .85em;box-shadow:0 1px 0 rgba(0,0,0,.08)}
+.pc-cb2.speech::after{content:"";position:absolute;left:58%;bottom:-.5em;width:.75em;height:.75em;background:#fff;border-right:1.5px solid #16120f;border-bottom:1.5px solid #16120f;transform:rotate(45deg) skew(10deg,10deg)}
+.pc-cb2.thought{transform:translate(-50%,0);background:rgba(255,255,255,.96);border:1.5px dashed #16120f;border-radius:2.2em;padding:.65em .95em;font-weight:500}
+.pc-cb2.v{padding:.85em .5em}
+.pc-cb2.narr{background:#fdfaf2;border:1.5px solid #16120f;border-radius:2px;padding:.25em .5em;text-align:left;font-weight:500}
+.pc-cb2.narr.page{background:#16120f;color:#f4efe4;border-color:#16120f}
+.pc-cb2.sfx{transform:translate(-50%,-50%) rotate(-8deg);font-weight:900;font-style:italic;color:#fff;-webkit-text-stroke:.12em #16120f;paint-order:stroke fill;text-shadow:0 0 .12em #16120f;white-space:nowrap}
+.pc-comic-page.mono img,.pc-cb-art.mono img{filter:grayscale(1) contrast(1.06)}
+.pc-comic-tag .sty{opacity:.7;margin-left:.4em}
 .pc-comic-fold{display:flex;gap:8px;align-items:center;margin-top:6px}
 .pc-comic-fold button{border:1px dashed currentColor;background:transparent;color:inherit;border-radius:999px;padding:4px 14px;font-size:13px;cursor:pointer}
 .pc-comic-acts{position:absolute;left:0;right:0;top:0;display:none;gap:8px;justify-content:center;padding:10px;background:linear-gradient(rgba(20,18,16,.55),transparent)}
@@ -605,11 +823,12 @@ const PC_GALLERY_CSS = `.pc-zv{position:fixed;top:0;left:0;width:100vw;height:10
 .pc-zv-bar>*{pointer-events:auto}
 .pc-zv-n{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pc-zv-tip{opacity:.6;font-size:11px}
+.pc-zv-act{padding:6px 14px;border-radius:999px;border:1.5px solid rgba(243,238,226,.8)!important;background:transparent!important;color:#f3eee2!important;font:inherit;font-size:12.5px;cursor:pointer}
 .pc-zv-dl{padding:6px 14px;border-radius:999px;border:1.5px solid rgba(243,238,226,.8);color:#f3eee2!important;text-decoration:none;font-size:12.5px}
 @media (hover:none){.pc-zv-nav{display:none}}`;
 
 /** 全屏看图：items = [{ src: 地址或返回地址的函数, caps: 叠在图上的对白 HTML, label }]；能放大、左右滑、返回键 / 往下拖 / 点空白处关 */
-function pcGallery(doc, items, start = 0, { onClose } = {}) {
+function pcGallery(doc, items, start = 0, { onClose, actions = [] } = {}) {
     items = (items || []).filter(Boolean);
     if (!doc || !items.length) return null;
     const w = doc.defaultView || globalThis;
@@ -621,7 +840,7 @@ function pcGallery(doc, items, start = 0, { onClose } = {}) {
     el.className = 'pc-zv'; el.setAttribute('role', 'dialog');
     el.innerHTML = '<div class="pc-zv-stage"></div><button type="button" class="pc-zv-x" aria-label="关闭">✕</button>'
         + (items.length > 1 ? '<button type="button" class="pc-zv-nav l" aria-label="上一张">‹</button><button type="button" class="pc-zv-nav r" aria-label="下一张">›</button>' : '')
-        + '<div class="pc-zv-bar"><span class="pc-zv-n"></span><span class="pc-zv-tip">双指或双击放大</span><a class="pc-zv-dl" download>下载</a></div>';
+        + '<div class="pc-zv-bar"><span class="pc-zv-n"></span><span class="pc-zv-tip">双指或双击放大</span>' + actions.map((a, k) => `<button type="button" class="pc-zv-act" data-a="${k}">${String(a.label).replace(/[<>&"]/g, '')}</button>`).join('') + '<a class="pc-zv-dl" download>下载</a></div>';
     const stage = el.querySelector('.pc-zv-stage'), dl = el.querySelector('.pc-zv-dl'), num = el.querySelector('.pc-zv-n');
     const fit = () => {
         if (done) return;
@@ -663,6 +882,7 @@ function pcGallery(doc, items, start = 0, { onClose } = {}) {
     el.addEventListener('click', ev => {
         const b = ev.target.closest('button'); if (!b) return;
         ev.stopPropagation();
+        if (b.classList.contains('pc-zv-act')) { const a = actions[Number(b.dataset.a)], at = i; if (a) { if (a.keepOpen !== true) close(); try { a.run(at); } catch (e) { console.warn('[智库] 看图按钮', e); } } return; }
         if (b.classList.contains('pc-zv-x')) close(); else if (b.classList.contains('l')) go(-1); else if (b.classList.contains('r')) go(1);
     });
     (doc.documentElement || doc.body).appendChild(el);
@@ -1264,6 +1484,748 @@ function createVideoController(deps) {
     return { open, play, stop() { st.stop = true; for (const u of st.urls.values()) URL.revokeObjectURL(u); st.urls.clear(); }, _state: st, _proj: proj };
 }
 
+// ───── 摘要卡的版式（智库自己的） ─────
+// 摘的是酒馆里的戏，所以版式围着「楼层、角色、说出口和没说出口的话」来做：
+// 楼层切片 / 批注 / 心声 / 回顾 / 剧本 这几种是智库自己的；镜头、相纸、书页、竖排、一句、纯文字是通用的排法。
+// 有 ✦ 的版式要 AI 补一点东西（批注、心声、回顾），别的直接排，不叫 AI。
+const EX_LAYOUTS = [
+    // id, 名字, 一句话, 默认 { shape 图形, align 对齐, font 字体, theme 底色 }, 能改哪几样, 要 AI 补什么
+    ['slice', '楼层切片', '这一楼切下来：配图、正文、它在整段聊天里的位置', { shape: 'rect', align: 'left', font: 'song', theme: 'light' }, 'shape font align theme', ''],
+    ['notes', '批注', '✦ 另一个人在旁边写的批注，一条条连到原句上', { align: 'left', font: 'song', theme: 'cream' }, 'font theme', 'notes'],
+    ['inner', '心声', '✦ 每句说出口的话下面，是没说出口的那句', { align: 'left', font: 'song', theme: 'light' }, 'font align theme', 'inner'],
+    ['recap', '回顾', '✦ 几楼连起来，排成一条时间线：哪一楼、哪句话、发生了什么', { align: 'left', font: 'song', theme: 'light' }, 'font theme', 'recap'],
+    ['script', '剧本', '人名在上、台词居中、动作写在括号里', { align: 'center', font: 'hei', theme: 'light' }, 'font theme', ''],
+    ['line', '一句', '图铺满压暗，只留一句', { align: 'center', font: 'song', theme: 'dark' }, 'font align', ''],
+    ['film', '镜头', '宽银幕画面，下面是字幕', { align: 'center', font: 'hei', theme: 'dark' }, 'font', ''],
+    ['photo', '相纸', '微微倾斜的相纸，下面写字', { align: 'left', font: 'kai', theme: 'tint' }, 'font align theme', ''],
+    ['book', '书页', '页眉、首字下沉、页码', { align: 'left', font: 'song', theme: 'cream' }, 'font theme', ''],
+    ['vertical', '竖排', '信笺上从右往左竖着写', { font: 'song', theme: 'paper' }, 'font', ''],
+    ['plain', '纯文字', '只有字', { align: 'left', font: 'song', theme: 'light' }, 'font align theme', ''],
+];
+const EX_NO_IMAGE = new Set(['vertical', 'plain', 'script']);
+const EX_TOOLS = {
+    shape: ['图形', [['rect', '方'], ['circle', '圆'], ['arch', '拱'], ['none', '无']]],
+    font: ['字体', [['song', '宋'], ['kai', '楷'], ['hei', '黑']]],
+    align: ['对齐', [['left', '左'], ['center', '中'], ['right', '右']]],
+    theme: ['底色', [['tint', '跟图'], ['light', '白'], ['cream', '米'], ['dark', '黑']]],
+};
+const EX_OLD = { yiyan: 'slice', circle: 'slice', arch: 'slice', tarot: 'slice', magazine: 'slice', ticket: 'slice', night: 'line', polaroid: 'photo', chat: 'script' };
+const exLayout = id => EX_LAYOUTS.find(l => l[0] === (EX_OLD[id] || id)) || EX_LAYOUTS[0];
+function exConf(card) {
+    const L = exLayout(card.style), d = L[3], can = L[4];
+    const pick = k => (can.includes(k) && card[k]) || d[k];
+    return { id: L[0], shape: pick('shape'), align: pick('align'), font: card.font || d.font, theme: pick('theme') || 'light', can, needs: L[5] };
+}
+const exRgb = h => { const n = parseInt(String(h).slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; };
+const exHex = c => '#' + c.map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+const exMix = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
+const exLum = c => (c[0] * 299 + c[1] * 587 + c[2] * 114) / 1000;
+function exPalette(doc, im) {
+    const c = doc.createElement('canvas'); c.width = 40; c.height = 40;
+    const g = c.getContext('2d'); g.drawImage(im, 0, 0, 40, 40);
+    const d = g.getImageData(0, 0, 40, 40).data, buckets = new Map();
+    let accent = null, best = -1;
+    for (let i = 0; i < d.length; i += 4) {
+        const r = d[i], gg = d[i + 1], b = d[i + 2], mx = Math.max(r, gg, b), mn = Math.min(r, gg, b), sat = mx ? (mx - mn) / mx : 0;
+        const k = (r >> 5) << 6 | (gg >> 5) << 3 | (b >> 5), o = buckets.get(k) || { n: 0, s: [0, 0, 0], c: 0 };
+        o.n += 0.4 + sat; o.s[0] += r; o.s[1] += gg; o.s[2] += b; o.c++; buckets.set(k, o);
+        const score = sat * (mx / 255) * (mx > 60 ? 1 : 0.2); if (score > best) { best = score; accent = [r, gg, b]; }
+    }
+    const top = [...buckets.values()].sort((a, b) => b.n - a.n)[0];
+    return { dom: top ? top.s.map(v => v / top.c) : [120, 110, 100], accent: accent || [150, 70, 60] };
+}
+const EX_DARK_COLORS = { '#b8322a': '#ff8a7a', '#2f7d55': '#86d9a8', '#2d5aa0': '#9dbcff', '#b8862b': '#f0c46a', '#8a8a8a': '#b0b0b0' };
+/** 楼号「#40–42」→ 第一个数 */
+const exFloorNo = f => Number(String(f || '').replace(/^#/, '').split(/[–-]/)[0]) || 0;
+
+async function exRender(doc, card, { loadImg, resolveUrl, fontReady }) {
+    const C = exConf(card), [, fam, wt] = EX_FONTS[C.font] || EX_FONTS.song;
+    await fontReady(fam);
+    let im = null;
+    if (card.url && !EX_NO_IMAGE.has(C.id)) { try { const u = /^(data:|https?:|\/)/.test(card.url) ? card.url : await resolveUrl(card.url); if (u) im = await loadImg(u); } catch { im = null; } }
+    const pal = im ? exPalette(doc, im) : { dom: [150, 140, 128], accent: [150, 70, 60] };
+    const W = 1080, c = doc.createElement('canvas'), g = c.getContext('2d');
+    const themeBg = { light: '#fbfaf7', cream: '#f4eee2', dark: '#141416', paper: '#f7f5f0' };
+    let bg = card.bg || themeBg[C.theme];
+    if (!bg || C.theme === 'tint') bg = exHex(exLum(pal.dom) < 128 ? exMix(pal.dom, [10, 10, 14], 0.35) : exMix(pal.dom, [255, 255, 255], 0.6));
+    if (C.id === 'photo' && C.theme === 'tint') bg = exHex(exMix(pal.dom, [240, 236, 228], 0.72));
+    const darkBg = exLum(exRgb(bg)) < 128 || C.id === 'line' || C.id === 'film';
+    const ink = darkBg ? '#f1ece3' : '#2b2b2b', soft = darkBg ? 'rgba(241,236,227,.62)' : 'rgba(43,43,43,.55)';
+    const accent = exHex(darkBg ? exMix(pal.accent, [255, 255, 255], 0.3) : exMix(pal.accent, [40, 30, 30], 0.35));
+    const colorOf = (seg, dark = darkBg) => seg.color ? (dark ? EX_DARK_COLORS[seg.color] || seg.color : seg.color) : null;
+    const blocks = exBlocks(card.md);
+    const sp = v => { try { g.letterSpacing = v; } catch { /* 老浏览器没有字距 */ } };
+    const fontOf = (seg, size, head) => `${seg.italic ? 'italic ' : ''}${seg.bold || head ? 600 : wt} ${size}px ${fam}`;
+    const grain = (w, h, a = 0.04, seed = 7) => { let r = seed; const rnd = () => (r = (r * 16807) % 2147483647) / 2147483647; g.save(); for (let k = 0; k < w * h / 900; k++) { g.globalAlpha = a * (0.5 + rnd()); g.fillStyle = rnd() > 0.5 ? '#6f6656' : '#ffffff'; g.fillRect(rnd() * w, rnd() * h, 1.6, 1.6); } g.restore(); };
+    const seg1 = (text, st = {}) => [{ text: String(text || ''), ...st }];
+    function rowsOf(bs, maxW, fs, { headScale = 1.3, indent = null, skipFirstChar = false } = {}) {
+        const rows = []; let first = skipFirstChar;
+        for (const b of bs) {
+            if (b.k === 'gap') { rows.push({ gap: true }); continue; }
+            if (b.k === 'hr') { rows.push({ hr: true }); continue; }
+            const head = b.k === 'h', size = Math.round(head ? fs * headScale : fs * (b.scale || 1)), ls = head ? 6 : 2;
+            let cur = [], w = 0;
+            const lim = () => maxW - (indent && rows.filter(r => r.cells).length < indent.rows ? indent.w : 0);
+            for (const sg of b.segs) for (const ch of [...sg.text]) {
+                if (first && !head) { first = false; continue; }
+                g.font = fontOf(sg, size, head); sp(ls + 'px');
+                const cw = g.measureText(ch).width + ls;
+                if (w + cw > lim() && cur.length && !/[，。、！？：；」』）,.!?…]/.test(ch)) { rows.push({ cells: cur, w, size, head, b }); cur = []; w = 0; }
+                cur.push({ ch, sg, cw }); w += cw;
+            }
+            if (cur.length) rows.push({ cells: cur, w, size, head, b });
+        }
+        while (rows[0]?.gap) rows.shift(); while (rows.at(-1)?.gap) rows.pop();
+        return rows;
+    }
+    const rowH = (r, lh) => r.gap ? lh * 0.55 : r.hr ? lh * 0.9 : r.head ? lh * 1.4 : lh * (r.size / (r.b?.base || r.size));
+    const rowsH = (rows, lh) => rows.reduce((a, r) => a + rowH(r, lh), 0);
+    function paint(rows, { x, y, w, lh, align, color = ink, dark = darkBg, indent = null, shadow = false, at = null }) {
+        g.textBaseline = 'middle'; g.textAlign = 'left'; let n = 0;
+        if (shadow) { g.shadowColor = 'rgba(0,0,0,.55)'; g.shadowBlur = 8; }
+        for (const r of rows) {
+            if (r.gap) { y += lh * 0.55; continue; }
+            if (r.hr) { g.save(); g.fillStyle = color; g.globalAlpha = 0.35; const hw = 80; g.fillRect(align === 'center' ? x + w / 2 - hw / 2 : align === 'right' ? x + w - hw : x, y + lh * 0.35, hw, 2); g.restore(); y += lh * 0.9; continue; }
+            const off = indent && n < indent.rows ? indent.w : 0, h = rowH(r, lh);
+            let xx = align === 'center' ? x + (w - r.w) / 2 : align === 'right' ? x + w - r.w : x + off;
+            at?.(r, y, h, xx);
+            for (const it of r.cells) { g.font = fontOf(it.sg, r.size, r.head); sp(r.head ? '6px' : '2px'); g.fillStyle = colorOf(it.sg, dark) || it.sg.ink || color; g.fillText(it.ch, xx, y + h / 2); xx += it.cw; }
+            r.end = xx; y += h; n++;
+        }
+        g.shadowColor = 'transparent'; g.shadowBlur = 0;
+        return y;
+    }
+    const cover = (x, y, w, h, bias = 0.5) => { const k = Math.max(w / im.width, h / im.height); g.save(); g.beginPath(); g.rect(x, y, w, h); g.clip(); g.drawImage(im, x + (w - im.width * k) / 2, y + (h - im.height * k) * bias, im.width * k, im.height * k); g.restore(); };
+    const drawText = (t, x, y, { size = 24, color = soft, align = 'left', weight = wt, ls = '4px' } = {}) => { if (!t) return; sp(ls); g.font = `${weight} ${size}px ${fam}`; g.fillStyle = color; g.textAlign = align; g.textBaseline = 'middle'; g.fillText(t, x, y); g.textAlign = 'left'; };
+    const roundRect = (x, y, w, h, r) => { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); };
+    const finish = (h, paintFn) => { c.width = W; c.height = Math.round(h); g.fillStyle = bg; g.fillRect(0, 0, W, c.height); paintFn(); return c; };
+    const who = card.sign || '';
+    /** 底下那条「这一楼在整段聊天里的位置」 */
+    const floorBar = (y, x0 = 120, x1 = W - 120) => {
+        const n = exFloorNo(card.floor), total = Number(card.total) || 0;
+        g.save(); g.strokeStyle = soft; g.globalAlpha = 0.5; g.lineWidth = 2; g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke(); g.restore();
+        if (n && total) { const p = Math.max(0, Math.min(1, n / Math.max(1, total - 1))), px = x0 + (x1 - x0) * p; g.fillStyle = accent; g.beginPath(); g.arc(px, y, 9, 0, Math.PI * 2); g.fill(); drawText(`#${n}`, px, y - 32, { size: 22, color: accent, align: 'center', weight: 600, ls: '2px' }); }
+        drawText(who, x0, y + 40, { size: 24 }); drawText(total ? `共 ${total} 楼` : (card.floor || ''), x1, y + 40, { size: 22, align: 'right' });
+    };
+    const fs0 = 34, lh0 = Math.round(fs0 * 2.05);
+
+    // ── 竖排：信笺 ──
+    if (C.id === 'vertical') {
+        const fs = 36, H = 1440, colW = Math.round(fs * 1.9), top = 170, maxRows = Math.floor((H - top - 220) / (fs * 1.25));
+        const VP = { '「': '﹁', '」': '﹂', '『': '﹃', '』': '﹄', '（': '︵', '）': '︶', '(': '︵', ')': '︶', '—': '︱', '…': '︙', '“': '﹁', '”': '﹂' };
+        const cols = [];
+        for (const b of blocks) {
+            if (b.k === 'gap' || b.k === 'hr') { if (cols.length) cols.push(null); continue; }
+            const chars = b.segs.flatMap(sg => [...sg.text].map(ch => ({ ch: VP[ch] || ch, sg: b.k === 'h' ? { ...sg, bold: true } : sg })));
+            for (let i = 0; i < chars.length; i += maxRows) cols.push(chars.slice(i, i + maxRows));
+        }
+        const Wv = Math.max(W, cols.length * colW + 320);
+        c.width = Wv; c.height = H; g.fillStyle = bg; g.fillRect(0, 0, Wv, H); grain(Wv, H);
+        g.save(); g.strokeStyle = '#8a7f70'; g.globalAlpha = 0.14; g.lineWidth = 1.5; for (let xx = Wv - 160; xx > 120; xx -= colW) { g.beginPath(); g.moveTo(xx, 120); g.lineTo(xx, H - 140); g.stroke(); } g.restore();
+        g.textAlign = 'center'; g.textBaseline = 'top';
+        let x = Wv - 160 - colW / 2;
+        for (const col of cols) { if (col) col.forEach((it, k) => { g.font = fontOf(it.sg, fs); g.fillStyle = colorOf(it.sg) || ink; const p = /[，。、！？：；]/.test(it.ch) ? fs * 0.3 : 0; g.fillText(it.ch, x + p, top + k * fs * 1.25 - p * 0.6); }); x -= col ? colW : colW * 0.5; }
+        if (who) { g.font = `${wt} 26px ${fam}`; g.fillStyle = soft; const s = [...who]; s.forEach((ch, k) => g.fillText(ch, 110, H - 140 - s.length * 32 + k * 32)); }
+        return c;
+    }
+
+    // ── 一句：图铺满压暗 ──
+    if (C.id === 'line') {
+        const fs = 46, lh = Math.round(fs * 1.7), P = 120, rows = rowsOf(blocks, W - P * 2, fs), H = 1440, th = rowsH(rows, lh);
+        return finish(H, () => {
+            if (im) { cover(0, 0, W, H); const sh = g.createLinearGradient(0, 0, 0, H); sh.addColorStop(0, 'rgba(10,10,14,.35)'); sh.addColorStop(0.5, 'rgba(10,10,14,.58)'); sh.addColorStop(1, 'rgba(10,10,14,.82)'); g.fillStyle = sh; g.fillRect(0, 0, W, H); }
+            const y = paint(rows, { x: P, y: (H - th) / 2 - 40, w: W - P * 2, lh, align: C.align, color: '#f1ece3', dark: true, shadow: !!im });
+            drawText(who ? `— ${who}` : '', C.align === 'center' ? W / 2 : C.align === 'right' ? W - P : P, y + 90, { size: 28, color: 'rgba(241,236,227,.7)', align: C.align });
+            drawText(card.floor || '', W / 2, H - 80, { size: 20, color: 'rgba(241,236,227,.4)', align: 'center' });
+        });
+    }
+
+    // ── 镜头：宽银幕 + 字幕 ──
+    if (C.id === 'film') {
+        const fs = 34, lh = Math.round(fs * 1.9), P = 110, imgH = Math.round(W / 2.2), top = 170;
+        const rows = rowsOf(blocks, W - P * 2, fs), th = rowsH(rows, lh), H = top + imgH + 120 + th + 170;
+        return finish(H, () => {
+            g.fillStyle = '#0b0b0c'; g.fillRect(0, 0, W, H); grain(W, H, 0.05);
+            drawText([card.floor, who].filter(Boolean).join('   ·   '), 80, 90, { size: 22, color: 'rgba(241,236,227,.5)', ls: '6px' });
+            g.fillStyle = '#000'; g.fillRect(0, top - 30, W, imgH + 60);
+            if (im) cover(0, top, W, imgH, 0.45); else { g.fillStyle = '#1c1c20'; g.fillRect(0, top, W, imgH); }
+            paint(rows, { x: P, y: top + imgH + 100, w: W - P * 2, lh, align: 'center', color: '#f4efe6', dark: true });
+        });
+    }
+
+    // ── 相纸 ──
+    if (C.id === 'photo') {
+        const fs = 36, lh = Math.round(fs * 1.85), P = 120, fw = 760, ph = 620, frameH = ph + 30 + 150;
+        const head = blocks.find(b => b.k === 'h'), rest = blocks.filter(b => b !== head);
+        const rows = rowsOf(rest, W - P * 2, fs), th = rowsH(rows, lh), H = 150 + frameH + 130 + th + 200;
+        return finish(H, () => {
+            grain(W, H, 0.06);
+            g.save(); g.translate(W / 2, 150 + frameH / 2); g.rotate(-0.035);
+            g.shadowColor = 'rgba(0,0,0,.2)'; g.shadowBlur = 30; g.shadowOffsetY = 12; g.fillStyle = '#fdfcf9'; g.fillRect(-fw / 2, -frameH / 2, fw, frameH); g.shadowColor = 'transparent';
+            if (im) { g.save(); g.beginPath(); g.rect(-fw / 2 + 30, -frameH / 2 + 30, fw - 60, ph); g.clip(); const k = Math.max((fw - 60) / im.width, ph / im.height); g.drawImage(im, -im.width * k / 2, -frameH / 2 + 30 + (ph - im.height * k) / 2, im.width * k, im.height * k); g.restore(); }
+            else { g.fillStyle = '#e8e4dc'; g.fillRect(-fw / 2 + 30, -frameH / 2 + 30, fw - 60, ph); }
+            const cap = head ? head.segs.map(s => s.text).join('') : [card.floor, who].filter(Boolean).join(' · ');
+            drawText(cap, 0, frameH / 2 - 78, { size: 38, color: '#3a332c', align: 'center', weight: 400, ls: '2px' });
+            g.restore();
+            const y = paint(rows, { x: P, y: 150 + frameH + 110, w: W - P * 2, lh, align: C.align, color: darkBg ? '#f1ece3' : '#3a332c' });
+            if (head && who) drawText(`— ${who}`, C.align === 'left' ? W - P : W / 2, y + 80, { size: 28, align: C.align === 'left' ? 'right' : 'center' });
+        });
+    }
+
+    // ── 书页 ──
+    if (C.id === 'book') {
+        const fs = 32, lh = Math.round(fs * 2), P = 130, dropFs = Math.round(fs * 3.1), dropW = dropFs * 1.05;
+        const firstIsP = blocks.find(b => b.k !== 'gap')?.k === 'p';
+        const firstCh = firstIsP ? [...blocks.find(b => b.k === 'p').segs.map(s => s.text).join('')][0] : '';
+        const rows = rowsOf(blocks, W - P * 2, fs, { indent: firstCh ? { rows: 2, w: dropW } : null, skipFirstChar: !!firstCh });
+        const imgH = im ? 380 : 0, th = rowsH(rows, lh), H = 220 + (im ? imgH + 90 : 0) + th + 260;
+        return finish(H, () => {
+            grain(W, H, 0.05);
+            drawText(who || '摘要', P, 120, { size: 22 }); drawText(card.floor ? `第 ${String(card.floor).replace(/^#/, '')} 楼` : '', W - P, 120, { size: 22, align: 'right' });
+            g.fillStyle = soft; g.fillRect(P, 148, W - P * 2, 1);
+            let y = 210;
+            if (im) { g.save(); try { g.filter = 'sepia(.5) saturate(.75)'; } catch { /* */ } roundRect(P, y, W - P * 2, imgH, 6); g.clip(); cover(P, y, W - P * 2, imgH); g.restore(); try { g.filter = 'none'; } catch { /* */ } y += imgH + 90; }
+            if (firstCh) { g.font = `600 ${dropFs}px ${fam}`; g.fillStyle = accent; g.textBaseline = 'top'; g.fillText(firstCh, P, y - 4); }
+            paint(rows, { x: P, y, w: W - P * 2, lh, align: 'left', indent: firstCh ? { rows: 2, w: dropW } : null });
+            drawText(exFloorNo(card.floor) ? `— ${exFloorNo(card.floor)} —` : '— · —', W / 2, H - 110, { size: 24, align: 'center' });
+        });
+    }
+
+    // ── 剧本：人名、台词、括号里的动作 ──
+    if (C.id === 'script') {
+        const fs = 32, lh = Math.round(fs * 1.75), P = 150, dW = W - 2 * 250, items = [];
+        for (const b of blocks) {
+            if (b.k === 'gap' || b.k === 'hr') continue;
+            const text = b.segs.map(s => s.text).join('');
+            if (b.k === 'h') { items.push({ k: 'head', text }); continue; }
+            const m = text.match(/^([^：:「」“”\s]{1,10})[：:]\s*(.*)$/);
+            const body = m ? m[2] : text;
+            const parts = body.split(/(「[^」]*」|“[^”]*”)/).map(s => s.trim()).filter(Boolean);
+            for (const part of parts) {
+                if (/^[「“]/.test(part)) items.push({ k: 'say', name: m?.[1] || (items.findLast?.(x => x.k === 'say')?.name) || who.split(' · ')[0] || '', text: part.replace(/^[「“]|[」”]$/g, '') });
+                else items.push({ k: 'act', text: part });
+            }
+        }
+        const lay = items.map(it => {
+            if (it.k === 'say') { const rows = rowsOf([{ k: 'p', segs: seg1(it.text) }], dW, fs); return { ...it, rows, h: 56 + rowsH(rows, lh) + 36 }; }
+            const rows = rowsOf([{ k: 'p', segs: seg1(it.k === 'act' ? `（${it.text.replace(/^[（(]|[）)]$/g, '')}）` : it.text, { italic: it.k === 'act' }) }], W - P * 2, it.k === 'head' ? 36 : 28);
+            return { ...it, rows, h: rowsH(rows, it.k === 'head' ? 60 : 50) + 36 };
+        });
+        const H = Math.max(1100, 300 + lay.reduce((a, x) => a + x.h, 0) + 160);
+        return finish(H, () => {
+            drawText(card.floor ? `第 ${String(card.floor).replace(/^#/, '')} 场` : '一场', P, 140, { size: 26, color: ink, weight: 600 });
+            drawText(who ? `出场：${who}` : '', W - P, 140, { size: 22, align: 'right' });
+            g.fillStyle = soft; g.fillRect(P, 172, W - P * 2, 1.5);
+            let y = 250;
+            for (const it of lay) {
+                if (it.k === 'say') {
+                    drawText(it.name, W / 2, y + 14, { size: 26, color: ink, align: 'center', weight: 600, ls: '8px' });
+                    paint(it.rows, { x: 250, y: y + 46, w: dW, lh, align: 'center' });
+                } else paint(it.rows, { x: P, y, w: W - P * 2, lh: it.k === 'head' ? 60 : 50, align: it.k === 'head' ? 'center' : 'left', color: it.k === 'head' ? ink : soft });
+                y += it.h;
+            }
+        });
+    }
+
+    // ── 回顾：时间线 ──
+    if (C.id === 'recap') {
+        const list = (Array.isArray(card.timeline) && card.timeline.length ? card.timeline : blocks.filter(b => b.k === 'p').slice(0, 8).map(b => ({ floor: '', line: b.segs.map(s => s.text).join(''), note: '' })));
+        const P = 120, LX = 200, TW = W - LX - 60 - P / 2, fs = 30, lh = Math.round(fs * 1.8);
+        const imgH = im ? 420 : 0, title = card.title || blocks.find(b => b.k === 'h')?.segs.map(s => s.text).join('') || '回顾';
+        const lay = list.map(it => { const a = rowsOf([{ k: 'p', segs: exInline(String(it.line || '')) }], TW, fs), b = it.note ? rowsOf([{ k: 'p', segs: seg1(it.note) }], TW, 24) : []; return { ...it, a, b, h: 44 + rowsH(a, lh) + (b.length ? rowsH(b, 40) + 6 : 0) + 46 }; });
+        const H = (im ? imgH : 0) + 330 + lay.reduce((s, x) => s + x.h, 0) + 140;
+        return finish(H, () => {
+            if (C.theme === 'cream') grain(W, H, 0.04);
+            if (im) { cover(0, 0, W, imgH, 0.45); const f = g.createLinearGradient(0, imgH - 80, 0, imgH); f.addColorStop(0, bg + '00'); f.addColorStop(1, bg); g.fillStyle = f; g.fillRect(0, imgH - 80, W, 81); }
+            let y = imgH + 140;
+            drawText(title, P, y, { size: 44, color: ink, weight: 600, ls: '6px' });
+            drawText([card.floor, who].filter(Boolean).join('  ·  '), P, y + 58, { size: 22 });
+            y += 150;
+            g.save(); g.strokeStyle = soft; g.globalAlpha = 0.45; g.lineWidth = 2; g.beginPath(); g.moveTo(LX, y); g.lineTo(LX, y + lay.reduce((s, x) => s + x.h, 0) - 60); g.stroke(); g.restore();
+            for (const it of lay) {
+                g.fillStyle = bg; g.beginPath(); g.arc(LX, y + 14, 12, 0, Math.PI * 2); g.fill();
+                g.strokeStyle = accent; g.lineWidth = 3; g.beginPath(); g.arc(LX, y + 14, 10, 0, Math.PI * 2); g.stroke();
+                drawText(it.floor ? `#${String(it.floor).replace(/^#/, '')}` : '', LX - 30, y + 14, { size: 22, color: accent, align: 'right', weight: 600, ls: '1px' });
+                let yy = paint(it.a, { x: LX + 44, y: y - 8, w: TW, lh, align: 'left' });
+                if (it.b.length) paint(it.b, { x: LX + 44, y: yy + 2, w: TW, lh: 40, align: 'left', color: soft });
+                y += it.h;
+            }
+        });
+    }
+
+    // ── 心声：说出口的 / 没说出口的 ──
+    if (C.id === 'inner') {
+        const pairs = Array.isArray(card.inner) && card.inner.length ? card.inner : blocks.filter(b => b.k === 'p').map(b => ({ say: b.segs.map(s => s.text).join(''), think: '' }));
+        const P = 130, fs = 34, lh = Math.round(fs * 1.9), imgH = im ? Math.round(W * 0.5) : 0;
+        const lay = pairs.map(p => { const a = rowsOf([{ k: 'p', segs: exInline(String(p.say || '')) }], W - P * 2, fs), b = p.think ? rowsOf([{ k: 'p', segs: seg1(p.think, { italic: true }) }], W - P * 2 - 40, 27) : []; return { a, b, h: rowsH(a, lh) + (b.length ? rowsH(b, 46) + 22 : 0) + 56 }; });
+        const H = Math.max(1100, imgH + 200 + lay.reduce((s, x) => s + x.h, 0) + 200);
+        return finish(H, () => {
+            if (im) { cover(0, 0, W, imgH, 0.45); }
+            let y = imgH + 140;
+            drawText('说出口的', P, y - 40, { size: 20, color: ink, weight: 600, ls: '6px' }); drawText('没说出口的', P + 150, y - 40, { size: 20, color: accent, ls: '6px' });
+            for (const it of lay) {
+                y = paint(it.a, { x: P, y, w: W - P * 2, lh, align: C.align });
+                if (it.b.length) { const y0 = y + 6, y1 = paint(it.b, { x: P + 40, y: y0 + 8, w: W - P * 2 - 40, lh: 46, align: C.align === 'center' ? 'center' : 'left', color: accent }); g.fillStyle = accent; g.globalAlpha = 0.6; g.fillRect(P + 8, y0 + 12, 3, y1 - y0 - 8); g.globalAlpha = 1; y = y1 + 14; }
+                y += 56;
+            }
+            drawText(who ? `— ${who}${card.floor ? ' · ' + card.floor : ''}` : card.floor || '', W - P, H - 110, { size: 24, align: 'right' });
+        });
+    }
+
+    // ── 批注：正文在左，批注在右边一栏，细线连到原句 ──
+    if (C.id === 'notes') {
+        const P = 100, MW = 620, NX = P + MW + 70, NW = W - NX - 60, fs = 32, lh = Math.round(fs * 2.05);
+        const rows = rowsOf(blocks, MW, fs), notes = Array.isArray(card.notes) ? card.notes.filter(n => n && n.text) : [];
+        // 每条批注挂到第一行包含它引用的字的那一行
+        const flat = rows.map(r => r.cells ? r.cells.map(x => x.ch).join('') : '');
+        const hook = notes.map((n, k) => { const at = String(n.at || '').replace(/\s+/g, '').slice(0, 6); let i = at ? flat.findIndex(t => t.includes(at.slice(0, 3))) : -1; if (i < 0) i = Math.min(rows.length - 1, Math.round((k + 0.5) * rows.length / Math.max(1, notes.length))); return i; });
+        const imgH = im ? 380 : 0, top = imgH + (im ? 190 : 200), th = rowsH(rows, lh);
+        const nLay = notes.map(n => rowsOf([{ k: 'p', segs: seg1(n.text) }], NW, 24));
+        const rowY = []; { let y = top; for (const r of rows) { rowY.push(y); y += rowH(r, lh); } }
+        let need = top + th; { let ny = 0; notes.forEach((n, k) => { const y = Math.max(rowY[hook[k]] ?? top, ny); ny = y + rowsH(nLay[k], 38) + 30; need = Math.max(need, ny); }); }
+        const H = need + 200;
+        return finish(H, () => {
+            grain(W, H, 0.04);
+            if (im) { g.save(); roundRect(P, 120, W - P * 2, imgH - 40, 4); g.clip(); cover(P, 120, W - P * 2, imgH - 40); g.restore(); }
+            g.save(); g.strokeStyle = soft; g.globalAlpha = 0.35; g.lineWidth = 1.5; g.beginPath(); g.moveTo(NX - 30, top - 20); g.lineTo(NX - 30, H - 160); g.stroke(); g.restore();
+            const marks = new Map(hook.map((h, k) => [h, k]));
+            paint(rows, { x: P, y: top, w: MW, lh, align: 'left', at: (r, y, h) => { /* 被批注的那一行底下画一道淡线 */ const k = marks.get(rows.indexOf(r)); if (k != null) { g.save(); g.fillStyle = accent; g.globalAlpha = 0.25; g.fillRect(P, y + h - 12, Math.min(MW, r.w), 6); g.restore(); } } });
+            let ny = 0;
+            notes.forEach((n, k) => {
+                const ry = rowY[hook[k]] ?? top, y = Math.max(ry, ny), r = rows[hook[k]];
+                g.save(); g.strokeStyle = accent; g.globalAlpha = 0.55; g.lineWidth = 1.5; g.beginPath(); g.moveTo(P + Math.min(MW, r?.w || MW) + 10, ry + lh - 14); g.lineTo(NX - 30, ry + lh - 14); g.lineTo(NX - 12, y + 18); g.stroke(); g.restore();
+                const end = paint(nLay[k], { x: NX, y, w: NW, lh: 38, align: 'left', color: accent });
+                ny = end + 30;
+            });
+            const by = card.notesBy || '';
+            drawText(by ? `批注：${by}` : '', NX, top - 40, { size: 20, color: accent, ls: '4px' });
+            drawText([who, card.floor].filter(Boolean).join(' · '), P, H - 110, { size: 24 });
+        });
+    }
+
+    // ── 楼层切片 / 纯文字 ──
+    const slice = C.id === 'slice', shape = !slice || !im ? 'none' : C.shape;
+    const fs = fs0, lh = lh0, P = C.align === 'center' ? 140 : 120;
+    const rows = rowsOf(blocks, W - P * 2, fs), th = rowsH(rows, lh);
+    const box = { rect: [0, 0, W, Math.round(W * 0.56)], circle: [(W - 520) / 2, 150, 520, 520], arch: [(W - 640) / 2, 140, 640, 820], none: null }[shape];
+    const imgBottom = box ? box[1] + box[3] : 0;
+    const H = Math.max(shape === 'none' ? 1100 : 1000, imgBottom + (box ? 140 : 200) + th + (slice ? 230 : who ? 110 : 0) + 150);
+    return finish(H, () => {
+        if (C.theme === 'cream' || C.theme === 'paper') grain(W, H, 0.04);
+        if (box) {
+            const [x, y, w, h] = box;
+            g.save();
+            if (shape === 'circle') { g.beginPath(); g.arc(x + w / 2, y + h / 2, w / 2, 0, Math.PI * 2); g.clip(); }
+            else if (shape === 'arch') { g.beginPath(); g.moveTo(x, y + h); g.lineTo(x, y + w / 2); g.arc(x + w / 2, y + w / 2, w / 2, Math.PI, 0); g.lineTo(x + w, y + h); g.closePath(); g.clip(); }
+            cover(x, y, w, h, 0.45); g.restore();
+            if (shape === 'arch') { g.save(); g.strokeStyle = soft; g.lineWidth = 2; const o = 18; g.beginPath(); g.moveTo(x - o, y + h + o); g.lineTo(x - o, y + w / 2); g.arc(x + w / 2, y + w / 2, w / 2 + o, Math.PI, 0); g.lineTo(x + w + o, y + h + o); g.closePath(); g.stroke(); g.restore(); }
+        }
+        // 切片：左上角大大的楼号
+        if (slice && exFloorNo(card.floor)) drawText(`#${exFloorNo(card.floor)}`, P, box && shape === 'rect' ? imgBottom + 70 : 110, { size: 30, color: accent, weight: 600, ls: '2px' });
+        const y = paint(rows, { x: P, y: box ? imgBottom + (shape === 'rect' ? 150 : 110) : 200, w: W - P * 2, lh, align: C.align });
+        if (slice) floorBar(Math.min(H - 150, y + 120));
+        else drawText(who ? `— ${who}` : '', W / 2, Math.min(H - 110, y + 100), { size: 28, align: 'center' });
+    });
+}
+
+// ═════════════════════ 0.9.2 摘要：把聊天里喜欢的段落做成一张卡（智库自己的版式） ═════════════════════
+// 来源：聊天里选中字点「✦ 摘要」，或者在摘要页搜楼层勾选。提取正文时去掉 HTML、代码和设置里写的标签。
+// 版式：大多数直接套（不叫 AI）；批注、心声、回顾要 AI 补一点东西；「AI 排」让 AI 挑段落、断行、加粗、红绿字和版式。
+// 正文用一小套 markdown：## 标题、**粗**、*斜*、{红:字} {绿:字} {蓝:字}、--- 分割线。
+const EX_DROP_DEFAULT = ['thinking', 'think', 'status', 'statusblock', 'state', 'details', 'summary', 'comic_plan', 'image', 'imgthink', 'update', 'UpdateVariable'];
+const EX_STYLES = [...EX_LAYOUTS.map(l => [l[0], l[1]]), ['ai', 'AI 排']];
+const EX_FONTS = { song: ['宋体', '"Noto Serif SC","Songti SC","Source Han Serif SC",serif', 300], kai: ['文楷', '"LXGW WenKai TC","Kaiti SC","STKaiti",serif', 400], hei: ['黑体', '"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif', 300] };
+const EX_COLORS = { 红: '#b8322a', 绿: '#2f7d55', 蓝: '#2d5aa0', 金: '#b8862b', 灰: '#8a8a8a' };
+/** 一楼的文字：去掉代码块、注释、style/script、设置里要去掉的标签；设了「只要这些标签」就只取里面的；最后剥掉所有 HTML */
+function excerptText(mes, { only = [], drop = EX_DROP_DEFAULT } = {}) {
+    let t = String(mes || '').replace(/\r\n/g, '\n');
+    t = t.replace(/```[\s\S]*?(```|$)/g, '\n').replace(/<!--[\s\S]*?-->/g, '').replace(/<(style|script|svg|iframe|canvas|textarea|button|select)\b[^>]*>[\s\S]*?<\/\1>/gi, '');
+    const re = name => String(name || '').trim().replace(/^<|\/?>$/g, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const n of drop) { const k = re(n); if (k) t = t.replace(new RegExp(`<${k}(?=[\\s>/])[^>]*>[\\s\\S]*?<\\/${k}\\s*>`, 'gi'), '').replace(new RegExp(`<${k}(?=[\\s>/])[^>]*>(?![\\s\\S]*<\\/${k}\\s*>)[\\s\\S]*$`, 'i'), ''); }
+    const want = only.map(re).filter(Boolean);
+    if (want.length) {
+        const got = [];
+        for (const k of want) for (const m of t.matchAll(new RegExp(`<${k}(?=[\\s>/])[^>]*>([\\s\\S]*?)<\\/${k}\\s*>`, 'gi'))) got.push([m.index, m[1]]);
+        if (got.length) t = got.sort((a, b) => a[0] - b[0]).map(x => x[1]).join('\n\n');
+    }
+    t = t.replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|li|h\d|tr|blockquote)>/gi, '\n').replace(/<[^>]+>/g, '');
+    t = t.replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+    return t.split('\n').map(l => l.replace(/[ \t]+$/g, '').replace(/^[ \t]+/, '')).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+/** 一行里的 **粗** *斜* {红:字} 拆成一段段 */
+function exInline(line) {
+    const out = [], re = /\*\*([^*]+)\*\*|\{(红|绿|蓝|金|灰)[:：]([^}]*)\}|\*([^*]+)\*/g;
+    let last = 0, m;
+    const push = (text, st = {}) => { if (text) out.push({ text, ...st }); };
+    while ((m = re.exec(line))) {
+        push(line.slice(last, m.index));
+        if (m[1] != null) { for (const s of exInline(m[1])) out.push({ ...s, bold: true }); }
+        else if (m[2]) { for (const s of exInline(m[3])) out.push({ color: EX_COLORS[m[2]], ...s }); }
+        else push(m[4], { italic: true });
+        last = re.lastIndex;
+    }
+    push(line.slice(last));
+    return out;
+}
+/** markdown 子集 → 块：h（标题）/ hr / p（一行）/ gap（空行） */
+function exBlocks(md) {
+    return String(md || '').split('\n').map(l => {
+        const t = l.trim();
+        if (!t) return { k: 'gap' };
+        if (/^(-{3,}|\*{3,}|—{2,})$/.test(t)) return { k: 'hr' };
+        const h = t.match(/^#{1,3}\s*(.+)$/);
+        if (h) return { k: 'h', segs: exInline(h[1]) };
+        return { k: 'p', segs: exInline(t.replace(/^>\s*/, '')) };
+    });
+}
+const exPlain = md => exBlocks(md).filter(b => b.segs).map(b => b.segs.map(s => s.text).join('')).join('\n');
+/** 不叫 AI 的样式：原文按段落排，「」里的对白里最后一句加粗；「一句」只留最戳人的那句 */
+function exPresetMd(text, style) {
+    style = exLayout(style)[0];
+    const paras = String(text || '').split(/\n+/).map(x => x.trim()).filter(Boolean);
+    if (style === 'line') {
+        const quotes = paras.join('\n').match(/「[^」]{2,60}」|“[^”]{2,60}”/g) || [];
+        const pick = quotes.at(-1) || paras.join('').split(/(?<=[。！？!?…])/).map(s => s.trim()).filter(s => s.length >= 4).at(-1) || paras.at(-1) || '';
+        return `**${pick}**`;
+    }
+    const lines = paras.slice(0, style === 'film' ? 10 : style === 'script' ? 30 : 40);
+    if (style === 'script' || style === 'inner' || style === 'recap') return lines.join('\n');
+    let hit = -1;
+    for (let i = lines.length - 1; i >= 0 && hit < 0; i--) if (/[「“][^」”]{2,}[」”]/.test(lines[i])) hit = i;
+    if (style !== 'vertical' && hit >= 0) lines[hit] = lines[hit].replace(/([「“][^」”]{2,}[」”])(?![\s\S]*[「“])/, '**$1**');
+    return lines.join('\n\n');
+}
+function createExcerptController(deps) {
+    const { document: doc, getContext, getData, commit, esc, generateImage, storeImage, resolveUrl, askLLM, notify } = deps;
+    const win = doc.defaultView;
+    const st = { mount: null, busy: '', log: '', query: '', edit: false, settings: false, preview: '', newTag: { only: '', drop: '' } };
+    let stopped = false;
+    const opts = () => getData().options;
+    const on = () => opts().excerptOn !== false;
+    const ex = () => { const d = getData(); d.excerpt ||= {}; const e = d.excerpt; e.floors ||= []; e.card ||= null; return e; };
+    const rules = () => ({ only: Array.isArray(opts().excerptOnly) ? opts().excerptOnly : [], drop: Array.isArray(opts().excerptDrop) ? opts().excerptDrop : EX_DROP_DEFAULT });
+    const log = t => { st.log = t; const el = st.mount?.querySelector('[data-x-log]'); if (el) el.textContent = t; };
+    // 字体：网上的思源宋体 / 文楷 / 思源黑体，画到 canvas 前先等它加载
+    if (!doc.getElementById('pc-excerpt-fonts')) {
+        const l = doc.createElement('link'); l.id = 'pc-excerpt-fonts'; l.rel = 'stylesheet';
+        l.href = 'https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@300;400;600;700&family=Noto+Sans+SC:wght@300;500;700&family=LXGW+WenKai+TC:wght@300;400;700&display=swap';
+        doc.head.appendChild(l);
+    }
+    const fontReady = async fam => { try { await Promise.race([Promise.all([300, 400, 700].map(w => doc.fonts?.load?.(`${w} 24px ${fam}`, '摘要的字'))), new Promise(r => setTimeout(r, 2500))]); } catch { /* 用系统字 */ } };
+    const loadImg = src => new Promise((ok, bad) => { const im = new win.Image(); im.crossOrigin = 'anonymous'; im.onload = () => ok(im); im.onerror = bad; im.src = src; });
+
+    // ── 楼层 ──
+    function floorText(i) { const m = getContext()?.chat?.[i]; return m && !m.is_system ? excerptText(m.mes, rules()) : ''; }
+    function floorImage(i) {
+        const m = getContext()?.chat?.[i]; if (!m) return '';
+        return m.extra?.image || String(m.mes || '').match(/<img\b[^>]*\bsrc=["']([^"']+)["']/i)?.[1] || '';
+    }
+    /** 搜楼层：42、40-45、#40、关键词；空着就是最近 12 楼 */
+    function searchFloors(q) {
+        const chat = getContext()?.chat || [], out = [];
+        const s = String(q || '').trim().replace(/^#/, '');
+        const r = s.match(/^(\d+)\s*[-~～到至]\s*#?(\d+)$/), one = s.match(/^\d+$/);
+        const ids = r ? Array.from({ length: Math.abs(+r[2] - +r[1]) + 1 }, (_, k) => Math.min(+r[1], +r[2]) + k) : one ? [+s] : null;
+        if (ids) { for (const i of ids.reverse()) if (chat[i] && !chat[i].is_system) out.push(i); return out.slice(0, 60); }
+        for (let i = chat.length - 1; i >= 0 && out.length < (s ? 40 : 12); i--) {
+            const m = chat[i]; if (!m || m.is_system) continue;
+            if (!s || floorText(i).includes(s) || String(m.name || '').includes(s)) out.push(i);
+        }
+        return out;
+    }
+    function sourceText() {
+        const e = ex();
+        if (e.custom) return e.custom;
+        return [...e.floors].sort((a, b) => a - b).map(floorText).filter(Boolean).join('\n\n');
+    }
+    function sourceSign() {
+        const chat = getContext()?.chat || [], e = ex();
+        const ids = e.custom ? (e.customFloor != null ? [e.customFloor] : []) : e.floors;
+        const names = [...new Set(ids.map(i => chat[i]).filter(m => m && !m.is_user).map(m => m.name).filter(Boolean))];
+        return names.join(' · ');
+    }
+
+    // ── 卡片 ──
+    async function makeCard({ style } = {}) {
+        if (st.busy) return;
+        const e = ex(), text = sourceText();
+        if (!text) { notify('先选几楼，或者在聊天里选中一段字'); return; }
+        style ||= opts().excerptStyle || 'slice';
+        const art = opts().excerptArt || 'nai';
+        st.busy = 'card'; draw();
+        try {
+            const fl = (e.custom ? (e.customFloor != null ? [e.customFloor] : []) : [...e.floors]).sort((a, b) => a - b);
+            let card = { style, md: '', sign: sourceSign(), url: '', bg: '', tags: '', floor: fl.length ? (fl.length > 1 ? `#${fl[0]}–${fl.at(-1)}` : `#${fl[0]}`) : '', total: (getContext()?.chat || []).length };
+            if (opts().excerptFont) card.font = opts().excerptFont;
+            if (style === 'ai') {
+                log('AI 在排…');
+                const sys = `你是智库的摘要排版师：把酒馆聊天里的一段戏做成一张配图的文字卡。用户给你一段正文。
+要做的：
+1. 挑最好的部分（原文的字一个都不要改，可以删掉不要的句子；不超过 300 字）。
+2. 按语气断行：一行一个意思，短句单独成行，段落之间空一行。
+3. 自己决定格式，用这几种写法：## 标题（可不要，最多 8 个字）、**加粗**、*斜体*、{红:字}、{绿:字}、{蓝:字}、单独一行 --- 是分割线。最戳人的一两句才加粗或上色，别满篇都是。
+4. 挑一个最合这段话的版式 style：${EX_LAYOUTS.map(l => `${l[0]}（${l[1]}：${l[2].replace('✦ ', '')}）`).join('、')}。对白多用 script（写成「名字：「……」」一行一句）；有话没说透用 inner；适合有人在旁边评点用 notes；跨了好几楼的用 recap；一句狠话用 line；画面感强用 film；回忆用 photo；古风或安静用 vertical / book；拿不准用 slice。
+   选 notes / inner / recap 时还要按第 8 条写对应的内容。
+5. 可选的细节：shape（rect / circle / arch / none）、align（left / center / right）、font（song 宋体 / kai 文楷，手写感、温柔 / hei 黑体，现代、冷）、theme（tint 底色跟着图 / light 白 / cream 米 / dark 黑）。不写就用版式默认的。
+7. 配图的 NovelAI 英文标签 tags：想这段话最有画面感的那一瞬间（在哪、天气和光、物件、谁的什么动作），像电影镜头（背影、侧脸、手、远景），先写人数（no humans 或 1boy / 1girl），不写画师名，不要文字。
+8. notes：在场的另一个人（或者事后的自己）在旁边写的批注，{"notesBy": "谁批的", "notes": [{"at": "被批注那句里的几个原字", "text": "批注，20 字以内，口吻像这个人"}]}，2–4 条。inner：{"inner": [{"say": "说出口的原句", "think": "心里没说的那句，20 字以内"}]}。recap：{"title": "这几楼的小标题，8 字以内", "timeline": [{"floor": 楼号, "line": "那一楼最关键的一句原文", "note": "发生了什么，15 字以内"}]}。
+只输出 JSON：{"style": "slice", "font": "song", "align": "left", "theme": "light", "md": "正文（用上面的格式，换行用 \\n）", "tags": "英文标签"}，选了 notes / inner / recap 就把第 8 条的字段一起放进来`;
+                const j = __mod_translate.pickJson(await askLLM(sys, `<text>\n${text.slice(0, 6000)}\n</text>`, { maxTokens: 2500 }));
+                const md = String(j?.md || '').trim();
+                if (!md) throw new Error('AI 没有按格式写出来');
+                const pick = (k, v) => EX_TOOLS[k][1].some(([x]) => x === v) ? v : undefined;
+                card = { ...card, style: EX_LAYOUTS.some(l => l[0] === j.style) ? j.style : 'slice', font: EX_FONTS[j.font] ? j.font : card.font, shape: pick('shape', j.shape), align: pick('align', j.align), theme: pick('theme', j.theme), md, tags: String(j?.tags || '').trim(), ai: true };
+                takeExtras(card, j);
+            } else card.md = exPresetMd(text, style);
+            if (exConf(card).needs && !hasExtras(card)) await fillExtras(card, text);
+            if (!EX_NO_IMAGE.has(card.style) && art !== 'none') {
+                const ids = e.custom ? (e.customFloor != null ? [e.customFloor] : []) : [...e.floors].sort((a, b) => b - a);
+                const own = art === 'auto' ? ids.map(floorImage).find(Boolean) || '' : '';
+                if (own) card.url = own;
+                else {
+                    // 先出一张没图的让人看着，图画好了再换上
+                    e.card = card; await refreshPreview(); draw();
+                    try { await drawArt(card, text); } catch (err) { log('图没画成：' + (err?.message || err) + '（卡先不带图，可以点「AI 换个画面」再试）'); card.err = true; }
+                }
+            }
+            e.card = card; commit(); st.edit = false;
+            await refreshPreview();
+            if (!card.err) log(''); delete card.err;
+        } catch (err) { log('没做成：' + (err?.message || err)); (deps.notifyError || notify)('摘要没做成：' + (err?.message || err)); }
+        finally { st.busy = ''; draw(); }
+    }
+    // ── ✦ 版式要 AI 补的东西：批注 / 心声 / 回顾 ──
+    const clip = (v, n) => String(v ?? '').trim().slice(0, n);
+    function takeExtras(card, j) {
+        if (Array.isArray(j?.notes)) { card.notes = j.notes.map(n => ({ at: clip(n?.at, 20), text: clip(n?.text, 40) })).filter(n => n.text).slice(0, 6); card.notesBy = clip(j.notesBy, 12); }
+        if (Array.isArray(j?.inner)) card.inner = j.inner.map(p => ({ say: clip(p?.say, 200), think: clip(p?.think, 60) })).filter(p => p.say).slice(0, 10);
+        if (Array.isArray(j?.timeline)) { card.timeline = j.timeline.map(x => ({ floor: clip(x?.floor, 8).replace(/^#/, ''), line: clip(x?.line, 120), note: clip(x?.note, 40) })).filter(x => x.line).slice(0, 10); if (j.title) card.title = clip(j.title, 16); }
+    }
+    const hasExtras = card => ({ notes: card.notes?.length, inner: card.inner?.length, recap: card.timeline?.length })[exConf(card).needs];
+    async function fillExtras(card, text) {
+        const need = exConf(card).needs;
+        log(need === 'notes' ? 'AI 在写批注…' : need === 'inner' ? 'AI 在写心声…' : 'AI 在排回顾…');
+        const e = ex(), chat = getContext()?.chat || [];
+        const src = need === 'recap' && !e.custom && e.floors.length ? [...e.floors].sort((a, b) => a - b).map(i => `<floor n="${i}" who="${chat[i]?.name || ''}">\n${floorText(i).slice(0, 1500)}\n</floor>`).join('\n') : `<text who="${card.sign || ''}">\n${String(text).slice(0, 5000)}\n</text>`;
+        const ask = {
+            notes: `这段戏里，在场的另一个人（没有就是事后回看的自己）拿笔在旁边写批注。挑 2–4 句最值得批的原句，每条批注 20 字以内，口吻像批注的这个人，可以吐槽、心疼、反驳、记仇，别解释剧情。只输出 JSON：{"notesBy": "谁批的", "notes": [{"at": "被批注那句里连续的几个原字", "text": "批注"}]}`,
+            inner: `把这段戏里说出口的对白挑出来（3–8 句，原句不改字），给每句配一句「心里没说出口的」：20 字以内，要和说出口的有落差，别重复原句的意思。只输出 JSON：{"inner": [{"say": "原句", "think": "心里那句"}]}`,
+            recap: `把这几楼排成一条时间线：每条写楼号、那一楼最关键的一句原文（不改字）、一句 15 字以内的「发生了什么」，3–8 条，按楼号排。再起一个 8 字以内的小标题。只输出 JSON：{"title": "小标题", "timeline": [{"floor": 楼号, "line": "原句", "note": "发生了什么"}]}`,
+        }[need];
+        try { takeExtras(card, __mod_translate.pickJson(await askLLM(ask, src, { maxTokens: 1500 }))); }
+        catch (err) { log('AI 没写出来：' + (err?.message || err) + '（先按原文排）'); }
+    }
+    /** AI 读这段字写画面 → NAI 画。画风用智库现在选的画师串（设置里可以关） */
+    async function drawArt(card, text, { rewrite = false } = {}) {
+        let tags = rewrite ? '' : card.tags;
+        if (!tags) {
+            log('AI 在想画面…');
+            const C = exConf(card), where = C.id === 'slice' ? { circle: '圆形框里', arch: '拱门形的窗里' }[C.shape] || '卡片最上面' : { line: '整张卡背后当暗色背景', film: '宽银幕画面里（下面配字幕）', photo: '一张相纸里', book: '书页上的插图（会做成旧照片色）', notes: '卡片上方一条横幅里', recap: '卡片最上面（下面是时间线）', inner: '卡片最上面' }[C.id] || '卡片最上面';
+            const sys = `你给一段小说 / 聊天的文字配一张插图，图会放在${where}。
+先想这段话最有画面感的那一瞬间：在哪、什么天气和光、有什么物件、是谁的什么动作。能用一个意象就别堆细节（雨后的屋檐、掉在地上的伞、窗外的灯），也可以画人物，但要像电影镜头：背影、侧脸、手、远景里的小人，不要正脸大头照。
+写成 NovelAI 英文标签，逗号隔开：先写人数（no humans 或 1boy / 1girl），再写主体、动作、环境、光线、色调、镜头（wide shot、close-up、from behind…），${exConf(card).id === 'line' ? '整体要暗，大面积深色，' : ''}不写画师名，不要文字。
+只输出 JSON：{"tags": "英文标签"}`;
+            const j = __mod_translate.pickJson(await askLLM(sys, `<text>\n${String(text).slice(0, 3000)}\n</text>`, { maxTokens: 800 }));
+            tags = String(j?.tags || '').trim() || 'no humans, scenery, sky, soft light';
+        }
+        log('NAI 在画图…');
+        const sty = opts().excerptStyleArt !== false ? deps.style?.() || {} : {};
+        const C2 = exConf(card), wide = C2.id === 'line' || (C2.id === 'slice' && C2.shape === 'arch') ? [832, 1216] : C2.id === 'photo' || (C2.id === 'slice' && C2.shape === 'circle') ? [1024, 1024] : [1216, 832];
+        const r = await generateImage({ positive: [sty.pos, tags, 'illustration, best quality, cinematic lighting'].map(x => String(x || '').trim()).filter(Boolean).join(', '), negative: [sty.neg, 'text, letters, watermark, signature, logo, speech bubble, lowres, worst quality, blurry'].filter(Boolean).join(', '), chars: [], width: wide[0], height: wide[1] });
+        const saved = await storeImage(r.image, `excerpt_${Date.now()}`);
+        if (!saved?.url) throw new Error('图片保存未返回地址');
+        card.url = saved.url; card.tags = tags;
+    }
+    const renderCard = card => exRender(doc, card, { loadImg, resolveUrl, fontReady });
+    async function refreshPreview() {
+        const card = ex().card;
+        if (!card) { st.preview = ''; return; }
+        try { st.preview = (await renderCard(card)).toDataURL('image/jpeg', 0.92); }
+        catch { st.preview = (await renderCard({ ...card, url: '' })).toDataURL('image/jpeg', 0.92); log('这张图跨域读不了，先不带图'); }
+    }
+    async function changeArt(how, file) {
+        const e = ex(), card = e.card; if (!card || st.busy) return;
+        st.busy = 'art'; draw();
+        try {
+            if (how === 'none') card.url = '';
+            else if (how === 'file') { const u = await new Promise(ok => { const r = new win.FileReader(); r.onload = () => ok(r.result); r.readAsDataURL(file); }); const saved = await storeImage(u, `excerpt_${Date.now()}`); card.url = saved?.url || u; if (EX_NO_IMAGE.has(card.style)) card.style = 'slice'; }
+            else { if (EX_NO_IMAGE.has(card.style)) card.style = 'slice'; await drawArt(card, exPlain(card.md), { rewrite: how === 'rethink' }); }
+            commit(); await refreshPreview(); log('');
+        } catch (err) { log('图没换成：' + (err?.message || err)); }
+        finally { st.busy = ''; draw(); }
+    }
+
+    // ── 界面 ──
+    function settingsHtml() {
+        const o = opts(), r = rules();
+        const sw = (key, text, small, def = true) => `<label class="pc-switch"><input type="checkbox" data-xs="${key}" ${(o[key] ?? def) ? 'checked' : ''}><span></span>${text}${small ? `<small>${small}</small>` : ''}</label>`;
+        const seg = (key, list, def) => { const cur = String(o[key] ?? def); return `<div class="pc-seg" style="grid-template-columns:repeat(${list.length},minmax(0,1fr))">${list.map(([v, t]) => `<button class="${cur === v ? 'on' : ''}" data-xseg="${key}" data-v="${esc(v)}">${esc(t)}</button>`).join('')}</div>`; };
+        const tags = (kind, list) => `<div class="pc-chips wrap" style="margin:4px 0 8px">${list.map((t, i) => `<button class="pc-pill tiny" data-xtagdel="${kind}" data-i="${i}">${esc(t)} ×</button>`).join('')}<input class="pc-input" data-xtagnew="${kind}" value="${esc(st.newTag[kind])}" placeholder="标签名" style="width:96px;min-height:30px;padding:2px 10px"><button class="pc-pill dashed tiny" data-xtagadd="${kind}">＋ 加</button></div>`;
+        return `<section class="pc-card pc-pad pc-mt"><div style="display:flex;justify-content:space-between;align-items:center"><h3 class="pc-h3" style="margin:0">摘要设置</h3><button class="pc-pill dashed tiny" data-x="settings">收起</button></div>
+            ${sw('excerptOn', '摘要功能', '关掉以后聊天里不会出「✦ 摘要」')}
+            ${sw('excerptSelect', '选中字时出现「✦ 摘要」', '在聊天里选中一段字，旁边多一个小按钮')}
+            <div class="pc-label">提取正文</div>
+            <div class="pc-dim small">只要这些标签里的（不填就是整楼）</div>${tags('only', r.only)}
+            <div class="pc-dim small">去掉这些标签（连里面的字一起）</div>${tags('drop', r.drop)}
+            <div class="pc-dim small">HTML、代码块、图片一直会去掉。<button class="pc-pill dashed tiny" data-x="tagreset">去掉的标签恢复默认</button></div>
+            <div class="pc-label">默认样式</div>${seg('excerptStyle', EX_STYLES.map(([k, t]) => [k, t]), 'slice')}
+            <div class="pc-label">配图</div>${seg('excerptArt', [['nai', 'AI 画'], ['auto', '这楼有图先用'], ['none', '不要图']], 'nai')}
+            <div class="pc-hint">「AI 画」：AI 读这段字想一个画面，写成标签交给 NAI 画（竖排、纯文字、剧本不放图）。</div>
+            ${sw('excerptStyleArt', '配图用智库现在选的画风', '关掉就只用 AI 写的标签')}
+            <div class="pc-label">字体</div>${seg('excerptFont', [['', '跟版式'], ...Object.entries(EX_FONTS).map(([k, v]) => [k, v[0]])], '')}
+          </section>`;
+    }
+    const curStyle = () => st.style || (ex().card ? (ex().card.ai ? 'ai' : ex().card.style) : '') || opts().excerptStyle || 'slice';
+    function html() {
+        const e = ex(), b = st.busy, card = e.card, chat = getContext()?.chat || [];
+        const list = searchFloors(st.query), picked = new Set(e.floors);
+        const row = i => { const m = chat[i], t = floorText(i).replace(/\s+/g, ' '); return `<button data-xfloor="${i}" style="display:flex;gap:10px;align-items:baseline;width:100%;text-align:left;border-radius:12px;padding:9px 10px;margin:4px 0;font:inherit;font-size:13px;color:inherit;cursor:pointer;background:${picked.has(i) ? 'rgba(226,170,90,.28)' : 'transparent'};border:${picked.has(i) ? '2px solid currentColor' : '1.5px dashed rgba(127,127,127,.45)'}"><b style="flex:0 0 auto">${picked.has(i) ? '✓ ' : ''}#${i}</b><span style="overflow:hidden;white-space:nowrap;text-overflow:ellipsis;opacity:.8">${esc(m?.name || '')}：${esc(t.slice(0, 60) || '（这楼提取不到文字）')}</span></button>`; };
+        const thumb = (k, t) => `<button data-xstyle="${k}" ${b ? 'disabled' : ''} style="border-radius:10px;padding:8px 4px;font:inherit;font-size:12px;color:inherit;cursor:pointer;background:transparent;border:${curStyle() === k ? '2px solid currentColor' : '1.5px dashed rgba(127,127,127,.45)'}">${esc(t)}</button>`;
+        return `<div style="display:flex;justify-content:flex-end;margin:-4px 0 4px"><button class="pc-pill dashed tiny" data-x="settings">⚙ 设置</button></div>
+          ${st.settings ? settingsHtml() : ''}
+          ${!on() ? '<div class="pc-dim small">摘要功能关着（在 ⚙ 设置里打开）。这里还能用，聊天里不出按钮。</div>' : ''}
+          ${e.custom ? `<div class="pc-card" style="padding:10px 12px;margin:6px 0"><div class="pc-dim small" style="margin-bottom:4px">选中的字${e.customFloor != null ? ` · #${e.customFloor}` : ''} <button class="pc-x" data-x="dropcustom" style="float:right">×</button></div><div class="small" style="line-height:1.8;max-height:160px;overflow:auto;white-space:pre-wrap">${esc(e.custom)}</div></div>`
+            : `<input class="pc-input" data-xq value="${esc(st.query)}" placeholder="🔍 搜楼层：42、40-45 或关键词">
+              <div style="max-height:300px;overflow:auto;margin-top:4px">${list.length ? list.map(row).join('') : '<div class="pc-dim small" style="padding:8px">没找到</div>'}</div>
+              ${e.floors.length ? `<div class="pc-dim small" style="margin-top:4px">已选 ${[...e.floors].sort((a, b) => a - b).map(i => '#' + i).join(' ')} <button class="pc-pill dashed tiny" data-x="clearfloors">清空</button></div>` : ''}`}
+          <div class="pc-label">样式</div>
+          <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px">${EX_STYLES.map(([k, t]) => thumb(k, t)).join('')}</div>
+          <div class="pc-dim small" style="margin-top:4px">${esc((exLayout(curStyle())[0] === curStyle() ? exLayout(curStyle())[2] : 'AI 读完自己挑版式、断行、加粗和红绿字'))}</div>
+          <div class="pc-dim small" data-x-log style="min-height:1.2em;margin-top:6px">${esc(st.log || '')}</div>
+          <div class="pc-actions"><button class="pc-btn dark" data-x="make" ${b ? 'disabled' : ''} style="flex:1">${b === 'card' ? '<span class="pc-busy">做卡中</span>' : card ? '重新出卡' : '出卡'}</button></div>
+          ${card ? `<div style="margin-top:10px;text-align:center">${st.preview ? `<img src="${st.preview}" data-x="view" style="max-width:100%;max-height:70vh;border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.18);cursor:pointer">` : '<div class="pc-dim small">画卡中…</div>'}</div>
+            ${(() => { const C = exConf(card); return `<div style="margin-top:8px;display:grid;gap:4px">${Object.entries(EX_TOOLS).filter(([k]) => C.can.includes(k)).map(([k, [name, list]]) => `<div style="display:flex;align-items:center;gap:6px"><span class="pc-dim small" style="flex:0 0 2.6em">${name}</span><div class="pc-seg" style="flex:1;grid-template-columns:repeat(${list.length},minmax(0,1fr))">${list.map(([v, t]) => `<button class="${C[k] === v ? 'on' : ''}" data-xtool="${k}" data-v="${v}" ${b ? 'disabled' : ''}>${t}</button>`).join('')}</div></div>`).join('')}</div>`; })()}
+            <div class="pc-chips wrap" style="margin-top:8px;justify-content:center">
+              <button class="pc-pill dashed" data-x="edit">${st.edit ? '收起改字' : '改字'}</button>
+              <button class="pc-pill dashed" data-x="artrethink" ${b ? 'disabled' : ''}>${b === 'art' ? '<span class="pc-busy">画图中</span>' : 'AI 换个画面'}</button>
+              <label class="pc-pill dashed" style="cursor:pointer">放自己的图<input type="file" accept="image/*" data-xart hidden></label>
+              ${card.url ? `<button class="pc-pill dashed" data-x="artnone">不要图</button>` : ''}
+              ${st.preview ? `<a class="pc-pill" style="background:#3a2a22;color:#f4efe4;border-color:#3a2a22" href="${st.preview}" download="摘要_${Date.now()}.jpg">保存</a>` : ''}
+            </div>
+            ${st.edit ? `<div class="pc-mt-s" style="display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px">${[['b', '<b>B</b>'], ['i', '<i>I</i>'], ['红', '<b style="color:#b8322a">红</b>'], ['绿', '<b style="color:#2f7d55">绿</b>'], ['蓝', '<b style="color:#2d5aa0">蓝</b>'], ['h', '标题'], ['hr', '—']].map(([k, t]) => `<button class="pc-pill tiny" data-xfmt="${k}" style="justify-content:center">${t}</button>`).join('')}</div>
+              <textarea class="pc-textarea" data-xmd style="min-height:220px;margin-top:6px;font-family:ui-monospace,Menlo,monospace;font-size:13px;line-height:1.8">${esc(card.md)}</textarea>
+              <label class="pc-field"><span>署名</span><input class="pc-input" data-xsign value="${esc(card.sign || '')}"></label>
+              ${exConf(card).needs === 'notes' ? `<label class="pc-field"><span>批注（一行一条：原句里的几个字｜批注）</span><textarea class="pc-textarea small" data-xextra="notes" style="min-height:90px">${esc((card.notes || []).map(n => `${n.at}｜${n.text}`).join('\n'))}</textarea></label><label class="pc-field"><span>批注的人</span><input class="pc-input" data-xextra="notesBy" value="${esc(card.notesBy || '')}"></label>` : ''}
+              ${exConf(card).needs === 'inner' ? `<label class="pc-field"><span>心声（一行一对：说出口的｜没说出口的）</span><textarea class="pc-textarea small" data-xextra="inner" style="min-height:120px">${esc((card.inner || []).map(p => `${p.say}｜${p.think}`).join('\n'))}</textarea></label>` : ''}
+              ${exConf(card).needs === 'recap' ? `<label class="pc-field"><span>小标题</span><input class="pc-input" data-xextra="title" value="${esc(card.title || '')}"></label><label class="pc-field"><span>时间线（一行一条：楼号｜原句｜发生了什么）</span><textarea class="pc-textarea small" data-xextra="timeline" style="min-height:120px">${esc((card.timeline || []).map(x => `${x.floor}｜${x.line}｜${x.note}`).join('\n'))}</textarea></label>` : ''}
+              <label class="pc-field"><span>配图的画面（英文标签，改了点「照这个重画」）</span><textarea class="pc-textarea small" data-xtags style="min-height:60px">${esc(card.tags || '')}</textarea></label>
+              <div class="pc-chips wrap"><button class="pc-pill dashed tiny" data-x="artnai" ${b ? 'disabled' : ''}>照这个重画</button></div>
+              <div class="pc-hint">**粗** *斜* {红:字} {绿:字} {蓝:字} ## 标题 --- 分割线。选中字再点上面的按钮。改完点「更新卡片」。</div>
+              <div class="pc-actions"><button class="pc-btn dark" data-x="rerender">更新卡片</button></div>` : ''}` : ''}`;
+    }
+    function draw() { if (!stopped && st.mount?.isConnected) { const q = st.mount.querySelector('[data-xq]'), focus = q && doc.activeElement === q, pos = q?.selectionStart; st.mount.innerHTML = html(); if (focus) { const n = st.mount.querySelector('[data-xq]'); n?.focus(); try { n.setSelectionRange(pos, pos); } catch { /* */ } } } }
+    function wrapSel(ta, kind) {
+        const a = ta.selectionStart, z = ta.selectionEnd, v = ta.value, sel = v.slice(a, z);
+        let ins;
+        if (kind === 'b') ins = `**${sel || '加粗'}**`; else if (kind === 'i') ins = `*${sel || '斜体'}*`;
+        else if (kind === 'h') { const ls = v.lastIndexOf('\n', a - 1) + 1; ta.value = v.slice(0, ls) + (v.slice(ls).startsWith('## ') ? v.slice(ls + 3) : '## ' + v.slice(ls)); return; }
+        else if (kind === 'hr') ins = '\n---\n'; else ins = `{${kind}:${sel || '文字'}}`;
+        ta.value = v.slice(0, a) + ins + v.slice(z); ta.focus(); ta.setSelectionRange(a, a + ins.length);
+    }
+    function open(mount) {
+        if (stopped || !mount) return;
+        st.mount = mount; draw();
+        if (ex().card && !st.preview) refreshPreview().then(draw).catch(() => {});
+        if (mount.dataset.xBound) return; mount.dataset.xBound = '1';
+        mount.addEventListener('input', ev => {
+            const t = ev.target;
+            if (t.matches('[data-xq]')) { st.query = t.value; clearTimeout(st.qt); st.qt = setTimeout(draw, 250); }
+            else if (t.matches('[data-xmd]') && ex().card) { ex().card.md = t.value; commit({ silent: true }); }
+            else if (t.matches('[data-xsign]') && ex().card) { ex().card.sign = t.value; commit({ silent: true }); }
+            else if (t.matches('[data-xtags]') && ex().card) { ex().card.tags = t.value; commit({ silent: true }); }
+            else if (t.dataset.xextra && ex().card) {
+                const card = ex().card, k = t.dataset.xextra, rows = t.value.split('\n').map(l => l.split(/[｜|]/).map(s => s.trim())).filter(r => r[0]);
+                if (k === 'notes') card.notes = rows.map(r => ({ at: r[0], text: r[1] || '' })).filter(n => n.text);
+                else if (k === 'inner') card.inner = rows.map(r => ({ say: r[0], think: r[1] || '' }));
+                else if (k === 'timeline') card.timeline = rows.map(r => ({ floor: r[0].replace(/^#/, ''), line: r[1] || '', note: r[2] || '' })).filter(x => x.line);
+                else card[k] = t.value;
+                commit({ silent: true });
+            }
+            else if (t.dataset.xtagnew) st.newTag[t.dataset.xtagnew] = t.value;
+        });
+        mount.addEventListener('change', ev => {
+            const t = ev.target;
+            if (t.dataset.xs) { opts()[t.dataset.xs] = t.checked; commit(); syncSelect(); draw(); }
+            else if (t.matches('[data-xart]') && t.files?.[0]) { const f = t.files[0]; t.value = ''; changeArt('file', f); }
+        });
+        mount.addEventListener('click', async ev => {
+            const t = ev.target.closest('button, img[data-x]'); if (!t || !mount.contains(t)) return;
+            const e = ex(), ds = t.dataset, o = opts();
+            if (ds.xfloor != null) { const i = Number(ds.xfloor), k = e.floors.indexOf(i); if (k >= 0) e.floors.splice(k, 1); else e.floors.push(i); commit({ silent: true }); const box = t.parentElement, top = box?.scrollTop; draw(); const nb = mount.querySelector('[data-xfloor]')?.parentElement; if (nb && top != null) nb.scrollTop = top; return; }
+            if (ds.xstyle) {
+                // 已经有卡：换现成样式只换版式（字和图不动）；点「AI 排」就让 AI 重排。还没卡：只是选上
+                st.style = ds.xstyle;
+                const card = e.card;
+                if (card && ds.xstyle === 'ai') { makeCard({ style: 'ai' }); return; }
+                if (card) { card.style = ds.xstyle; card.ai = false; delete card.shape; delete card.align; delete card.theme; if (!o.excerptFont) delete card.font; if (exConf(card).needs && !hasExtras(card)) { st.busy = 'card'; draw(); try { await fillExtras(card, sourceText() || exPlain(card.md)); } finally { st.busy = ''; } } if (ds.xstyle === 'line' && exBlocks(card.md).filter(x => x.k === 'p').length > 3) card.md = exPresetMd(exPlain(card.md), 'line'); commit(); if (!card.url && !EX_NO_IMAGE.has(card.style) && (o.excerptArt || 'nai') !== 'none') { draw(); changeArt('rethink'); return; } await refreshPreview(); }
+                draw(); return;
+            }
+            if (ds.xseg) { o[ds.xseg] = ds.v; commit(); draw(); return; }
+            if (ds.xtool && e.card) { e.card[ds.xtool] = ds.v; commit({ silent: true }); await refreshPreview(); draw(); return; }
+            if (ds.xtagdel) { const k = ds.xtagdel === 'only' ? 'excerptOnly' : 'excerptDrop'; const list = [...rules()[ds.xtagdel]]; list.splice(Number(ds.i), 1); o[k] = list; commit(); draw(); return; }
+            if (ds.xtagadd) { const kind = ds.xtagadd, v = String(st.newTag[kind] || '').trim().replace(/^<|\/?>$/g, ''); if (!v) return; const k = kind === 'only' ? 'excerptOnly' : 'excerptDrop'; o[k] = [...new Set([...rules()[kind], v])]; st.newTag[kind] = ''; commit(); draw(); return; }
+            if (ds.xfmt) { const ta = mount.querySelector('[data-xmd]'); if (ta) { wrapSel(ta, ds.xfmt); e.card.md = ta.value; commit({ silent: true }); } return; }
+            switch (ds.x) {
+                case 'settings': st.settings = !st.settings; draw(); break;
+                case 'tagreset': o.excerptDrop = [...EX_DROP_DEFAULT]; commit(); draw(); break;
+                case 'clearfloors': e.floors = []; commit({ silent: true }); draw(); break;
+                case 'dropcustom': e.custom = ''; e.customFloor = null; commit({ silent: true }); draw(); break;
+                case 'make': makeCard({ style: curStyle() }); break;
+                case 'edit': st.edit = !st.edit; draw(); break;
+                case 'rerender': await refreshPreview(); draw(); break;
+                case 'artnai': changeArt('nai'); break;
+                case 'artrethink': changeArt('rethink'); break;
+                case 'artnone': changeArt('none'); break;
+                case 'view': if (st.preview) pcGallery(doc, [{ src: () => st.preview, label: '摘要' }], 0); break;
+            }
+        });
+    }
+
+    // ── 聊天里选中字 → 「✦ 摘要」 ──
+    let btn = null, selTimer = 0, picked = null;
+    function hideBtn() { if (btn) btn.style.display = 'none'; picked = null; }
+    function onSel() {
+        clearTimeout(selTimer);
+        selTimer = setTimeout(() => {
+            if (stopped || !on() || opts().excerptSelect === false) return hideBtn();
+            const sel = win.getSelection?.(), text = String(sel || '').trim();
+            const node = sel?.anchorNode, el = node && (node.nodeType === 1 ? node : node.parentElement);
+            const mes = el?.closest?.('#chat .mes');
+            if (!text || text.length < 2 || !mes || !el.closest('.mes_text')) return hideBtn();
+            let rect; try { rect = sel.getRangeAt(0).getBoundingClientRect(); } catch { return hideBtn(); }
+            picked = { text, floor: Number(mes.getAttribute('mesid')) };
+            if (!btn) {
+                btn = doc.createElement('button'); btn.type = 'button'; btn.textContent = '✦ 摘要'; btn.className = 'pc-excerpt-btn';
+                btn.style.cssText = 'position:fixed;z-index:2147483000;padding:8px 14px;border-radius:999px;border:0;background:#f4efe4;color:#3a2a22;font:600 14px "Noto Serif SC",serif;box-shadow:0 6px 18px rgba(0,0,0,.35);cursor:pointer';
+                // 按下时别让选区消失
+                btn.addEventListener('pointerdown', ev => ev.preventDefault());
+                btn.addEventListener('mousedown', ev => ev.preventDefault());
+                btn.addEventListener('click', () => {
+                    if (!picked) return;
+                    const e = ex(); e.custom = picked.text; e.customFloor = Number.isFinite(picked.floor) ? picked.floor : null; commit({ silent: true });
+                    hideBtn(); try { win.getSelection?.().removeAllRanges(); } catch { /* */ }
+                    deps.openView?.('excerpt');
+                });
+                doc.body.appendChild(btn);
+            }
+            const vw = win.innerWidth, vh = win.innerHeight;
+            // 放在选区下面偏右，避开系统的复制菜单（一般在选区上方）
+            const y = rect.bottom + 12 + 44 > vh ? Math.max(8, rect.top - 56) : rect.bottom + 12;
+            btn.style.display = 'block'; btn.style.top = `${y}px`; btn.style.left = `${Math.min(vw - 110, Math.max(8, rect.right - 90))}px`;
+        }, 220);
+    }
+    function syncSelect() {
+        const want = on() && opts().excerptSelect !== false;
+        if (want && !st.selOn) { doc.addEventListener('selectionchange', onSel); st.selOn = true; }
+        if (!want && st.selOn) { doc.removeEventListener('selectionchange', onSel); st.selOn = false; hideBtn(); }
+    }
+    syncSelect();
+    return {
+        open, syncSelect, renderCard,
+        stop() { stopped = true; if (st.selOn) doc.removeEventListener('selectionchange', onSel); btn?.remove(); btn = null; },
+    };
+}
+
 function createComicController(deps) {
     const { document: doc, getContext, getData, commit, generatePage, storeImage, resolveUrl, recordImage, dropImage, askLLM, notify, modal, esc } = deps;
     const naiSize = deps.naiSize || (() => [832, 1216]);
@@ -1320,6 +2282,8 @@ function createComicController(deps) {
         const ref = ownRef || d.active;
         return { pos: ref ? M.ticketString(d, ref) : '', neg: ref ? M.ticketNeg(d, ref) : '', name: ref ? M.ticketName(d, ref) : '' };
     }
+    /** 对白样式：气泡 / 字条；竖排：自动（黑白时竖排）/ 横 / 竖 */
+    function capOpts() { const v = opts().comicVertical || 'auto'; return { bubble: opts().comicBubble === 'box' ? 'box' : 'bubble', vertical: v === 'v' || (v === 'auto' && opts().comicColor === 'mono') }; }
     function negativeFor() {
         const st = style_();
         const extra = opts().comicNeg ?? COMIC_DEFAULT_NEGATIVE;
@@ -1361,7 +2325,7 @@ function createComicController(deps) {
             const comfy = opts().comicBackend === 'comfy';
             const textMode0 = ['draw', 'overlay', 'none'].includes(opts().comicText) ? opts().comicText : 'overlay';
             const textMode = comfy && textMode0 === 'draw' ? 'overlay' : textMode0;
-            const mono = opts().comicColor === 'mono' ? 'monochrome, greyscale, screentone' : '';
+            const mono = opts().comicColor === 'mono' ? 'manga, monochrome, greyscale, screentone, halftone, ink, high contrast, clean lineart, hatching' : '';
             const req = comicRequest(parsed, { stylePos: [st.pos, mono].filter(Boolean).join(', '), extraNeg: negativeFor(), width: w, height: h, textMode });
             running.set(job, 'run'); render(id);
             const r = await generatePage(req, { backend: comfy ? 'comfy' : 'nai' });
@@ -1370,7 +2334,7 @@ function createComicController(deps) {
             if (!saved?.url) throw new Error('漫画图片保存未返回地址');
             if (!snap.current()) { discard(saved.url); return; }
             const hadExtra = !!msg.extra, hadStore = !!msg.extra?.zhikuComic, old = rec(msg, block.key);
-            const versions = [...(old?.versions || []), { url: saved.url, seed: r.sent?.seed, size: r.sent?.size, at: Date.now(), style: st.name, textMode, captions: textMode === 'overlay' ? { ok: true, pageTexts: parsed.pageTexts, panelTexts: parsed.panelTexts, boxes: parsed.boxes } : null, sent: { positive: req.positive, negative: req.negative, chars: req.chars } }];
+            const versions = [...(old?.versions || []), { url: saved.url, seed: r.sent?.seed, size: r.sent?.size, at: Date.now(), style: st.name, mono: !!mono && opts().comicPureMono !== false, textMode, captions: textMode === 'overlay' ? { ok: true, pageTexts: parsed.pageTexts, panelTexts: parsed.panelTexts, boxes: parsed.boxes } : null, sent: { positive: req.positive, negative: req.negative, chars: req.chars } }];
             const removed = versions.length > 10 ? versions.shift() : null;
             const entry = { ...(old || {}), versions, cur: versions.length - 1 };
             store(msg)[block.key] = entry;
@@ -1418,14 +2382,14 @@ function createComicController(deps) {
 
     function pageHtml(id, msg, b) {
         const r = rec(msg, b.key), v = curVer(r), job = `${id}:${b.key}`;
-        const tag = `<span class="pc-comic-tag">第 ${b.page} / ${b.total} 页</span>`;
+        const tag = `<span class="pc-comic-tag">第 ${b.page} / ${b.total} 页${v?.style ? `<span class="sty">· ${esc(v.style)}</span>` : ''}</span>`;
         if (v) {
             const ver = r.versions.length > 1 ? `<span class="pc-comic-ver"><button data-cv="-1" aria-label="上一版">‹</button>${(r.cur ?? 0) + 1}/${r.versions.length}<button data-cv="1" aria-label="下一版">›</button></span>` : '';
-            const caps = v.textMode === 'overlay' ? captionsHtml(captionSource(v, b.inner), esc, opts().comicCapSize || 's') : '';
+            const caps = v.textMode === 'overlay' ? captionsHtml(captionSource(v, b.inner), esc, opts().comicCapSize || 's', capOpts()) : '';
             const acts = `<div class="pc-comic-acts"><button data-cview>放大看</button><button data-cgen>重画这一页</button><button data-cwork>编辑本页</button></div>`;
             const st = running.get(job);
             const busy = st ? `<div class="pc-comic-busy"><span>${st === 'wait' ? '排队中…' : '重画中…'}</span></div>` : '';
-            return `<figure class="pc-comic-page${st ? ' busy' : ''}" data-ckey="${b.key}" data-page="${b.page}"><img data-comic-src="${esc(v.url)}" alt="第 ${b.page} 页" draggable="false">${caps}${tag}${ver}${acts}${busy}</figure>`;
+            return `<figure class="pc-comic-page${st ? ' busy' : ''}${v.mono ? ' mono' : ''}" data-ckey="${b.key}" data-page="${b.page}"><img data-comic-src="${esc(v.url)}" alt="第 ${b.page} 页" draggable="false">${caps}${tag}${ver}${acts}${busy}</figure>`;
         }
         const st = running.get(job);
         const err = errors.get(job);
@@ -1679,21 +2643,29 @@ function createComicController(deps) {
               <div class="pc-hint">ComfyUI 用「Comfy」页选的模型、工作流和参数。分人物的提示词会合在一起发；ComfyUI 画不了字，对白会自动改成「插件叠字」。</div>
               <div class="pc-label">颜色</div>
               ${seg('comicColor', [['color', '彩色'], ['mono', '黑白网点']], 'color')}
+              ${opts().comicColor === 'mono' ? `${sw('comicPureMono', '显示时去掉色偏', 'NAI 画黑白常带一点黄 / 蓝，打开后看的时候转成纯灰度（下载的还是原图）', true)}<div class="pc-hint">黑白模式会加上网点、排线、墨线、高对比这类标签，分镜也会多用集中线、速度线、涂黑和留白；对白默认竖排。</div>` : ''}
               <div class="pc-label">对白怎么出现</div>
               ${seg('comicText', [['overlay', '插件叠字'], ['draw', 'NAI 画进图'], ['none', '不要对白']], 'overlay')}
               <div class="pc-hint">NAI 画中文常常乱码，「插件叠字」让 NAI 只画画面，对白由浏览器显示，位置按每格开头的位置描述或 2x2 布局估算，未标位置时按顺序排列，字号跟着图片宽度缩放；下载的仍是未叠字原图。</div>
               <div class="pc-label">叠字大小</div>
               ${seg('comicCapSize', [['xs', '特小'], ['s', '小'], ['m', '中'], ['l', '大'], ['hide', '不显示']], 's')}
+              <div class="pc-label">对白样式</div>
+              ${seg('comicBubble', [['bubble', '漫画气泡'], ['box', '字条']], 'bubble')}
+              ${seg('comicVertical', [['auto', '黑白时竖排'], ['h', '横排'], ['v', '竖排']], 'auto')}
+              <div class="pc-hint">气泡按对白自己分：「」“” 是说话（圆泡），（）是心里话（虚线泡），短促的拟声（ドキッ、BANG、砰！）画成大字，其余是旁白方框。一格里第一句在右上，往左下排。</div>
               <div class="pc-hint">挡图的话调小，或者在楼层里点「隐藏对白」临时收起。想少点对白，在下面「给 AI 的改编要求」里写「对白少一点」。</div>
               <div class="pc-label">页面尺寸（跨页自动横过来）</div>
               ${seg('comicSize', [['832x1216', '竖'], ['1216x832', '横'], ['1024x1024', '方'], ['follow', '跟生图设置']], '832x1216')}
               <div class="pc-hint">「跟生图设置」用设置里填的宽高。步数、CFG、采样器本来就跟着设置走（NovelAI 通道）；用 ComfyUI 画时，跟着「Comfy」页的设置。</div>
               <div class="pc-label">「画成漫画」每楼画几页</div>
               ${seg('comicPages', [[0, '自动'], [2, '2'], [4, '4'], [6, '6'], [8, '8'], [12, '12'], [16, '16']], 0)}
-              <input class="pc-input" data-cpages inputmode="numeric" placeholder="自定义页数（1–30），填了就按这个" value="${[0, 2, 4, 6, 8, 12, 16].includes(Number(opts().comicPages) || 0) ? '' : esc(String(opts().comicPages))}">
+              <input class="pc-input" data-cpages inputmode="numeric" placeholder="自定义页数（不封顶），填了就按这个" value="${[0, 2, 4, 6, 8, 12, 16].includes(Number(opts().comicPages) || 0) ? '' : esc(String(opts().comicPages))}">
               <div class="pc-label">每页几格</div>
-              ${seg('comicPanels', [['', '自动'], ['1–2', '1–2'], ['3–4', '3–4'], ['5–6', '5–6']], '')}
-              <div class="pc-hint">「自动」时 AI 按剧情长短分：短的 1–2 页，长的 5–8 页。页数多、每页格数少，剧情切得越细。</div>
+              ${seg('comicPanels', [['', '自动'], ['1–2', '1–2'], ['3–4', '3–4'], ['5–6', '5–6'], ['6–8', '6–8'], ['8–10', '8–10']], '')}
+              <div class="pc-label">分格</div>
+              ${seg('comicLayout', [['vary', '有变化'], ['bold', '大胆'], ['art', '艺术感'], ['grid', '规整']], 'vary')}
+              <div class="pc-hint">「有变化」大格小格搭配、偶尔斜切和嵌格；「大胆」每页都有打破常规的分格和夸张镜头；「艺术感」每页照分镜库里的一种版式画（窗格叠全身、局部接力、黑页流体……，分镜库在漫画工坊最下面，可以放图让 AI 学）；「规整」横平竖直。漫画工坊里用自己的图排版也跟这个走。</div>
+              <div class="pc-hint">「自动」时 AI 按剧情长短分页，不设上限。页数多、每页格数少，剧情切得越细；一页 6 格以上时脸会变小，建议页面尺寸选大一点。页数多的时候插件会分几批让 AI 写，每批 8 页，接着上一批往下画。</div>
               <label class="pc-field pc-mt-s"><span>漫画改编的回复长度上限（可不填）</span><input class="pc-input" type="number" min="0" step="1000" data-cstr="comicMaxTokens" value="${esc(String(opts().comicMaxTokens || ''))}" placeholder="不填 = 自动（按页数算，最多 16000）"></label>
               <div class="pc-hint">AI 写分镜写到一半断掉（DeepSeek、带思考的模型常见）就填大一点，比如 16000、32000。只管漫画，不影响别的功能；设置里的「回复长度上限」填了的话，这里优先。</div>
               <label class="pc-field pc-mt-s"><span>给 AI 的改编要求（可不填）</span><textarea class="pc-textarea small" data-cstr="comicExtra" placeholder="比如：多用特写和留白；对白少一点；每页最多 3 格；不要画 user 的脸">${esc(o.comicExtra || '')}</textarea></label>
@@ -1724,7 +2696,7 @@ function createComicController(deps) {
             if (t.dataset.cw) { opts()[t.dataset.cw] = t.checked; commit(); draw(); renderAll(); }
             else if (t.matches('[data-cstyle]')) { opts().comicStyle = t.value; commit(); draw(); }
         });
-        root.addEventListener('input', ev => { const t = ev.target; if (t.dataset.cpages !== undefined) { const n = Math.round(Number(t.value)); if (!t.value.trim()) { opts().comicPages = 0; commit(); } else if (n >= 1 && n <= 30) { opts().comicPages = n; commit(); } return; } if (t.dataset.cpresetpick !== undefined) { presetPick = t.value; draw(); return; } if (t.dataset.cstr) { opts()[t.dataset.cstr] = t.value; commit(); } });
+        root.addEventListener('input', ev => { const t = ev.target; if (t.dataset.cpages !== undefined) { const n = Math.round(Number(t.value)); if (!t.value.trim()) { opts().comicPages = 0; commit(); } else if (n >= 1 && n <= 999) { opts().comicPages = n; commit(); } return; } if (t.dataset.cpresetpick !== undefined) { presetPick = t.value; draw(); return; } if (t.dataset.cstr) { opts()[t.dataset.cstr] = t.value; commit(); } });
         draw();
         return box;
     }
@@ -1746,9 +2718,30 @@ function createComicController(deps) {
         try {
             const prevMsg = (c.chat || []).slice(0, id).reverse().find(m => m && !m.is_system && m.extra?.zhikuComicSrc);
             const before = prevMsg ? comicBlocks(srcOf(prevMsg)).slice(-1).map(b => b.inner).join('') : '';
-            const { system, user } = adaptRequest(story.slice(0, 12000), { pages: pages || Number(opts().comicPages) || 0, panels: opts().comicPanels || '', cast: deps.castText?.() || '', before, color: opts().comicColor === 'mono' ? 'mono' : 'color', extra: opts().comicExtra || '' });
-            const want = pages || Number(opts().comicPages) || 6;
-            const out = parseAdapt(await askLLM(system, user, { maxTokens: Math.min(16000, 3000 + 1800 * want) }));
+            const total = pages || Number(opts().comicPages) || 0, BATCH = 8;
+            const common = { panels: opts().comicPanels || '', cast: deps.castText?.() || '', color: opts().comicColor === 'mono' ? 'mono' : 'color', extra: opts().comicExtra || '', layout: opts().comicLayout || 'vary', boards: comicBoardsText(getData(), { full: opts().comicLayout === 'art' }) };
+            let out;
+            if (total > BATCH) {
+                // 正文按段落分成几份，每份分到的页数按字数比例
+                const n = Math.ceil(total / BATCH), paras = story.slice(0, 60000).split(/\n+/).filter(x => x.trim());
+                const all = paras.join('\n').length || 1, chunks = Array.from({ length: n }, () => []);
+                let acc = 0; for (const p of paras) { const k = Math.min(n - 1, Math.floor(acc / all * n)); chunks[k].push(p); acc += p.length + 1; }
+                const per = Array.from({ length: n }, (_, k) => Math.floor(total / n) + (k < total % n ? 1 : 0));
+                const parts = []; let prev = before;
+                for (let k = 0; k < n; k++) {
+                    if (!chunks[k].length) continue;
+                    task.text = `AI 正在改编第 ${k + 1}/${n} 批（共 ${total} 页，这批 ${per[k]} 页）…`; render(id);
+                    const { system, user } = adaptRequest(chunks[k].join('\n'), { ...common, pages: per[k], before: prev, extra: [common.extra, `这是整段漫画的第 ${k + 1}/${n} 批，接着 <previous> 的最后一页往下画，别重复已经画过的剧情${k < n - 1 ? '，这批结尾不用收尾' : '，这批要把剧情画完'}。`].filter(Boolean).join('\n') });
+                    const got = parseAdapt(await askLLM(system, user, { maxTokens: Math.min(16000, 3000 + 1800 * per[k]) }));
+                    if (!snap.current()) return;
+                    parts.push(got); prev = comicBlocks(got).slice(-1).map(b => b.inner).join('');
+                }
+                out = parts.join('\n\n');
+            } else {
+                const { system, user } = adaptRequest(story.slice(0, 12000), { ...common, pages: total, before });
+                const want = total || 6;
+                out = parseAdapt(await askLLM(system, user, { maxTokens: Math.min(16000, 3000 + 1800 * want) }));
+            }
             if (!snap.current()) return;
             const restore = checkpoint(msg), removed = [];
             setSrc(msg, out);
@@ -1812,7 +2805,7 @@ function createComicController(deps) {
             for (const b of comicBlocks(srcOf(msg))) {
                 const v = curVer(rec(msg, b.key));
                 if (!v) continue;
-                out.push({ id, key: b.key, src: () => resolveUrl(v.url), caps: v.textMode === 'overlay' && !capsHidden ? captionsHtml(captionSource(v, b.inner), esc, opts().comicCapSize || 's') : '', label: `第 ${id} 楼 · ${b.page}/${b.total} 页` });
+                out.push({ id, key: b.key, src: () => resolveUrl(v.url), caps: v.textMode === 'overlay' && !capsHidden ? captionsHtml(captionSource(v, b.inner), esc, opts().comicCapSize || 's', capOpts()) : '', label: `第 ${id} 楼 · ${b.page}/${b.total} 页${v.style ? ' · ' + v.style : ''}` });
             }
         });
         return out;
@@ -1836,17 +2829,353 @@ function createComicController(deps) {
               <div class="pc-hint">${st.has ? `「${esc(pick.name)}」里已经有「${COMIC_PRESET_NAME}」，放在聊天记录后面，可以在预设里拖位置${st.on ? '' : '（现在在预设里是关着的，打开才会写）'}。` : `加进「${esc(pick.name)}」以后，用这个预设聊天时正文就会顺便写分镜，破限还是这个预设自己的条目管。`}${added.length ? `<br>已经加了的预设：${added.map(esc).join('、')}` : ''}<br>${curHas ? '在用的预设里有这条，插件就不再自己另塞一份。' : '在用的预设里没有这条时，插件自己把说明塞在最后面。'}</div>
               <div class="pc-row-between" style="justify-content:flex-start;gap:8px;margin-top:6px"><button class="pc-btn small" data-cpreset="${st.has ? 'del' : 'add'}">${st.has ? '从这个预设里拿掉' : '加进这个预设'}</button></div>`;
     }
+    // ═════ 0.9.1 漫画工坊：①自己写剧情 → 漫画（不用在聊天里）；②用自己的图排版：自动分格、AI 看图写对白、画上气泡 ═════
+    const studioData = () => { const d = getData(); d.comicStudio ||= {}; const s = d.comicStudio; s.pages ||= []; s.imgs ||= []; return s; };
+    const sui = { busy: '', log: '', mount: null, imgs: [], lines: [], out: [] }; // imgs：排版用的图（dataURL，只在这次打开里）
+    const slog = t => { sui.log = t; const el = sui.mount?.querySelector('[data-s-log]'); if (el) el.textContent = t; };
+
+    /** 用现在的漫画设置画一页（inner = <image> 里面那段） */
+    async function drawInner(inner) {
+        const parsed = parseComicPage(inner);
+        if (!parsed.ok) throw new Error(parsed.reason);
+        const st = style_(), [w, h] = size();
+        const comfy = opts().comicBackend === 'comfy';
+        const textMode0 = ['draw', 'overlay', 'none'].includes(opts().comicText) ? opts().comicText : 'overlay';
+        const textMode = comfy && textMode0 === 'draw' ? 'overlay' : textMode0;
+        const mono = opts().comicColor === 'mono' ? 'manga, monochrome, greyscale, screentone, halftone, ink, high contrast, clean lineart, hatching' : '';
+        const req = comicRequest(parsed, { stylePos: [st.pos, mono].filter(Boolean).join(', '), extraNeg: negativeFor(), width: w, height: h, textMode });
+        const r = await generatePage(req, { backend: comfy ? 'comfy' : 'nai' });
+        const saved = await storeImage(r.image, `comic_${Date.now()}`);
+        if (!saved?.url) throw new Error('漫画图片保存未返回地址');
+        Promise.resolve(recordImage?.({ dataUrl: r.image, url: saved.url, raw: inner, sent: r.sent, from: 'comic' })).catch(() => {});
+        return { url: saved.url, style: st.name, mono: !!mono && opts().comicPureMono !== false, textMode, captions: textMode === 'overlay' ? { ok: true, pageTexts: parsed.pageTexts, panelTexts: parsed.panelTexts, boxes: parsed.boxes } : null };
+    }
+    async function storyToComic() {
+        const sd = studioData(), story = String(sd.story || '').trim();
+        if (!story) { notify('先写一段剧情'); return; }
+        if (sui.busy) return;
+        sui.busy = 'story'; sdraw();
+        try {
+            const total = Number(opts().comicPages) || 0, BATCH = 8;
+            const common = { panels: opts().comicPanels || '', cast: deps.castText?.() || '', color: opts().comicColor === 'mono' ? 'mono' : 'color', extra: opts().comicExtra || '', layout: opts().comicLayout || 'vary', boards: comicBoardsText(getData(), { full: opts().comicLayout === 'art' }) };
+            const n = total > BATCH ? Math.ceil(total / BATCH) : 1;
+            const paras = story.slice(0, 60000).split(/\n+/).filter(x => x.trim()), all = paras.join('\n').length || 1, chunks = Array.from({ length: n }, () => []);
+            let acc = 0; for (const p of paras) { chunks[Math.min(n - 1, Math.floor(acc / all * n))].push(p); acc += p.length + 1; }
+            const per = Array.from({ length: n }, (_, k) => total ? Math.floor(total / n) + (k < total % n ? 1 : 0) : 0);
+            const blocks = []; let prev = '';
+            for (let k = 0; k < n; k++) {
+                if (!chunks[k].length) continue;
+                slog(n > 1 ? `AI 写分镜：第 ${k + 1}/${n} 批…` : 'AI 正在写分镜…');
+                const { system, user } = adaptRequest(chunks[k].join('\n'), { ...common, pages: per[k], before: prev, extra: [common.extra, n > 1 ? `这是第 ${k + 1}/${n} 批，接着 <previous> 的最后一页往下画。` : ''].filter(Boolean).join('\n') });
+                const got = parseAdapt(await askLLM(system, user, { maxTokens: Math.min(16000, 3000 + 1800 * (per[k] || 6)) }));
+                const bs = comicBlocks(got); blocks.push(...bs.map(b => b.inner)); prev = bs.slice(-1).map(b => b.inner).join('');
+            }
+            sd.pages = blocks.map(inner => ({ inner })); commit();
+            for (let i = 0; i < sd.pages.length; i++) {
+                if (stopped) return;
+                slog(`画第 ${i + 1}/${sd.pages.length} 页…`); sdraw();
+                try { Object.assign(sd.pages[i], await drawInner(sd.pages[i].inner), { err: '' }); }
+                catch (e) { sd.pages[i].err = e?.message || String(e); }
+                commit(); sdraw();
+            }
+            slog(`画好了 ${sd.pages.filter(p => p.url).length}/${sd.pages.length} 页`);
+        } catch (e) { slog('没画成：' + (e?.message || e)); (deps.notifyError || notify)('漫画没画成：' + (e?.message || e)); }
+        finally { sui.busy = ''; sdraw(); }
+    }
+    async function redrawStudioPage(i) {
+        const p = studioData().pages[i]; if (!p || sui.busy) return;
+        sui.busy = 'page'; slog(`重画第 ${i + 1} 页…`); sdraw();
+        try { Object.assign(p, await drawInner(p.inner), { err: '' }); slog(`第 ${i + 1} 页画好了`); }
+        catch (e) { p.err = e?.message || String(e); slog('没画成：' + p.err); }
+        finally { sui.busy = ''; commit(); sdraw(); }
+    }
+
+    // ── 自己的图排版 ──
+    /** 分格：rows = 每行几格；vary = 斜切分格线；rtl = 日漫从右往左读。返回每格的四边形（页面坐标 0–1）和阅读顺序 */
+    function layoutQuads(n, { vary = true, rtl = true, seed = 1, bold = false } = {}) {
+        const pat = { 1: [1], 2: [1, 1], 3: [1, 2], 4: [1, 2, 1], 5: [2, 1, 2], 6: [2, 2, 2], 7: [2, 3, 2], 8: [3, 2, 3], 9: [3, 3, 3] }[Math.min(9, Math.max(1, n))];
+        let r = seed; const rnd = () => (r = (r * 9301 + 49297) % 233280) / 233280;
+        const wts = pat.map(k => (k === 1 ? 1.45 : 1) * (vary ? 0.85 + rnd() * 0.3 : 1)), sum = wts.reduce((a, b) => a + b, 0);
+        const ys = [0]; wts.forEach(w => ys.push(ys[ys.length - 1] + w / sum));
+        const sl = bold ? 0.06 : vary ? 0.035 : 0;
+        // 第 i 条横线：左端 y - s，右端 y + s（交替方向），最上和最下是平的
+        const hl = ys.map((y, i) => (i === 0 || i === ys.length - 1) ? [y, y] : [y - sl * (i % 2 ? 1 : -1), y + sl * (i % 2 ? 1 : -1)]);
+        const quads = [];
+        pat.forEach((k, row) => {
+            const top = hl[row], bot = hl[row + 1];
+            const xs = Array.from({ length: k + 1 }, (_, j) => j / k).map((x, j) => (j === 0 || j === k) ? x : x + (vary ? (rnd() - 0.5) * (bold ? 0.22 : 0.12) : 0));
+            const cells = [];
+            for (let j = 0; j < k; j++) {
+                const vt = bold ? 0.06 : 0.03, vs = vary && j > 0 ? vt * (j % 2 ? 1 : -1) : 0, ve = vary && j + 1 < k ? vt * ((j + 1) % 2 ? 1 : -1) : 0;
+                const x0t = xs[j] + vs, x0b = xs[j] - vs, x1t = xs[j + 1] + ve, x1b = xs[j + 1] - ve;
+                const yAt = (line, x) => line[0] + (line[1] - line[0]) * x;
+                cells.push([[x0t, yAt(top, x0t)], [x1t, yAt(top, x1t)], [x1b, yAt(bot, x1b)], [x0b, yAt(bot, x0b)]]);
+            }
+            (rtl ? cells.reverse() : cells).forEach(c => quads.push(c));
+        });
+        return quads;
+    }
+    /** 「艺术感」：照分镜库里的版式排。windows = 第一张铺满整页做底、其余开成窗格；relay = 横长条一格格往下接力；blackflow = 黑底宽格，中间大片留黑 */
+    function artLayout(n, seed, rtl) {
+        const kinds = n >= 3 ? ['windows', 'relay', 'blackflow'] : ['relay', 'blackflow'], kind = kinds[Math.abs(seed) % kinds.length], cells = [];
+        if (kind === 'windows') {
+            cells.push({ rect: [0, 0, 1, 1], full: true, text: [0.06, 0.62, 0.5, 0.32] });
+            const rest = n - 1, top = Math.min(3, rest), row = [];
+            for (let j = 0; j < top; j++) row.push({ rect: [0.05 + j * 0.9 / top, 0.05, 0.9 / top - 0.025, 0.3] });
+            cells.push(...(rtl ? row.reverse() : row));
+            for (let j = top, m = rest - top; j < rest; j++) cells.push({ rect: [0.64, 0.42 + (j - top) * 0.53 / m, 0.31, 0.53 / m - 0.025] });
+            return { bg: '#fff', line: '#111', cells, kind };
+        }
+        if (kind === 'relay') {
+            const h = 0.92 / n;
+            for (let j = 0; j < n; j++) cells.push({ rect: [0.04 + (j % 2 ? 0.07 : 0), 0.04 + j * h, 0.85, h - 0.028] });
+            return { bg: '#fff', line: '#111', cells, kind };
+        }
+        const mid = Math.floor((n - 1) / 2), gap = n > 1 ? 0.2 : 0, h = (0.88 - gap - 0.025 * (n - 1)) / n;
+        let y = 0.06;
+        for (let j = 0; j < n; j++) { cells.push({ rect: [0.09, y, 0.82, h] }); y += h + 0.025 + (j === mid ? gap : 0); }
+        return { bg: '#000', line: '#f4f4f4', cells, kind };
+    }
+    const loadImg = src => new Promise((ok, bad) => { const im = new win.Image(); im.onload = () => ok(im); im.onerror = bad; im.src = src; });
+    /** 在 canvas 上画一句对白 */
+    function canvasBubble(g, kindLine, cx, cy, maxW, maxH, px, vertical) {
+        const { kind, text } = kindLine;
+        g.save();
+        g.font = `${kind === 'sfx' ? 900 : kind === 'narr' ? 500 : 600} ${kind === 'sfx' ? px * 1.9 : px}px "Noto Serif SC","Songti SC","Source Han Serif SC",serif`;
+        const lh = px * 1.4;
+        let lines = [], bw, bh;
+        if (vertical && kind !== 'sfx' && kind !== 'narr') {
+            const per = Math.max(1, Math.floor(maxH / lh)), chars = [...text];
+            for (let i = 0; i < chars.length; i += per) lines.push(chars.slice(i, i + per));
+            bw = lines.length * lh; bh = Math.min(chars.length, per) * lh;
+        } else {
+            let cur = '';
+            for (const ch of [...text]) { if (g.measureText(cur + ch).width > maxW && cur) { lines.push(cur); cur = ch; } else cur += ch; }
+            if (cur) lines.push(cur);
+            bw = Math.max(...lines.map(l => g.measureText(l).width)); bh = lines.length * lh;
+        }
+        const padX = kind === 'narr' ? px * 0.5 : px * 0.9, padY = kind === 'narr' ? px * 0.3 : px * 0.6;
+        const W = bw + padX * 2, H = bh + padY * 2;
+        let x = kind === 'narr' ? cx : cx - W / 2, y = kind === 'sfx' ? cy - H / 2 : cy;
+        g.lineWidth = Math.max(2, px * 0.12); g.strokeStyle = '#16120f';
+        if (kind === 'sfx') {
+            g.translate(cx, cy); g.rotate(-0.14); g.textAlign = 'center'; g.textBaseline = 'middle';
+            lines.forEach((l, i) => { const ty = (i - (lines.length - 1) / 2) * lh * 1.9; g.lineWidth = px * 0.35; g.strokeText(l, 0, ty); g.fillStyle = '#fff'; g.fillText(l, 0, ty); });
+            g.restore(); return;
+        }
+        const rr = (r) => { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + W, y, x + W, y + H, r); g.arcTo(x + W, y + H, x, y + H, r); g.arcTo(x, y + H, x, y, r); g.arcTo(x, y, x + W, y, r); g.closePath(); };
+        if (kind === 'narr') { g.fillStyle = '#fdfaf2'; g.fillRect(x, y, W, H); g.strokeRect(x, y, W, H); }
+        else {
+            const r = Math.min(W, H) / 2 * (kind === 'thought' ? 1 : 0.9);
+            if (kind === 'speech') { g.beginPath(); g.moveTo(x + W * 0.5, y + H - 2); g.lineTo(x + W * 0.62, y + H + px * 0.9); g.lineTo(x + W * 0.7, y + H - 2); g.closePath(); g.fillStyle = '#fff'; g.fill(); g.stroke(); }
+            rr(r); g.fillStyle = '#fff'; g.fill(); if (kind === 'thought') g.setLineDash([px * 0.35, px * 0.25]); g.stroke(); g.setLineDash([]);
+            if (kind === 'speech') { g.fillStyle = '#fff'; g.fillRect(x + W * 0.5 + 1, y + H - g.lineWidth * 1.5, W * 0.2 - 2, g.lineWidth * 2); }
+        }
+        g.fillStyle = '#16120f'; g.textBaseline = 'top';
+        if (vertical && kind !== 'narr') { g.textAlign = 'center'; lines.forEach((col, ci) => col.forEach((ch, k) => g.fillText(ch, x + W - padX - lh * ci - lh / 2, y + padY + k * lh))); }
+        else { g.textAlign = kind === 'narr' ? 'left' : 'center'; lines.forEach((l, i) => g.fillText(l, kind === 'narr' ? x + padX : x + W / 2, y + padY + i * lh)); }
+        g.restore();
+    }
+    /** 排一页：imgs = Image 列表，lines = 每格的对白（字符串数组） */
+    async function composePage(imgs, lines, { vary, rtl, vertical, seed, title = '', bold = false }) {
+        const [w0, h0] = size(), W = 1200, H = Math.round(W * h0 / w0), M = Math.round(W * 0.035), G = Math.round(W * 0.016);
+        const c = doc.createElement('canvas'); c.width = W; c.height = H;
+        const g = c.getContext('2d');
+        const art = opts().comicLayout === 'art' ? artLayout(imgs.length, seed, rtl) : null;
+        g.fillStyle = art?.bg || '#fff'; g.fillRect(0, 0, W, H);
+        const quads = art ? art.cells.map(({ rect: [x, y, w, h] }) => [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]) : layoutQuads(imgs.length, { vary, rtl, seed, bold });
+        const px = Math.round(W * 0.028);
+        quads.forEach((q, i) => {
+            const cell = art?.cells[i];
+            // 往里收一点留出分格缝（艺术感的格子位置已经算好了，直接用）
+            const cxq = q.reduce((a, p) => a + p[0], 0) / 4, cyq = q.reduce((a, p) => a + p[1], 0) / 4;
+            const pts = art ? q.map(([x, y]) => [x * W, y * H]) : q.map(([x, y]) => [M + x * (W - 2 * M), M + y * (H - 2 * M)]).map(([x, y]) => { const dx = M + cxq * (W - 2 * M) - x, dy = M + cyq * (H - 2 * M) - y, d = Math.hypot(dx, dy) || 1; return [x + dx / d * G, y + dy / d * G]; });
+            const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+            let bx = Math.min(...xs), by = Math.min(...ys), bw = Math.max(...xs) - bx, bh = Math.max(...ys) - by;
+            g.save(); g.beginPath(); pts.forEach(([x, y], k) => k ? g.lineTo(x, y) : g.moveTo(x, y)); g.closePath(); g.clip();
+            const im = imgs[i], s = Math.max(bw / im.width, bh / im.height), dw = im.width * s, dh = im.height * s;
+            g.drawImage(im, bx + (bw - dw) / 2, by + (bh - dh) * 0.3, dw, dh);
+            g.restore();
+            if (!cell?.full) {
+                g.save(); g.beginPath(); pts.forEach(([x, y], k) => k ? g.lineTo(x, y) : g.moveTo(x, y)); g.closePath();
+                // 叠在大图上的窗格先描一圈白边，像从画面里开出来的
+                if (art?.kind === 'windows') { g.lineWidth = W * 0.014; g.strokeStyle = '#fff'; g.stroke(); }
+                g.lineWidth = Math.max(3, W * 0.004); g.strokeStyle = art?.line || '#111'; g.stroke(); g.restore();
+            }
+            if (cell?.text) [bx, by, bw, bh] = [cell.text[0] * W, cell.text[1] * H, cell.text[2] * W, cell.text[3] * H];
+            // 对白
+            const ls = String(lines[i] || '').split(/\n+/).map(t => comicLineKind(t)).filter(Boolean);
+            const talk = ls.filter(l => l.kind === 'speech' || l.kind === 'thought'); let k = 0, nA = 0, sA = 0;
+            for (const l of ls) {
+                if (l.kind === 'narr') { canvasBubble(g, l, bx + 8, by + 8 + nA * px * 2.2, bw * 0.6, bh, px * 0.9, false); nA++; continue; }
+                if (l.kind === 'sfx') { canvasBubble(g, l, bx + bw * (0.5 + 0.2 * (sA % 2 ? -1 : 1)), by + bh * (0.5 + 0.12 * sA), bw, bh, px, false); sA++; continue; }
+                const m = talk.length;
+                const cx = vertical ? bx + bw * Math.max(0.14, 0.84 - 0.22 * k) : bx + bw * (m === 1 ? 0.68 : k % 2 === 0 ? 0.7 : 0.32);
+                const cy = vertical ? by + bh * (0.1 + 0.07 * (k % 2)) : by + bh * (0.1 + (m > 1 ? 0.55 * k / (m - 1) : 0));
+                canvasBubble(g, l, cx, cy, bw * 0.55, bh * 0.6, px, vertical); k++;
+            }
+        });
+        if (title) { g.save(); g.font = `700 ${px * 0.9}px "Noto Serif SC",serif`; g.fillStyle = art?.bg === '#000' ? '#f4f4f4' : '#16120f'; if (art?.kind === 'windows') { g.lineWidth = px * 0.3; g.strokeStyle = '#fff'; g.lineJoin = 'round'; g.textAlign = 'right'; g.textBaseline = 'bottom'; g.strokeText(title, W - M, H - 4); } g.textAlign = 'right'; g.textBaseline = 'bottom'; g.fillText(title, W - M, H - 4); g.restore(); }
+        return c.toDataURL('image/jpeg', 0.92);
+    }
+    /** AI 看图写对白：把图拼成一张带编号的总览图，一次问完 */
+    async function imagesToLines(imgs, hint) {
+        if (!deps.askVision) throw new Error('这个版本还不能看图');
+        const n = imgs.length, cols = Math.min(4, n), rows = Math.ceil(n / cols), T = 360;
+        const c = doc.createElement('canvas'); c.width = cols * T; c.height = rows * (T + 30);
+        const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+        imgs.forEach((im, i) => {
+            const x = (i % cols) * T, y = Math.floor(i / cols) * (T + 30) + 30, s = Math.min(T / im.width, T / im.height);
+            g.drawImage(im, x + (T - im.width * s) / 2, y + (T - im.height * s) / 2, im.width * s, im.height * s);
+            g.fillStyle = '#e00'; g.font = 'bold 26px sans-serif'; g.fillText(String(i + 1), x + 6, y - 4);
+        });
+        const sys = `你是漫画编剧。图上是按顺序编好号的 ${n} 个画面（红色数字是第几格），连起来是一个小故事。
+${hint ? '用户说这几张图讲的是：' + hint + '\n' : ''}给每一格写 0 到 2 句：
+- 说话写在「」里；心里话写在（）里；旁白不加符号；短促的拟声词直接写（ドキッ、砰！）。
+- 每句不超过 16 个字，要塞进气泡，越短越好；看图里人物的表情和动作来写，前后要连得起来，有起承转合。
+- 没必要说话的格子就写空的。用中文。
+只输出 JSON：{"title": "这一话的标题，6 个字以内", "panels": [{"n": 1, "lines": ["「……」"]}]}`;
+        const j = __mod_translate.pickJson(await deps.askVision(sys, '给这些画面写对白。', c.toDataURL('image/jpeg', 0.9), { maxTokens: 2000, fn: 'pose' }));
+        const out = Array.from({ length: n }, () => '');
+        for (const p of Array.isArray(j?.panels) ? j.panels : []) { const k = Number(p?.n) - 1; if (k >= 0 && k < n) out[k] = (Array.isArray(p.lines) ? p.lines : []).map(x => String(x || '').trim()).filter(Boolean).join('\n'); }
+        return { title: String(j?.title || '').trim(), lines: out };
+    }
+    async function layoutRun({ ai = true } = {}) {
+        if (sui.busy) return;
+        if (!sui.imgs.length) { notify('先放几张图'); return; }
+        sui.busy = 'layout'; sdraw();
+        try {
+            const sd = studioData(), imgs = await Promise.all(sui.imgs.map(x => loadImg(x.src)));
+            if (ai && opts().comicLayoutText !== 'none') { slog('AI 看图写对白…'); const r = await imagesToLines(imgs, sd.hint || ''); sui.lines = r.lines; sui.title = r.title; }
+            else if (sui.lines.length !== imgs.length) sui.lines = imgs.map((_, i) => sui.lines[i] || '');
+            const per = Math.max(1, Math.min(9, Number(opts().comicLayoutPer) || 0)) || (imgs.length <= 5 ? imgs.length : 4);
+            const vary = opts().comicLayout !== 'grid', rtl = opts().comicLayoutDir !== 'ltr', vertical = capOpts().vertical;
+            sui.out = [];
+            for (let i = 0, pg = 0; i < imgs.length; i += per, pg++) {
+                slog(`排第 ${pg + 1} 页…`);
+                sui.out.push(await composePage(imgs.slice(i, i + per), sui.lines.slice(i, i + per), { vary, rtl, vertical, bold: opts().comicLayout === 'bold', seed: (sd.seed || 7) + pg * 13, title: pg === 0 ? sui.title || '' : '' }));
+            }
+            slog(`排好了 ${sui.out.length} 页。对白可以在下面改，改完点「按改好的重排」`);
+            for (const u of sui.out) Promise.resolve(recordImage?.({ dataUrl: u, url: '', raw: '自己的图排版', from: 'comic' })).catch(() => {});
+        } catch (e) { slog('没排成：' + (e?.message || e)); }
+        finally { sui.busy = ''; sdraw(); }
+    }
+
+    // ── 分镜库：放一张喜欢的分镜，AI 学它的写法，以后改编时参考 ──
+    async function learnBoard(dataUrl) {
+        if (!deps.askVision) throw new Error('这个版本还不能看图');
+        const im = await loadImg(dataUrl), k = Math.min(1, 1400 / Math.max(im.width, im.height));
+        const c = doc.createElement('canvas'); c.width = Math.round(im.width * k); c.height = Math.round(im.height * k); c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+        const t = doc.createElement('canvas'), tk = 160 / Math.max(im.width, im.height); t.width = Math.round(im.width * tk); t.height = Math.round(im.height * tk); t.getContext('2d').drawImage(im, 0, 0, t.width, t.height);
+        const sys = `你是漫画分镜老师。图上是一页分镜做得很出色的漫画或插画（可能带着手机截图的边，忽略边上的界面）。分析它的分镜写法，写到别人照着就能画出同样感觉的页面。
+看这些：几格、格子的形状和排法（横条、竖条、斜切、错位、叠在大图上、无边框）；每格拍什么（景别、拍局部还是全身、视角）；格与格怎么连起来（跨格的物件、视线、液体、纹样）；留白和涂黑；有没有出格、装饰、象征物；整体的情绪。
+只输出 JSON：{"name": "给这种版式起个 4–6 字的中文名字", "when": "适合什么剧情 / 情绪，一句话", "how": "中文 3–5 句，讲清楚怎么分格、每格拍什么、怎么连", "tags": "英文 NovelAI 标签，逗号隔开，只写布局和镜头，不写人物外貌和画师"}`;
+        const j = __mod_translate.pickJson(await deps.askVision(sys, '学这一页的分镜。', c.toDataURL('image/jpeg', 0.88), { maxTokens: 1500, fn: 'pose' }));
+        const name = String(j?.name || '').trim().slice(0, 16), how = String(j?.how || '').trim();
+        if (!how) throw new Error('AI 没看出这页的分镜写法');
+        const d = getData(); d.comicBoards ||= [];
+        d.comicBoards.push({ id: 'u' + Date.now().toString(36), name: name || '学来的分镜', when: String(j?.when || '').trim(), how, tags: String(j?.tags || '').trim(), thumb: t.toDataURL('image/jpeg', 0.8) });
+        commit();
+    }
+    function boardsHtml() {
+        const d = getData(), off = new Set(opts().comicBoardsOff || []), b = sui.busy;
+        const item = (x, mine) => `<div class="pc-card" style="padding:8px 10px;margin:6px 0;display:flex;gap:10px;align-items:flex-start;opacity:${off.has(x.id) ? 0.5 : 1}">${x.thumb ? `<img src="${esc(x.thumb)}" style="width:52px;border-radius:6px;flex:0 0 auto">` : ''}<div style="flex:1;min-width:0"><b>${esc(x.name)}</b> <span class="pc-dim small">${esc(x.when || '')}</span>${sui.boardOpen === x.id ? `<div class="small" style="margin-top:4px;line-height:1.6">${esc(x.how)}</div>${x.tags ? `<div class="pc-dim small" style="margin-top:4px;word-break:break-word">${esc(x.tags)}</div>` : ''}` : ''}<div class="pc-chips wrap" style="margin-top:4px"><button class="pc-pill dashed tiny" data-s-bopen="${esc(x.id)}">${sui.boardOpen === x.id ? '收起' : '看写法'}</button><button class="pc-pill dashed tiny" data-s-btoggle="${esc(x.id)}">${off.has(x.id) ? '用它' : '不用它'}</button>${mine ? `<button class="pc-pill dashed tiny" data-s-bdel="${esc(x.id)}">删掉</button>` : ''}</div></div></div>`;
+        return `<h3 class="pc-h3 pc-mt">分镜库</h3>
+          <div class="pc-dim small">AI 改编时会照这些版式来分镜：分格选「艺术感」时每页挑一种用，「有变化 / 大胆」时合适的页借用。放一张你喜欢的分镜图（截图也行），AI 看完把写法学下来存进来。</div>
+          <div class="pc-chips wrap" style="margin-top:6px"><label class="pc-pill dashed" style="cursor:pointer">${b === 'learn' ? '<span class="pc-busy">AI 在学</span>' : '＋ 放分镜图让 AI 学（可多选）'}<input type="file" accept="image/*" multiple data-s-learn hidden ${b ? 'disabled' : ''}></label></div>
+          ${(d.comicBoards || []).map(x => item(x, true)).join('')}${COMIC_BOARDS.map(x => item(x, false)).join('')}`;
+    }
+    function shtml() {
+        const sd = studioData(), b = sui.busy, o = opts();
+        const seg = (key, list, def) => { const cur = String(o[key] ?? def); return `<div class="pc-seg" style="grid-template-columns:repeat(${list.length},minmax(0,1fr))">${list.map(([v, t]) => `<button class="${cur === String(v) ? 'on' : ''}" data-ss="${key}" data-v="${esc(String(v))}">${esc(t)}</button>`).join('')}</div>`; };
+        const pagesHtml = sd.pages.map((p, i) => p.url
+            ? `<figure class="pc-comic-page${p.mono ? ' mono' : ''}" style="margin:0"><img data-s-src="${esc(p.url)}" data-s-view="${i}" alt="第 ${i + 1} 页">${p.captions ? captionsHtml(p.captions, esc, o.comicCapSize || 's', capOpts()) : ''}<span class="pc-comic-tag">第 ${i + 1} / ${sd.pages.length} 页${p.style ? `<span class="sty">· ${esc(p.style)}</span>` : ''}</span></figure><div class="pc-chips wrap" style="margin:4px 0 10px"><button class="pc-pill dashed tiny" data-s-redo="${i}" ${b ? 'disabled' : ''}>重画这页</button></div>`
+            : `<div class="pc-comic-wait"><div>第 ${i + 1} / ${sd.pages.length} 页 · ${p.err ? '没出来<small>' + esc(p.err) + '</small>' : b ? '等着画' : '还没画'}<br><button data-s-redo="${i}" ${b ? 'disabled' : ''}>画这一页</button></div></div>`).join('');
+        return `<div class="pc-dim small" data-s-log style="min-height:1.2em;margin-bottom:6px">${esc(sui.log || '')}</div>
+          <h3 class="pc-h3">自己写剧情 → 漫画</h3>
+          <div class="pc-dim small">写一段剧情（或者贴一段小说），AI 改编成分镜再一页页画出来。页数、格数、画风、颜色、对白都跟上面的漫画设置走，不用在聊天里。</div>
+          <textarea class="pc-textarea" data-s-story style="min-height:120px;margin-top:6px" placeholder="比如：放学后的天台，他把耳机分我一只。风很大，我听不清歌，只听见他说……">${esc(sd.story || '')}</textarea>
+          <div class="pc-actions wrap"><button class="pc-btn dark" data-s-go ${b ? 'disabled' : ''}>${b === 'story' ? '<span class="pc-busy">画漫画中</span>' : '生成漫画'}</button>${sd.pages.some(p => p.url) ? `<button class="pc-btn" data-s-book>翻看</button>` : ''}${sd.pages.length ? `<button class="pc-btn" data-s-clear ${b ? 'disabled' : ''}>清空</button>` : ''}</div>
+          <div class="pc-comic" style="margin-top:8px">${pagesHtml}</div>
+          <h3 class="pc-h3 pc-mt">用自己的图排版</h3>
+          <div class="pc-dim small">放几张图（按选的顺序当一格一格），插件自动排成漫画分格、画上气泡；对白可以让 AI 看图写，也可以自己写。不用 NAI 重画，不扣 Anlas。</div>
+          <div class="pc-chips wrap" style="margin-top:6px"><label class="pc-pill dashed" style="cursor:pointer">＋ 放图（可多选）<input type="file" accept="image/*" multiple data-s-imgs hidden></label>${sui.imgs.length ? `<button class="pc-pill dashed tiny" data-s-imgclear>清掉图</button>` : ''}</div>
+          ${sui.imgs.length ? `<div class="pc-hscroll pc-mt-s">${sui.imgs.map((x, i) => `<div style="position:relative;flex:0 0 auto"><img src="${esc(x.src)}" style="height:96px;border-radius:8px;display:block"><span style="position:absolute;left:4px;top:2px;font:700 13px sans-serif;color:#fff;text-shadow:0 0 3px #000">${i + 1}</span><button class="pc-x" data-s-imgdel="${i}" style="position:absolute;right:2px;top:2px">×</button>${i ? `<button class="pc-x" data-s-imgleft="${i}" style="position:absolute;left:2px;bottom:2px">‹</button>` : ''}</div>`).join('')}</div>` : ''}
+          <label class="pc-field pc-mt-s"><span>这几张图讲的是什么（可不填，给 AI 写对白用）</span><input class="pc-input" data-s-hint value="${esc(sd.hint || '')}" placeholder="比如：他第一次约我出去，一路上都很紧张"></label>
+          <div class="pc-label">分格</div>${seg('comicLayout', [['vary', '有变化'], ['bold', '大胆'], ['art', '艺术感'], ['grid', '规整']], 'vary')}
+          <div class="pc-label">每页几格</div>${seg('comicLayoutPer', [[0, '自动'], [2, '2'], [3, '3'], [4, '4'], [5, '5'], [6, '6']], 0)}
+          <div class="pc-label">阅读方向</div>${seg('comicLayoutDir', [['rtl', '日漫 右→左'], ['ltr', '左→右']], 'rtl')}
+          <div class="pc-label">对白</div>${seg('comicLayoutText', [['ai', 'AI 看图写'], ['none', '自己写 / 不要']], 'ai')}
+          <div class="pc-actions wrap"><button class="pc-btn dark" data-s-layout ${b || !sui.imgs.length ? 'disabled' : ''}>${b === 'layout' ? '<span class="pc-busy">排版中</span>' : '排版'}</button>${sui.out.length ? `<button class="pc-btn" data-s-relayout ${b ? 'disabled' : ''}>按改好的重排</button><button class="pc-btn" data-s-reseed ${b ? 'disabled' : ''}>换一种分格</button>` : ''}</div>
+          ${sui.imgs.length && sui.lines.length ? `<div class="pc-label">每格的对白（一行一句：「」说话，（）心里话，不加符号是旁白）</div>${sui.imgs.map((_, i) => `<label class="pc-field"><span>第 ${i + 1} 格</span><textarea class="pc-textarea small" data-s-line="${i}" style="min-height:44px">${esc(sui.lines[i] || '')}</textarea></label>`).join('')}` : ''}
+          ${sui.out.length ? `<div class="pc-comic" style="margin-top:8px">${sui.out.map((u, i) => `<figure class="pc-comic-page" style="margin:0"><img src="${u}" data-s-outview="${i}" alt="排好的第 ${i + 1} 页"><span class="pc-comic-tag">第 ${i + 1} / ${sui.out.length} 页</span></figure><div class="pc-chips wrap" style="margin:4px 0 10px"><a class="pc-pill dashed tiny" href="${u}" download="comic_${i + 1}.jpg">下载</a></div>`).join('')}</div>` : ''}
+          ${boardsHtml()}`;
+    }
+    function shydrate(root) { for (const img of root.querySelectorAll('img[data-s-src]')) resolveUrl(img.dataset.sSrc).then(u => { if (u) img.src = u; }).catch(() => {}); }
+    function sdraw() { if (!sui.mount?.isConnected) return; const y = sui.mount.closest('.pc-overlay, #pc-root')?.scrollTop; sui.mount.innerHTML = shtml(); shydrate(sui.mount); }
+    function openStudio(mount) {
+        if (stopped || !mount) return;
+        sui.mount = mount; sdraw();
+        if (mount.dataset.sBound) return; mount.dataset.sBound = '1';
+        mount.addEventListener('input', ev => {
+            const t = ev.target, sd = studioData();
+            if (t.matches('[data-s-story]')) { sd.story = t.value; commit({ silent: true }); }
+            else if (t.matches('[data-s-hint]')) { sd.hint = t.value; commit({ silent: true }); }
+            else if (t.dataset.sLine != null) sui.lines[Number(t.dataset.sLine)] = t.value;
+        });
+        mount.addEventListener('change', async ev => {
+            const t = ev.target;
+            if (t.matches('[data-s-learn]')) {
+                const files = [...(t.files || [])]; t.value = '';
+                if (!files.length || sui.busy) return;
+                sui.busy = 'learn'; sdraw();
+                let ok = 0;
+                for (const [i, f] of files.entries()) {
+                    slog(`AI 在学第 ${i + 1}/${files.length} 张分镜…`);
+                    try { const u = await new Promise(res => { const r = new win.FileReader(); r.onload = () => res(r.result); r.readAsDataURL(f); }); await learnBoard(u); ok++; }
+                    catch (e) { slog('这张没学成：' + (e?.message || e)); }
+                }
+                sui.busy = ''; if (ok) slog(`学会了 ${ok} 种分镜，存进分镜库了`); sdraw();
+                return;
+            }
+            if (t.matches('[data-s-imgs]')) {
+                const files = [...(t.files || [])]; t.value = '';
+                for (const f of files) { const fr = await new Promise(ok => { const r = new win.FileReader(); r.onload = () => ok(r.result); r.readAsDataURL(f); }); sui.imgs.push({ src: fr }); sui.lines.push(''); }
+                sdraw();
+            }
+        });
+        mount.addEventListener('click', ev => {
+            const t = ev.target.closest('button, img, a'); if (!t || !mount.contains(t)) return;
+            const sd = studioData(), ds = t.dataset;
+            if (ds.ss) { const v = ds.v; opts()[ds.ss] = /^\d+$/.test(v) ? Number(v) : v; commit(); sdraw(); return; }
+            if (ds.sGo != null) { storyToComic(); return; }
+            if (ds.sBopen != null) { sui.boardOpen = sui.boardOpen === ds.sBopen ? '' : ds.sBopen; sdraw(); return; }
+            if (ds.sBtoggle != null) { const o = opts(), list = new Set(o.comicBoardsOff || []); list.has(ds.sBtoggle) ? list.delete(ds.sBtoggle) : list.add(ds.sBtoggle); o.comicBoardsOff = [...list]; commit(); sdraw(); return; }
+            if (ds.sBdel != null) { const d = getData(); d.comicBoards = (d.comicBoards || []).filter(x => x.id !== ds.sBdel); commit(); sdraw(); return; }
+            if (ds.sRedo != null) { redrawStudioPage(Number(ds.sRedo)); return; }
+            if (ds.sClear != null) { sd.pages = []; commit(); sui.log = ''; sdraw(); return; }
+            if (ds.sBook != null || ds.sView != null) { const items = sd.pages.filter(p => p.url).map((p, i) => ({ src: () => resolveUrl(p.url), caps: p.captions ? captionsHtml(p.captions, esc, opts().comicCapSize || 's', capOpts()) : '', label: `第 ${i + 1} 页${p.style ? ' · ' + p.style : ''}` })); pcGallery(doc, items, ds.sView != null ? sd.pages.slice(0, Number(ds.sView)).filter(p => p.url).length : 0); return; }
+            if (ds.sOutview != null) { pcGallery(doc, sui.out.map((u, i) => ({ src: () => u, label: `排好的第 ${i + 1} 页` })), Number(ds.sOutview)); return; }
+            if (ds.sImgclear != null) { sui.imgs = []; sui.lines = []; sui.out = []; sdraw(); return; }
+            if (ds.sImgdel != null) { const i = Number(ds.sImgdel); sui.imgs.splice(i, 1); sui.lines.splice(i, 1); sdraw(); return; }
+            if (ds.sImgleft != null) { const i = Number(ds.sImgleft); [sui.imgs[i - 1], sui.imgs[i]] = [sui.imgs[i], sui.imgs[i - 1]]; [sui.lines[i - 1], sui.lines[i]] = [sui.lines[i], sui.lines[i - 1]]; sdraw(); return; }
+            if (ds.sLayout != null) { layoutRun({ ai: true }); return; }
+            if (ds.sRelayout != null) { layoutRun({ ai: false }); return; }
+            if (ds.sReseed != null) { sd.seed = Math.floor(Math.random() * 9999) + 1; commit({ silent: true }); layoutRun({ ai: false }); return; }
+        });
+    }
+
     async function openBook() {
         if (stopped) return;
         const chat = getContext().chat || [];
         const pages = [];
         chat.forEach((msg, id) => {
             if (!msg || msg.is_user) return;
-            for (const b of comicBlocks(srcOf(msg))) { const v = curVer(rec(msg, b.key)); if (v) pages.push({ id, captionSource: captionSource(v, b.inner), page: b.page, total: b.total, url: v.url, name: msg.name || '', caps: v.textMode === 'overlay' ? captionsHtml(captionSource(v, b.inner), esc, opts().comicCapSize || 's') : '' }); }
+            for (const b of comicBlocks(srcOf(msg))) { const v = curVer(rec(msg, b.key)); if (v) pages.push({ id, captionSource: captionSource(v, b.inner), page: b.page, total: b.total, url: v.url, style: v.style || '', mono: !!v.mono, name: msg.name || '', caps: v.textMode === 'overlay' ? captionsHtml(captionSource(v, b.inner), esc, opts().comicCapSize || 's', capOpts()) : '' }); }
         });
         const urls = new Map();
         const url = async p => { if (!urls.has(p.url)) urls.set(p.url, await resolveUrl(p.url)); return urls.get(p.url); };
-        const art = p => `<div class="pc-cb-art"><img data-cb="${esc(p.url)}" alt="第 ${p.id} 楼第 ${p.page} 页" draggable="false">${p.caps || ''}<span>${p.id} 楼 · ${p.page}/${p.total}</span></div>`;
+        const art = p => `<div class="pc-cb-art${p.mono ? ' mono' : ''}"><img data-cb="${esc(p.url)}" alt="第 ${p.id} 楼第 ${p.page} 页" draggable="false">${p.caps || ''}<span>${p.id} 楼 · ${p.page}/${p.total}${p.style ? ' · ' + esc(p.style) : ''}</span></div>`;
         const fill = root => { for (const img of root.querySelectorAll('img[data-cb]:not([src])')) { const p = pages.find(x => x.url === img.dataset.cb); if (p) url(p).then(u => { if (u) img.src = u; }); } };
 
         const book = doc.createElement('div');
@@ -1950,7 +3279,7 @@ function createComicController(deps) {
             if (mode === 'flow') layoutFlow(); else { stage.querySelector(`[data-k="${at}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }); info(); }
         }
         const refresh = () => {
-            for (const p of pages) p.caps = p.captionSource ? captionsHtml(p.captionSource, esc, opts().comicCapSize || 's') : '';
+            for (const p of pages) p.caps = p.captionSource ? captionsHtml(p.captionSource, esc, opts().comicCapSize || 's', capOpts()) : '';
             build();
         };
         readers.add(refresh);
@@ -2066,7 +3395,7 @@ function createComicController(deps) {
     }
 
     return {
-        process, render, renderAll, openBook, generateOne, adapt, unadapt, openSettings, viewPages, syncPrompt,
+        process, render, renderAll, openBook, openStudio, generateOne, adapt, unadapt, openSettings, viewPages, syncPrompt,
         stop() {
             stopped = true;
             try { getContext().setExtensionPrompt?.(COMIC_INLINE_KEY, '', 1, 0, false, 0); } catch {}
@@ -2679,7 +4008,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.0（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.1（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -2746,7 +4075,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.0';
+globalThis.__PC_VERSION = '0.9.1';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -5765,7 +7094,7 @@ function cleanOutput(raw) {
 
 /** 调一次 AI，返回原始文本（用设置里选的 API） */
 /** 各个让 AI 干活的功能：[键, 名字, 在哪用] */
-const AI_FNS = [['img', '看图写提示词', '生图页「看图写提示词」'], ['pose', '读姿势构图', '生图页「看图读姿势构图」'], ['tr', '中文转标签', '固定提示词、正面、角色页里写的中文'], ['scene', '聊天生图写画面', '双击段落 / 聊天里生图'], ['ill', '正文插图', '「写完再请求」读剧情插图（指令在「正文转生图提示词」里改）'], ['look', '读角色外貌', '从角色卡、人设、图片、世界书读'], ['outfit', '设计 / 读衣服', 'AI 设计、从剧情读、看图读'], ['comic', '漫画改编', '「画成漫画」「重新改编」'], ['video', '视频分镜', '视频页「AI 写分镜」'], ['zh', '标签翻中文', '角色页「译成中文」']];
+const AI_FNS = [['img', '看图写提示词', '生图页「看图写提示词」'], ['pose', '读姿势构图', '生图页「看图读姿势构图」'], ['tr', '中文转标签', '固定提示词、正面、角色页里写的中文'], ['scene', '聊天生图写画面', '双击段落 / 聊天里生图'], ['ill', '正文插图', '「写完再请求」读剧情插图（指令在「正文转生图提示词」里改）'], ['look', '读角色外貌', '从角色卡、人设、图片、世界书读'], ['outfit', '设计 / 读衣服', 'AI 设计、从剧情读、看图读'], ['comic', '漫画改编', '「画成漫画」「重新改编」'], ['video', '视频分镜', '视频页「AI 写分镜」'], ['excerpt', '摘要排版', '摘要页「AI 排」和配图'], ['zh', '标签翻中文', '角色页「译成中文」']];
 const aiSeen = {}; // 这次打开酒馆后各功能实际用过的指令，给设置页看
 function aiCfg() {
     const d = __mod_store.getData();
@@ -7907,13 +9236,33 @@ const pcHist = (() => {
         }),
     };
 })();
-async function pcRecordImage({ dataUrl, url, raw = '', sent = null, from }) {
+/** 这张图是哪个画师串画的：先看正文画师串的画师是不是都在，再找画师全在提示词里的、人数最多的画师组；都不是就只记画师名 */
+function pcHistArtists(d, text, given = '') {
+    const M = __mod_model, key = t => String(t || '').replace(/^artist\s*:\s*/i, '').replace(/[_\s]+/g, ' ').trim().toLowerCase();
+    let toks = [];
+    try { toks = M.tokenize(String(text || '')).flatMap(t => M.tokenize(t.text)).filter(t => t.isArtist); } catch { toks = []; }
+    const names = [...new Map(toks.map(t => [key(t.text), String(t.text).replace(/^artist\s*:\s*/i, '').trim()])).values()];
+    const have = new Set(toks.map(t => key(t.text)));
+    const artistsOf = ref => { try { return M.tokenize(M.ticketString(d, ref)).flatMap(t => M.tokenize(t.text)).filter(t => t.isArtist).map(t => key(t.text)); } catch { return []; } };
+    let ticket = String(given || '');
+    if (!ticket && have.size && d) {
+        const fits = ref => { const a = artistsOf(ref); return a.length && a.every(x => have.has(x)) ? a.length : 0; };
+        if (d.active && fits(d.active)) ticket = M.ticketName(d, d.active);
+        else {
+            let best = 0;
+            for (const g of Object.values(d.groups || {})) { const n = fits({ type: 'group', id: g.id }); if (n > best || (n === best && n && have.size === n)) { best = n; ticket = g.name || ticket; } }
+            if (!ticket && have.size === 1) { const a = Object.values(d.artists || {}).find(x => have.has(key(x.tag))); if (a) ticket = String(a.tag).replace(/^artist:/, ''); }
+        }
+    }
+    return { ticket: ticket.slice(0, 80), artists: names.join(', ').slice(0, 400) };
+}
+async function pcRecordImage({ dataUrl, url, raw = '', sent = null, from, ticket = '' }) {
     if (!url) return;
     let thumb = '';
     try { thumb = await pcLocal.put(await pcMakeThumb(dataUrl)); } catch (e) { console.warn('[智库] 缩略图没存上', e); }
     const d = __mod_store.getData();
     const cut = (v, n) => String(v || '').slice(0, n);
-    const entry = { id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), url: String(url), thumb, raw: String(raw ?? ''), prompt: String(sent?.prompt ?? ''), negative: String(sent?.negative ?? ''), chars: (sent?.chars || []).map(c => String(typeof c === 'string' ? c : c?.prompt ?? '')).filter(Boolean), seed: sent?.seed ?? '', size: cut(sent?.size, 20), model: cut(sent?.model, 40), ...(sent?.params ? { params: { ...sent.params } } : {}), from, at: Date.now() };
+    const entry = { id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), url: String(url), thumb, raw: String(raw ?? ''), prompt: String(sent?.prompt ?? ''), negative: String(sent?.negative ?? ''), chars: (sent?.chars || []).map(c => String(typeof c === 'string' ? c : c?.prompt ?? '')).filter(Boolean), seed: sent?.seed ?? '', size: cut(sent?.size, 20), model: cut(sent?.model, 40), ...(sent?.params ? { params: { ...sent.params } } : {}), from, ...pcHistArtists(__mod_store.getData(), sent?.prompt || raw, ticket), at: Date.now() };
     void d;
     await pcHist.add(entry);
     globalThis.__zkHistChanged?.();
@@ -8131,8 +9480,9 @@ function renderView() {
         if (nb.scrollTop < wantScroll) for (const ms of [60, 300]) setTimeout(() => { if (render.scrollKey === scrollKey && nb.isConnected && nb.scrollTop < wantScroll) nb.scrollTop = wantScroll; }, ms);
     }
     render.scrollKey = scrollKey;
-    if (ui.view === 'comic') { const cv = root.querySelector('#pc-comic-view'); if (cv) globalThis.__zhikuComic?.openSettings(cv); }
+    if (ui.view === 'comic') { const cv = root.querySelector('#pc-comic-view'); if (cv) globalThis.__zhikuComic?.openSettings(cv); const cs = root.querySelector('#pc-comic-studio'); if (cs) globalThis.__zhikuComic?.openStudio?.(cs); }
     if (ui.view === 'video') { const vv = root.querySelector('#pc-video-view'); if (vv) void globalThis.__zhikuVideo?.open(vv); }
+    if (ui.view === 'excerpt') { const xv = root.querySelector('#pc-excerpt-view'); if (xv) globalThis.__zhikuExcerpt?.open(xv); }
     {
         const nav = root.querySelector('.pc-nav');
         if (nav && !pcNavEdit) {
@@ -8770,7 +10120,7 @@ function addArtistPrefix(text, names) {
 }
 
 // ───────────── 历史生图 ─────────────
-const HIST_CSS = `<style>.pc-hist{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.pc-hist-item{position:relative;padding:0;border:0;border-radius:10px;overflow:hidden;aspect-ratio:2/3;background:var(--pc-paper-2);cursor:pointer}.pc-hist-item img{width:100%;height:100%;object-fit:cover;display:block}.pc-hist-item i{position:absolute;left:4px;bottom:4px;font-style:normal;font-size:10px;padding:0 5px;border-radius:6px;background:rgba(0,0,0,.55);color:#fff}.pc-hist-item.missing::after{content:'这台设备上没有';position:absolute;top:0;right:0;bottom:0;left:0;display:grid;place-items:center;font-size:11px;color:var(--pc-ink-soft)}.pc-hist-item.sel{outline:3px solid var(--pc-gold);outline-offset:-3px}.pc-hist-item b{position:absolute;right:5px;top:5px;width:20px;height:20px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.35);display:grid;place-items:center;color:#fff;font-size:12px}.pc-hist-item.sel b{background:var(--pc-gold)}.pc-hist-detail img{width:100%;border-radius:12px;display:block}.pc-hist-meta{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12px;margin-top:8px}.pc-hist-meta dt{color:var(--pc-ink-soft)}.pc-hist-meta dd{margin:0;word-break:break-all}@media (max-width:420px){.pc-hist{grid-template-columns:repeat(3,minmax(0,1fr))}}</style>`;
+const HIST_CSS = `<style>.pc-hist{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.pc-hist-item{position:relative;padding:0;border:0;border-radius:10px;overflow:hidden;aspect-ratio:2/3;background:var(--pc-paper-2);cursor:pointer}.pc-hist-tk{position:absolute;left:0;right:0;bottom:0;padding:14px 6px 4px;font-style:normal;font-size:10.5px;line-height:1.3;color:#fff;text-align:left;background:linear-gradient(transparent,rgba(0,0,0,.6));white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none}.pc-hist-item img{width:100%;height:100%;object-fit:cover;display:block}.pc-hist-item i{position:absolute;left:4px;bottom:4px;font-style:normal;font-size:10px;padding:0 5px;border-radius:6px;background:rgba(0,0,0,.55);color:#fff}.pc-hist-item.missing::after{content:'这台设备上没有';position:absolute;top:0;right:0;bottom:0;left:0;display:grid;place-items:center;font-size:11px;color:var(--pc-ink-soft)}.pc-hist-item.sel{outline:3px solid var(--pc-gold);outline-offset:-3px}.pc-hist-item b{position:absolute;right:5px;top:5px;width:20px;height:20px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.35);display:grid;place-items:center;color:#fff;font-size:12px}.pc-hist-item.sel b{background:var(--pc-gold)}.pc-hist-detail img{width:100%;border-radius:12px;display:block}.pc-hist-meta{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12px;margin-top:8px}.pc-hist-meta dt{color:var(--pc-ink-soft)}.pc-hist-meta dd{margin:0;word-break:break-all}@media (max-width:420px){.pc-hist{grid-template-columns:repeat(3,minmax(0,1fr))}}</style>`;
 const histList = () => pcHist.all();
 globalThis.__zkHistChanged = () => { if (DOC.querySelector('#pc-root.open')) render(); };
 function historyFold(d) {
@@ -8789,11 +10139,19 @@ function historyFold(d) {
         <button class="pc-pill dashed tiny" data-act="histclean" data-days="30">清理 30 天前</button>
         <span class="pc-dim small" style="align-self:center;margin-left:4px">历史记录存在这台设备 · 最多记</span>${[[500, '500'], [2000, '2000'], [5000, '5000'], [-1, '不限']].map(([n, t]) => `<button class="pc-pill tiny ${(Number(d.options.histMax) || 2000) === n ? 'on' : 'dashed'}" data-act="histmax" data-n="${n}">${t}</button>`).join('')}`}
       </div>
-      <div class="pc-hist pc-mt-s">${shown.map(x => `<button class="pc-hist-item ${h.picked.includes(x.id || x.url) ? 'sel' : ''}" data-act="histopen" data-id="${esc(x.id || x.url)}"><img data-pc-src="${esc(x.thumb || x.url)}" alt=""><i>${x.from === 'chat' ? '聊天' : '生图'}</i>${h.select ? `<b>${h.picked.includes(x.id || x.url) ? '✓' : ''}</b>` : ''}</button>`).join('')}</div>
+      <div class="pc-hist pc-mt-s">${shown.map(x => `<button class="pc-hist-item ${h.picked.includes(x.id || x.url) ? 'sel' : ''}" data-act="histopen" data-id="${esc(x.id || x.url)}"><img data-pc-src="${esc(x.thumb || x.url)}" alt=""><i>${x.from === 'chat' ? '聊天' : x.from === 'comic' ? '漫画' : '生图'}</i>${histTicket(x) ? `<em class="pc-hist-tk">${esc(histTicket(x))}</em>` : ''}${h.select ? `<b>${h.picked.includes(x.id || x.url) ? '✓' : ''}</b>` : ''}</button>`).join('')}</div>
       ${hist.length > shown.length ? `<div class="pc-center pc-mt-s"><button class="pc-pill dashed tiny" data-act="histmore">再显示 60 张（还有 ${hist.length - shown.length} 张）</button></div>` : ''}
       <div class="pc-dim small pc-mt-s">${(d.options.imageStore || 'local') === 'server' ? '新图存在酒馆服务器的 user/images 里。' : '图存在这台设备的浏览器里，不占酒馆服务器；换设备、清浏览器数据就看不到了。'}删除和清理会真的删掉图片，聊天里用到这张图的地方也会显示不出来。</div>`);
 }
 const histFind = id => histList().find(x => (x.id || x.url) === id);
+/** 老记录没存画师串的，现算一次（不写回） */
+const histArt = x => (x.ticket !== undefined || x.artists !== undefined) ? x : Object.assign(x, pcHistArtists(getData(), x.prompt || x.raw));
+const histTicket = x => histArt(x).ticket || '';
+/** 全屏看历史：放大、左右滑；底下写画师串，「详情」打开那一张的参数 */
+function histGallery(x) {
+    const list = histList(), at = Math.max(0, list.indexOf(x));
+    pcGallery(DOC, list.map(e => ({ src: () => pcLocal.url(e.url), label: histTicket(e) ? `画师串：${histTicket(e)}` : (histArt(e).artists ? `画师：${e.artists.slice(0, 40)}` : '没带画师') })), at, { actions: [{ label: '详情', run: k => histDetail(list[k]) }] });
+}
 /** 删掉记录和文件（原图 + 缩略图） */
 async function histRemove(entries) {
     const gone = new Set(entries.map(x => x.id || x.url));
@@ -8806,8 +10164,10 @@ function histDownload(entries) {
 }
 function histDetail(x) {
     const row = (k, v) => v === '' || v === undefined || v === null ? '' : `<dt>${k}</dt><dd>${esc(String(v))}</dd>`;
-    const box = modal(`<div class="pc-hist-detail">${HIST_CSS}<img data-pc-src="${esc(x.url)}" alt="">
-      <dl class="pc-hist-meta">${row('来源', x.from === 'chat' ? '聊天标记' : '生图页')}${row('时间', new Date(x.at).toLocaleString())}${row('种子', x.seed)}${row('尺寸', x.size)}${row('模型', x.model)}</dl>
+    histArt(x);
+    const list = histList(), at = list.indexOf(x);
+    const box = modal(`<div class="pc-hist-detail">${HIST_CSS}${list.length > 1 && at >= 0 ? `<div class="pc-chips" style="justify-content:space-between;margin:0 0 8px"><button class="pc-pill dashed tiny" type="button" data-h="prev" ${at <= 0 ? 'disabled' : ''}>‹ 上一张</button><span class="pc-dim small" style="align-self:center">${at + 1} / ${list.length}</span><button class="pc-pill dashed tiny" type="button" data-h="next" ${at >= list.length - 1 ? 'disabled' : ''}>下一张 ›</button></div>` : ''}<img data-pc-src="${esc(x.url)}" data-h="zoom" alt="" style="cursor:zoom-in">
+      <dl class="pc-hist-meta">${row('画师串', x.ticket || (x.artists ? '没对上存过的画师串' : '这张没带画师'))}${row('画师', x.artists)}${row('来源', x.from === 'chat' ? '聊天标记' : x.from === 'comic' ? '漫画' : '生图页')}${row('时间', new Date(x.at).toLocaleString())}${row('种子', x.seed)}${row('尺寸', x.size)}${row('模型', x.model)}</dl>
       ${x.raw ? `<div class="pc-label">${x.from === 'chat' ? '标记里的提示词' : '正面提示词'}</div><p class="pc-quote small mono">${esc(x.raw)}</p>` : ''}
       ${x.prompt ? `<details class="pc-details"><summary>实际发出去的内容</summary><div class="pc-label">正面</div><p class="pc-quote small mono">${esc(x.prompt)}</p>${x.negative ? `<div class="pc-label">负面</div><p class="pc-quote small mono">${esc(x.negative)}</p>` : ''}${(x.chars || []).map((c, i) => `<div class="pc-label">人物 ${i + 1}</div><p class="pc-quote small mono">${esc(c)}</p>`).join('')}</details>` : ''}
       <div class="pc-actions wrap pc-mt-s">
@@ -8819,9 +10179,15 @@ function histDetail(x) {
       </div></div>`);
     box.style.maxHeight = '90dvh'; box.style.overflowY = 'auto';
     pcHydrate(box);
+    const step = n => { const y = list[at + n]; if (!y) return; box.closeModal(); histDetail(y); };
+    let sx = null, sy = null;
+    box.addEventListener('touchstart', ev => { if (ev.target.closest('img')) { sx = ev.touches[0].clientX; sy = ev.touches[0].clientY; } }, { passive: true });
+    box.addEventListener('touchend', ev => { if (sx == null) return; const dx = ev.changedTouches[0].clientX - sx, dy = ev.changedTouches[0].clientY - sy; sx = sy = null; if (Math.abs(dx) > 60 && Math.abs(dy) < 50) step(dx < 0 ? 1 : -1); });
     box.addEventListener('click', async ev => {
         const act = ev.target.closest('[data-h]')?.dataset.h;
         if (act === 'close') box.closeModal();
+        if (act === 'prev' || act === 'next') { step(act === 'next' ? 1 : -1); return; }
+        if (act === 'zoom') { box.closeModal(); histGallery(x); return; }
         if (act === 'share') {
             if (!L.serverBase()) { toastr.warning('先到「设置」里填共享服务器地址', '共享'); return; }
             box.closeModal();
@@ -11558,19 +12924,25 @@ function viewComic(d) {
       <section class="pc-card pc-pad"><div class="pc-dim small">AI 读楼层的正文改编成漫画，再用 NAI 一页页画出来。楼层按钮里的 📖「画成漫画」、漫画书「目录」里都能挑一楼画。</div>
         <div class="pc-dim small" style="margin-top:6px;opacity:.8">漫画协议和玩法来自「漫画台」预设，作者 小鸟游星野（__takanashi_hoshino__）。</div>
         <div class="pc-actions wrap"><button class="pc-btn dark" data-act="comicbook">翻看这个聊天的漫画</button></div></section>
+      <section class="pc-card pc-pad pc-mt"><h2 class="pc-h3" style="font-size:17px">漫画工坊</h2><div id="pc-comic-studio"></div></section>
       <section class="pc-card pc-pad pc-mt"><h3 class="pc-h3">漫画设置</h3><div id="pc-comic-view"></div></section>
       <div style="height:24px"></div>`;
 }
 /** 视频页 */
 let pcNavEdit = false;
-const PC_NAV_ALL = [['studio', '生图'], ['comfy', 'Comfy'], ['comic', '漫画'], ['video', '视频'], ['book', '画师库'], ['vibe', '氛围'], ['cast', '角色'], ['lobby', '共享']];
+const PC_NAV_ALL = [['studio', '生图'], ['comfy', 'Comfy'], ['comic', '漫画'], ['video', '视频'], ['excerpt', '摘要'], ['book', '画师库'], ['vibe', '氛围'], ['cast', '角色'], ['lobby', '共享']];
 function pcNavHidden(d) { const h = d?.options?.navHidden; return Array.isArray(h) ? h.filter(k => k !== 'studio') : []; }
 function viewVideo() {
     return `<h2 class="pc-pagetitle">视频</h2>
       <section class="pc-card pc-pad"><div id="pc-video-view"><div class="pc-dim small">读取中…</div></div></section>
       <div style="height:24px"></div>`;
 }
-const VIEWS = { comfy: viewComfy, aipreset: viewAiPreset, comic: viewComic, video: viewVideo, cast: viewCast, charedit: viewCharEdit, outfit: viewOutfit, combine: viewCombine, studio: viewStudio, book: viewBook, artist: viewArtist, group: viewGroup, batch: viewBatch, vibe: viewVibe, lobby: viewLobby, settings: viewSettings };
+function viewExcerpt() {
+    return `<style>#pc-excerpt-view, #pc-excerpt-view *{scrollbar-width:none}#pc-excerpt-view::-webkit-scrollbar, #pc-excerpt-view *::-webkit-scrollbar{display:none}</style><h2 class="pc-pagetitle">摘要</h2>
+      <section class="pc-card pc-pad"><div class="pc-dim small" style="margin-bottom:6px">把喜欢的段落做成一张卡。聊天里选中一段字会出「✦ 摘要」，也可以在这里搜楼层勾选。</div><div id="pc-excerpt-view"><div class="pc-dim small">读取中…</div></div></section>
+      <div style="height:24px"></div>`;
+}
+const VIEWS = { comfy: viewComfy, aipreset: viewAiPreset, comic: viewComic, video: viewVideo, excerpt: viewExcerpt, cast: viewCast, charedit: viewCharEdit, outfit: viewOutfit, combine: viewCombine, studio: viewStudio, book: viewBook, artist: viewArtist, group: viewGroup, batch: viewBatch, vibe: viewVibe, lobby: viewLobby, settings: viewSettings };
 
 // ═════════════════════ 事件 ═════════════════════
 
@@ -11693,7 +13065,7 @@ async function onClick(ev, outside = false) {
             case 'histopen': {
                 const id = el.dataset.id, h = ui.hist ||= { select: false, picked: [], show: 60 };
                 if (h.select) { h.picked = h.picked.includes(id) ? h.picked.filter(x => x !== id) : [...h.picked, id]; render(); break; }
-                const x = histFind(id); if (x) histDetail(x);
+                const x = histFind(id); if (x) histGallery(x);
                 break;
             }
             case 'histdownload': { histDownload(ui.hist.picked.map(histFind).filter(Boolean)); break; }
@@ -15113,7 +16485,7 @@ async function start() {
         generatePage: (req, o = {}) => N.generate({ ...req, comic: true, ...(o.backend === 'comfy' ? { backend: 'comfy', src: '漫画' } : { src: '漫画' }) }), naiSize: () => { const s = N.settings(); return [Number(s.novelai_width) || 832, Number(s.novelai_height) || 1216]; },
         naiLists: () => ({ samplers: N.SAMPLERS, schedules: N.SCHEDULES }),
         naiNow: () => { const s = N.settings(); return { steps: Number(s.novelai_steps) || 28, cfg: Number(s.nai3Scale) || 5, rescale: Number(s.cfg_rescale) || 0, sampler: (N.SAMPLERS.find(x => x[0] === s.novelai_sampler) || [0, s.novelai_sampler || ''])[1], schedule: s.Schedule || 'karras' }; }, storeImage: pcStoreImage, resolveUrl: u => pcLocal.url(u), dropImage: pcDropImage,
-        recordImage: shot => pcRecordImage(shot), askLLM: (s, u, o) => { const n = Math.round(Number(getData().options.comicMaxTokens)); return __mod_translate.askLLM(s, u, { ...o, fn: 'comic', ...(n >= 256 ? { exactTokens: n } : {}) }); },
+        recordImage: shot => pcRecordImage(shot), askVision: (s, u, img, o) => __mod_translate.askVision(s, u, img, o), askLLM: (s, u, o) => { const n = Math.round(Number(getData().options.comicMaxTokens)); return __mod_translate.askLLM(s, u, { ...o, fn: 'comic', ...(n >= 256 ? { exactTokens: n } : {}) }); },
         castText: () => __mod_chars.currentCast().filter(x => x.on || (x.char.appearance || []).length).map(x => `${x.char.name}：${__mod_chars.fixedTags(x.char) || '（还没写外貌，按正文描写画）'}`).join('\n'),
         notify: m => toastr.info(m, '智库 · 漫画', { timeOut: 1500 }), notifyError: m => toastr.error(m, '智库 · 漫画', { timeOut: 9000 }), naiMode: () => N.settings().naiMode, modal: UI.modal, esc: UI.esc,
     });
@@ -15136,6 +16508,15 @@ async function start() {
         notify: m => toastr.info(m, '智库 · 视频', { timeOut: 2500 }), notifyError: m => toastr.error(m, '智库 · 视频', { timeOut: 9000 }),
     });
     globalThis.__zhikuVideo = video;
+    const excerpt = createExcerptController({
+        document: DOC, getContext: () => SillyTavern.getContext(), getData, commit: () => __mod_store.commit({ silent: true }), esc: UI.esc,
+        generateImage: req => N.generate({ ...req, src: '摘要' }), storeImage: pcStoreImage, resolveUrl: u => pcLocal.url(u),
+        askLLM: (s, u, o) => __mod_translate.askLLM(s, u, { ...o, fn: 'excerpt' }), openView: v => openWindow(v),
+        style: () => { const d = getData(), ref = d.active; return ref ? { pos: __mod_model.ticketString(d, ref), neg: __mod_model.ticketNeg(d, ref) } : {}; },
+        notify: m => toastr.info(m, '智库 · 摘要', { timeOut: 2000 }), notifyError: m => toastr.error(m, '智库 · 摘要', { timeOut: 9000 }),
+    });
+    globalThis.__zhikuExcerpt = excerpt;
+    cleanups.push(() => { excerpt.stop(); if (globalThis.__zhikuExcerpt === excerpt) globalThis.__zhikuExcerpt = null; });
     cleanups.push(() => { video.stop(); if (globalThis.__zhikuVideo === video) globalThis.__zhikuVideo = null; });
     cleanups.push(onChange(() => comic.renderAll()));
     {

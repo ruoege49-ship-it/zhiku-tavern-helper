@@ -4,10 +4,10 @@ import assert from 'node:assert/strict';
 export function applyNavEditCompatibility(s) {
     const patch = (a, b) => { assert.equal(s.split(a).length, 2, a.slice(0, 80)); s = s.replace(a, () => b); };
     patch('function viewVideo() {', `let pcNavEdit = false;
-const PC_NAV_ALL = [['studio', '生图'], ['comfy', 'Comfy'], ['comic', '漫画'], ['video', '视频'], ['book', '画师库'], ['vibe', '氛围'], ['cast', '角色'], ['lobby', '共享']];
+const PC_NAV_ALL = [['studio', '生图'], ['comfy', 'Comfy'], ['comic', '漫画'], ['video', '视频'], ['excerpt', '摘要'], ['book', '画师库'], ['vibe', '氛围'], ['cast', '角色'], ['lobby', '共享']];
 function pcNavHidden(d) { const h = d?.options?.navHidden; return Array.isArray(h) ? h.filter(k => k !== 'studio') : []; }
 function viewVideo() {`);
-    patch("    const navs = [['studio', '生图'], ['comfy', 'Comfy'], ['comic', '漫画'], ['video', '视频'], ['book', '画师库'], ['vibe', '氛围'], ['cast', '角色'], ['lobby', '共享']];",
+    patch("    const navs = [['studio', '生图'], ['comfy', 'Comfy'], ['comic', '漫画'], ['video', '视频'], ['excerpt', '摘要'], ['book', '画师库'], ['vibe', '氛围'], ['cast', '角色'], ['lobby', '共享']];",
         "    const navHid = pcNavHidden(getData()), navs = PC_NAV_ALL.filter(([k]) => !navHid.includes(k));");
     patch('<nav class="pc-nav"><span class="pc-nav-ind" aria-hidden="true"></span>${navs.map(([k, t]) => `<button class="pc-pill ${mainView === k ? \'on\' : \'\'}" data-act="nav" data-view="${k}">${t}</button>`).join(\'\')}</nav>',
         '<nav class="pc-nav ${pcNavEdit ? \'editing\' : \'\'}" style="--pc-navn:${navs.length + 1}"><span class="pc-nav-ind" aria-hidden="true"></span>${navs.map(([k, t]) => pcNavEdit ? `<button class="pc-pill ed ${mainView === k ? \'on\' : \'\'}" data-navk="${k}">${t}${k === \'studio\' ? \'\' : `<span class="pc-nav-x" data-act="navhide" data-k="${k}" aria-label="收起${t}">×</span>`}</button>` : `<button class="pc-pill ${mainView === k ? \'on\' : \'\'}" data-act="nav" data-view="${k}" data-navk="${k}">${t}</button>`).join(\'\')}${pcNavEdit ? \'<button class="pc-pill pc-nav-done" data-act="navedit">完成</button>\' : \'<button class="pc-pill pc-nav-edit" data-act="navedit" aria-label="编辑顶部标签" title="编辑标签（也可以长按标签）">✎</button>\'}</nav>');
