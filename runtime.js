@@ -955,6 +955,10 @@ function pcvVideoSize(fw, fh, area) {
 /** 帧数：Wan 要 4n+1 */
 function pcvLength(sec, fps) { return Math.max(5, Math.round((Number(sec) || 5) * (Number(fps) || 16) / 4) * 4 + 1); }
 
+/** 云端视频节点上直接写提示词的框（MiniMax 的 prompt_text 等） */
+const PCV_PROMPT_KEYS = ['prompt_text', 'positive_prompt', 'prompt', 'text_prompt'];
+/** ComfyUI 的付费合作节点（要 ComfyUI 账号 API 密钥才能从外面调用） */
+const PCV_PARTNER = /Minimax|Hailuo|Kling|Luma|Pika|Pixverse|Runway|Veo|Vidu|Moonvalley|Seedance|ByteDance|OpenAI|Gemini|Ideogram|Recraft|Stability|BFL|FluxPro|Flux.*Kontext.*Pro|Tripo|Rodin|WanApi|Wan.*Api|Topaz|Rodin/i;
 /** 用户自己的工作流（API 格式）：有 %prompt% %image% 这类占位符就照占位符填；没有就自动认节点 */
 function pcvFillWorkflow(api, v) {
     if (!api || typeof api !== 'object' || Array.isArray(api) || !Object.values(api).every(n => n && typeof n.class_type === 'string' && n.inputs)) throw new Error('工作流不对：要 ComfyUI「导出（API）」的 JSON');
@@ -984,8 +988,14 @@ function pcvFillWorkflow(api, v) {
     }
     if (!usedPrompt) {
         const pos = [...new Set(linked('positive'))].map(id => wf[id]).filter(n => n && /CLIPTextEncode|TextEncode/i.test(n.class_type) && typeof n.inputs.text === 'string');
-        if (!pos.length) throw new Error('工作流里没找到正面提示词（接到 positive 的 CLIP 文本编码）节点');
+        // 再找不到：本地模型（比如 MiniMax H3 开源版）的文字编码节点不一定接在 positive 上，挑一个没接到 negative 的文字编码节点
+        const negIds = new Set(linked('negative'));
+        const loose = pos.length ? [] : nodes.filter(([id, n]) => !negIds.has(String(id)) && /TextEncode|Text.*Encode|Prompt/i.test(n.class_type) && typeof n.inputs?.text === 'string' && !/negative|负面|反向/i.test(n._meta?.title || '')).slice(0, 1).map(([, n]) => n);
+        pos.push(...loose);
+        const direct = pos.length ? [] : nodes.filter(([, n]) => PCV_PROMPT_KEYS.some(k => typeof n.inputs?.[k] === 'string'));
+        if (!pos.length && !direct.length) throw new Error('工作流里没找到正面提示词：要么有接到 positive 的 CLIP 文本编码节点，要么节点上有 prompt_text / prompt 这类提示词框（云端视频节点）');
         pos.forEach(n => { n.inputs.text = v.prompt; });
+        direct.forEach(([, n]) => { for (const k of PCV_PROMPT_KEYS) if (typeof n.inputs[k] === 'string') { n.inputs[k] = v.prompt; break; } });
     }
     for (const [, n] of nodes) {
         const i = n.inputs;
@@ -1007,10 +1017,14 @@ function pcvWorkflowInfo(api) {
     const ph = k => raw.includes(`"%${k}%"`);
     const img = ph('image') ? '%image%' : nodes.filter(([, n]) => /^LoadImage/.test(n.class_type)).map(name)[0] || '';
     const linked = [...new Set(nodes.filter(([, n]) => Array.isArray(n.inputs?.positive)).map(([, n]) => String(n.inputs.positive[0])))];
-    const pos = ph('prompt') ? '%prompt%' : linked.map(id => [id, api[id]]).filter(([, n]) => n && /TextEncode/i.test(n.class_type)).map(name)[0] || '';
+    const pos = ph('prompt') ? '%prompt%' : linked.map(id => [id, api[id]]).filter(([, n]) => n && /TextEncode/i.test(n.class_type)).map(name)[0] || nodes.filter(([, n]) => PCV_PROMPT_KEYS.some(k => typeof n.inputs?.[k] === 'string')).map(e => `${name(e)} 的 ${PCV_PROMPT_KEYS.find(k => typeof e[1].inputs[k] === 'string')}`)[0] || '';
+    const partner = [...new Set(nodes.filter(([, n]) => PCV_PARTNER.test(n.class_type)).map(([, n]) => n._meta?.title || n.class_type))];
     const len = ph('length') ? '%length%' : nodes.filter(([, n]) => typeof n.inputs?.length === 'number').map(name)[0] || '';
     const out = nodes.filter(([, n]) => /SaveVideo|VideoCombine|SaveWEBM|SaveAnimated|SaveAnimatedPNG|CreateVideo/i.test(n.class_type)).map(name)[0] || '';
-    return { nodes: nodes.length, img, pos, len, out };
+    // 真填一遍看提示词和首帧落在哪个节点上（和出视频时的规则完全一样）
+    let fpos = '', fimg = '';
+    try { const f = pcvFillWorkflow(api, { prompt: '\u0001P', negative_prompt: '', image: '\u0001I', width: 832, height: 480, length: 81, fps: 16, seed: 1 }); for (const [id, n] of Object.entries(f)) for (const [k, v] of Object.entries(n.inputs || {})) { if (v === '\u0001P' && !fpos) fpos = `${name([id, api[id]])}${k === 'text' ? '' : ' 的 ' + k}`; if (v === '\u0001I' && !fimg) fimg = name([id, api[id]]); } } catch { /* 填不进去就按下面认的写 */ }
+    return { nodes: nodes.length, img: fimg || img, pos: fpos || pos, len, out, partner };
 }
 /** 读工作流里原来的帧率和画面面积（换算帧数、分辨率用） */
 function pcvWorkflowInfo(api) {
@@ -1207,7 +1221,7 @@ function createVideoController(deps) {
         const [fw, fh] = size(), [w, h] = pcvVideoSize(fw, fh, area);
         const image = await upload(startBlob);
         const wf = pcvFillWorkflow(api, { prompt, negative_prompt: opts().videoNeg ?? PCV_VNEG, image, width: w, height: h, length: pcvLength(sec, fps), fps, seed: Math.floor(Math.random() * 2 ** 31) });
-        const j = await (await cfy('/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: wf, client_id: 'zhiku-video' }) })).json();
+        const j = await (await cfy('/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: wf, client_id: 'zhiku-video', ...(String(opts().videoComfyKey || '').trim() ? { extra_data: { api_key_comfy_org: String(opts().videoComfyKey).trim() } } : {}) }) })).json();
         if (j.error || (j.node_errors && Object.keys(j.node_errors).length)) throw new Error('ComfyUI 不接这个工作流：' + JSON.stringify(j.error || j.node_errors).slice(0, 500) + (builtin ? '（内置工作流要先在 ComfyUI 里装好 Wan 2.2 5B 的三个模型文件）' : ''));
         const id = j.prompt_id, t0 = Date.now();
         for (;;) {
@@ -1390,7 +1404,8 @@ function createVideoController(deps) {
             return `<div class="pc-card" style="padding:10px 12px;margin:8px 0">
               <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><b>${o.videoWf ? '正在用：我的工作流' : '正在用：内置工作流'}</b>${st.wfBusy ? '<span class="pc-busy small">读取中</span>' : ''}</div>
               <div class="small" style="margin:2px 0 6px;word-break:break-all">${o.videoWf ? `「${esc(o.videoWf)}」` : 'Wan 2.2 5B 图生视频'}</div>
-              ${info ? li(info.img, `首帧放进：${info.img}`, '没找到 LoadImage（加载图像）节点') + li(info.pos, `提示词填进：${info.pos}`, '没找到正面提示词节点') + li(info.len, `帧数：${info.len}`, '没找到帧数（length），会用工作流原来的长度') + li(info.out, `视频从这里取：${info.out}`, '没找到保存视频的节点（最后要接「保存视频」或 VHS 的 Video Combine）') : ''}
+              ${info ? li(info.img, `首帧放进：${info.img}`, '没找到 LoadImage（加载图像）节点') + li(info.pos, `提示词填进：${info.pos}`, '没找到正面提示词节点') + (info.len || !info.partner?.length ? li(info.len, `帧数：${info.len}`, '没找到帧数（length），会用工作流原来的长度') : li(true, '时长按云端节点自己的设置', '')) + li(info.out, `视频从这里取：${info.out}`, '没找到保存视频的节点（最后要接「保存视频」或 VHS 的 Video Combine）') : ''}
+              ${info?.partner?.length ? `<div class="small" style="margin-top:6px;line-height:1.7">这个工作流用了 ComfyUI 的付费合作节点（${esc(info.partner.join('、'))}）。从智库调用时要带上 ComfyUI 账号的 API 密钥（在 platform.comfy.org 登录后生成，扣的是 ComfyUI 账号的点数）：</div><input class="pc-input" type="password" data-vkey placeholder="comfyui-…" value="${esc(o.videoComfyKey || '')}" style="margin-top:4px" autocomplete="off">${o.videoComfyKey ? '' : '<div class="small" style="color:#b8322a;margin-top:4px">还没填密钥：ComfyUI 会报「Sign In Required to Use API Nodes」</div>'}` : ''}
               ${st.wfError ? `<div class="small" style="color:#b8322a;margin-top:6px;line-height:1.7">✗ 刚才那个没读成：${esc(st.wfError)}${o.videoWf ? '（还在用上面这个）' : '（还在用内置的）'}</div>` : ''}
               <div class="pcv-row" style="margin-top:6px"><label class="pc-btn small" style="cursor:pointer">${o.videoWf ? '换一个工作流' : '选我的工作流'}<input type="file" data-vwf hidden></label>${o.videoWf ? '<button class="pc-btn small" data-va="wfreset">换回内置</button>' : ''}</div>
             </div>`;
@@ -1496,6 +1511,7 @@ function createVideoController(deps) {
                 useWorkflowFile(f).then(() => { st.wfBusy = false; deps.notify?.('视频工作流读好了：' + f.name); st.forceDraw = true; draw(); },
                     e => { st.wfBusy = false; st.wfError = e.message || String(e); deps.notifyError?.(st.wfError); st.forceDraw = true; draw(); });
             }
+            if (t.matches('[data-vkey]')) { opts().videoComfyKey = t.value.trim(); commit(); st.forceDraw = true; draw(); }
             if (t.matches('[data-vf="dur"]')) { st.forceDraw = true; draw(); }
         });
         root.addEventListener('focusout', () => setTimeout(() => { if (st.busy && !root.querySelector(':focus')) draw(); }, 0));
@@ -4055,6 +4071,13 @@ function pcFitHook() {
     if (pcFitHooked) return; pcFitHooked = true;
     const w = DOC.defaultView || globalThis;
     try { w.addEventListener('scroll', pcFitFixed); w.addEventListener('resize', pcFitFixed); w.visualViewport?.addEventListener('resize', pcFitFixed); } catch {}
+    try {
+        const fine = () => !w.matchMedia?.('(pointer: coarse)').matches;
+        const pull = () => { if (!fine() || !DOC.querySelector('#pc-root.open')) return; for (const el of [DOC.documentElement, DOC.body]) if (el && (el.scrollTop || el.scrollLeft)) { el.scrollTop = 0; el.scrollLeft = 0; } pcFitFixed(); };
+        DOC.addEventListener('scroll', ev => { const t = ev.target; if (t === DOC || t === DOC.documentElement || t === DOC.body) pull(); }, true);
+        DOC.addEventListener('change', ev => { if (ev.target?.closest?.('#pc-root')) w.requestAnimationFrame(pull); }, true);
+        DOC.addEventListener('focusin', ev => { if (ev.target?.closest?.('#pc-root')) w.requestAnimationFrame(pull); }, true);
+    } catch {}
 }
 const pcMount = el => { const out = (DOC.documentElement || DOC.body).appendChild(el); pcFitHook(); try { (DOC.defaultView || globalThis).requestAnimationFrame(pcFitFixed); } catch {} return out; };
 const stToastr = P.toastr || window.toastr;
@@ -9392,7 +9415,14 @@ function openWindow(view) {
             tmp.dataset.pcProxy = '1';
             tmp.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0';
             DOC.body.appendChild(tmp);
-            tmp.addEventListener('change', async () => { try { await onChangeEv({ target: tmp }); } catch (e) { toastr.error(e.message, '智库'); } finally { tmp.remove(); } }, { once: true });
+            tmp.addEventListener('change', async () => {
+                try {
+                    let handed = false;
+                    if (input.isConnected && tmp.files?.length) { try { input.files = tmp.files; handed = input.files?.length === tmp.files.length; } catch { handed = false; } }
+                    if (handed) input.dispatchEvent(new Event('change', { bubbles: true }));
+                    else await onChangeEv({ target: tmp });
+                } catch (e) { toastr.error(e.message, '智库'); } finally { tmp.remove(); }
+            }, { once: true });
             tmp.click();
         }, true);
         root.addEventListener('pointerdown', onPointerDown);
