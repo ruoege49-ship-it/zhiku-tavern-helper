@@ -1001,6 +1001,17 @@ function pcvFillWorkflow(api, v) {
     if (left) throw new Error('工作流里有认不出的占位符：' + [...new Set(left)].join(' '));
     return wf;
 }
+/** 读好的工作流里认到了什么：首帧、提示词、帧数、保存视频的节点，给页面上显示 */
+function pcvWorkflowInfo(api) {
+    const nodes = Object.entries(api || {}), raw = JSON.stringify(api || {}), name = ([id, n]) => `${n._meta?.title || n.class_type} #${id}`;
+    const ph = k => raw.includes(`"%${k}%"`);
+    const img = ph('image') ? '%image%' : nodes.filter(([, n]) => /^LoadImage/.test(n.class_type)).map(name)[0] || '';
+    const linked = [...new Set(nodes.filter(([, n]) => Array.isArray(n.inputs?.positive)).map(([, n]) => String(n.inputs.positive[0])))];
+    const pos = ph('prompt') ? '%prompt%' : linked.map(id => [id, api[id]]).filter(([, n]) => n && /TextEncode/i.test(n.class_type)).map(name)[0] || '';
+    const len = ph('length') ? '%length%' : nodes.filter(([, n]) => typeof n.inputs?.length === 'number').map(name)[0] || '';
+    const out = nodes.filter(([, n]) => /SaveVideo|VideoCombine|SaveWEBM|SaveAnimated|SaveAnimatedPNG|CreateVideo/i.test(n.class_type)).map(name)[0] || '';
+    return { nodes: nodes.length, img, pos, len, out };
+}
 /** 读工作流里原来的帧率和画面面积（换算帧数、分辨率用） */
 function pcvWorkflowInfo(api) {
     let fps = 0, area = 0;
@@ -1329,14 +1340,14 @@ function createVideoController(deps) {
     }
     async function useWorkflowFile(file) {
         let j;
-        try { j = JSON.parse(await file.text()); } catch { throw new Error('这个文件不是 JSON'); }
+        try { j = JSON.parse(await file.text()); } catch { throw new Error(`「${file.name}」不是 JSON 文件。要选 ComfyUI 里「导出（API）」存下来的 .json`); }
         let api = j;
         if (Array.isArray(j?.nodes)) {
             if (typeof deps.uiToApi !== 'function') throw new Error('这是 ComfyUI 的普通工作流，请在 ComfyUI 里用「导出（API）」再选');
             api = deps.uiToApi(j, await deps.comfyObjectInfo?.().catch(() => null));
         }
         pcvFillWorkflow(api, { prompt: 'x', negative_prompt: 'x', image: 'x.png', width: 832, height: 480, length: 81, fps: 16, seed: 1 });
-        opts().videoWf = file.name; opts().videoWfApi = JSON.stringify(api); commit();
+        opts().videoWf = file.name; opts().videoWfApi = JSON.stringify(api); opts().videoWfInfo = pcvWorkflowInfo(api); commit();
     }
 
     // ── 界面 ──
@@ -1373,8 +1384,18 @@ function createVideoController(deps) {
           ${seg('videoSize', Object.entries(PCV_SIZES).map(([k, v]) => [k, v[2]]), 'land')}
           <div class="pc-label pc-mt">视频怎么生成</div>
           <div class="pc-hint">ComfyUI 地址用「Comfy」页填的：${esc(base() || '还没填')}。浏览器要直接连 ComfyUI（传首帧、取视频），ComfyUI 启动时加 <b>--enable-cors-header</b>；手机连电脑还要加 --listen。</div>
-          <div class="pc-hint">工作流：${wf}。${o.videoWf ? '' : '要先在 ComfyUI 里放好 wan2.2_ti2v_5B_fp16、umt5_xxl_fp8_e4m3fn_scaled、wan2.2_vae 三个模型文件（ComfyUI 模板里的 Wan2.2 5B 视频生成同款）。'}用自己的工作流：在 ComfyUI 里「导出（API）」，再在这里选文件；插件自动认 LoadImage（首帧）、正面提示词、帧数、宽高、种子，也可以在工作流里写 %prompt% %image% %length% %width% %height% %seed% 占位符。</div>
-          <div class="pcv-row"><label class="pc-btn small" style="cursor:pointer">选我的工作流<input type="file" accept=".json,application/json" data-vwf hidden></label>${o.videoWf ? '<button class="pc-btn small" data-va="wfreset">换回内置</button>' : ''}</div>
+          ${(() => {
+            const info = o.videoWf ? (o.videoWfInfo || (() => { try { return pcvWorkflowInfo(JSON.parse(o.videoWfApi || '{}')); } catch { return null; } })()) : null;
+            const li = (ok, t, bad) => `<div class="small" style="line-height:1.7">${ok ? '✓' : '✗'} ${ok ? esc(t) : `<span style="color:#b8322a">${esc(bad)}</span>`}</div>`;
+            return `<div class="pc-card" style="padding:10px 12px;margin:8px 0">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><b>${o.videoWf ? '正在用：我的工作流' : '正在用：内置工作流'}</b>${st.wfBusy ? '<span class="pc-busy small">读取中</span>' : ''}</div>
+              <div class="small" style="margin:2px 0 6px;word-break:break-all">${o.videoWf ? `「${esc(o.videoWf)}」` : 'Wan 2.2 5B 图生视频'}</div>
+              ${info ? li(info.img, `首帧放进：${info.img}`, '没找到 LoadImage（加载图像）节点') + li(info.pos, `提示词填进：${info.pos}`, '没找到正面提示词节点') + li(info.len, `帧数：${info.len}`, '没找到帧数（length），会用工作流原来的长度') + li(info.out, `视频从这里取：${info.out}`, '没找到保存视频的节点（最后要接「保存视频」或 VHS 的 Video Combine）') : ''}
+              ${st.wfError ? `<div class="small" style="color:#b8322a;margin-top:6px;line-height:1.7">✗ 刚才那个没读成：${esc(st.wfError)}${o.videoWf ? '（还在用上面这个）' : '（还在用内置的）'}</div>` : ''}
+              <div class="pcv-row" style="margin-top:6px"><label class="pc-btn small" style="cursor:pointer">${o.videoWf ? '换一个工作流' : '选我的工作流'}<input type="file" data-vwf hidden></label>${o.videoWf ? '<button class="pc-btn small" data-va="wfreset">换回内置</button>' : ''}</div>
+            </div>`;
+          })()}
+          <div class="pc-hint">${o.videoWf ? '' : '要先在 ComfyUI 里放好 wan2.2_ti2v_5B_fp16、umt5_xxl_fp8_e4m3fn_scaled、wan2.2_vae 三个模型文件（ComfyUI 模板里的 Wan2.2 5B 视频生成同款）。'}用自己的工作流：在 ComfyUI 里「导出（API）」，再在上面选文件；插件自动认 LoadImage（首帧）、正面提示词、帧数、宽高、种子，也可以在工作流里写 %prompt% %image% %length% %width% %height% %seed% 占位符。</div>
           <div class="pc-label pc-mt">清晰度</div>
           ${seg('videoRes', [['480', '480p 快'], ['720', '720p'], ['wf', '照工作流']], '480')}
           <div class="pc-label pc-mt">每段几秒（长镜头按这个分段）</div>
@@ -1440,7 +1461,7 @@ function createVideoController(deps) {
             const run = (label, fn) => task(label, fn);
             if (a === 'story1' || a === 'story3') { p.story = chatStory(a === 'story1' ? 1 : 3); save(); st.forceDraw = true; draw(); return; }
             if (a === 'new') { if (!confirm('清空这个视频项目（剧情、分镜、三视图、视频都删掉）？')) return; return void (async () => { for (const s of p.shots) { await dropBlob(s.img); for (const g of s.segs || []) { await dropBlob(g.video); await dropBlob(g.last); } } for (const k of Object.values(p.sheets || {})) await dropBlob(k); st.proj = newProj(); save(true); st.forceDraw = true; draw(); })(); }
-            if (a === 'wfreset') { delete opts().videoWf; delete opts().videoWfApi; commit(); st.forceDraw = true; draw(); return; }
+            if (a === 'wfreset') { delete opts().videoWf; delete opts().videoWfApi; delete opts().videoWfInfo; st.wfError = ''; commit(); deps.notify?.('换回内置工作流了'); st.forceDraw = true; draw(); return; }
             if (a === 'stop') { st.stop = true; logLine('停下中…（当前这一段跑完的结果会丢掉）'); return; }
             if (a === 'sheet') return void run('画三视图 · ' + t.dataset.name, () => drawSheet(t.dataset.name));
             if (a === 'sheets') return void run('画三视图', async () => { for (const c of deps.castList()) { if (st.stop) break; st.busy = '画三视图 · ' + c.name; draw(); await drawSheet(c.name); draw(); } });
@@ -1470,7 +1491,11 @@ function createVideoController(deps) {
         root.addEventListener('change', ev => {
             const t = ev.target;
             if (t.matches('[data-vw]')) { opts()[t.dataset.vw] = t.checked; commit(); return; }
-            if (t.matches('[data-vwf]') && t.files?.[0]) { const f = t.files[0]; t.value = ''; useWorkflowFile(f).then(() => { deps.notify?.('视频工作流读好了：' + f.name); st.forceDraw = true; draw(); }, e => deps.notifyError?.(e.message || String(e))); }
+            if (t.matches('[data-vwf]') && t.files?.[0]) {
+                const f = t.files[0]; t.value = ''; st.wfBusy = true; st.wfError = ''; st.forceDraw = true; draw();
+                useWorkflowFile(f).then(() => { st.wfBusy = false; deps.notify?.('视频工作流读好了：' + f.name); st.forceDraw = true; draw(); },
+                    e => { st.wfBusy = false; st.wfError = e.message || String(e); deps.notifyError?.(st.wfError); st.forceDraw = true; draw(); });
+            }
             if (t.matches('[data-vf="dur"]')) { st.forceDraw = true; draw(); }
         });
         root.addEventListener('focusout', () => setTimeout(() => { if (st.busy && !root.querySelector(':focus')) draw(); }, 0));
@@ -4008,7 +4033,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.1（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.2（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -4075,7 +4100,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.1';
+globalThis.__PC_VERSION = '0.9.2';
 
 // ───── model.js ─────
 const __mod_model = (() => {
