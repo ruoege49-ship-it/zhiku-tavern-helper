@@ -2056,10 +2056,49 @@ function createExcerptController(deps) {
         try { takeExtras(card, __mod_translate.pickJson(await askLLM(ask, src, { maxTokens: 1500 }))); }
         catch (err) { log('AI 没写出来：' + (err?.message || err) + '（先按原文排）'); }
     }
-    /** AI 读这段字写画面 → NAI 画。画风用智库现在选的画师串（设置里可以关） */
+    /** 配图要看的上下文：角色卡设定 + 摘的那几楼前面两楼 + 摘的这段 */
+    function artStory(text) {
+        const c = getContext(), chat = c?.chat || [], e = ex();
+        const ids = e.custom ? (e.customFloor != null ? [e.customFloor] : []) : [...e.floors].sort((a, b) => a - b);
+        const first = ids.length ? ids[0] : chat.length;
+        const before = [];
+        for (let i = first - 1; i >= 0 && before.length < 2; i--) { const m = chat[i]; if (m && !m.is_system) { const t = excerptText(m.mes, rules()).slice(-1500); if (t) before.unshift(`${m.name || ''}：${t}`); } }
+        const card = c?.characters?.[c.characterId], desc = String(card?.description || card?.data?.description || '').replace(/\{\{[^}]*\}\}/g, '').slice(0, 1500);
+        return [desc ? `【角色卡设定（只用来认人和外貌）】\n${desc}` : '', before.length ? `【前情】\n${before.join('\n\n')}` : '', `【摘的这段】\n${String(text).trim()}`].filter(Boolean).join('\n\n');
+    }
+    /** 走正文插图那一套：AI 写画面方案（谁入画、动作、站位、镜头），编成生图标记 */
+    async function sceneMarker(text) {
+        const picked = String(text).trim().slice(0, 3000), story = artStory(picked);
+        const roster = __mod_chars.currentCast();
+        const req = illustrationRequest({ options: getData().options, mode: 'after', roster, markers: [], story, selectedPassage: picked, prompt: illustrationPrompt(getData().options) + '\n\n【这次是给一张文字卡配图】\n只画 1 张，画的是 selectedPassage 这一段里的瞬间，source 必须从 selectedPassage 原文里摘。story 里的「角色卡设定」「前情」只用来弄清楚在场有谁、在哪、长什么样、穿什么、关系和气氛，不要画前情里的事。这段是心里话或说出口的话时，画说话的人这一刻的样子和周围的环境。' });
+        const j = __mod_translate.pickJson(await askLLM(req.system, req.user, { maxTokens: 2800 }));
+        const item = (Array.isArray(j?.images) ? j.images : [])[0];
+        if (!item) throw new Error('AI 没写出画面方案');
+        if (Array.isArray(item.characters)) return illustrationMarkerText(compileIllustrationPlan(item, roster, story));
+        const tags = cleanImageTags(item.tags); if (!tags) throw new Error('画面方案是空的'); return tags;
+    }
+    /** AI 读这段字和前情写画面 → NAI 画。角色按角色页登记的外貌，画风用正文画师串 */
     async function drawArt(card, text, { rewrite = false } = {}) {
-        let tags = rewrite ? '' : card.tags;
-        if (!tags) {
+        const CZ = exConf(card), size = CZ.id === 'line' || (CZ.id === 'slice' && CZ.shape === 'arch') ? [832, 1216] : CZ.id === 'photo' || (CZ.id === 'slice' && CZ.shape === 'circle') ? [1024, 1024] : [1216, 832];
+        let marker = rewrite ? '' : String(card.tags || '').trim();
+        if (!marker) {
+            log('AI 在读前情、想画面…');
+            try { marker = await sceneMarker(sourceText() || text); }
+            catch (err) { log('按前情没写出画面（' + (err?.message || err) + '），只看这段再写一次…'); marker = ''; }
+        }
+        if (marker) {
+            let built = null;
+            try { built = __mod_chars.markerPrompt(marker); } catch (err) { log('画面标签不能用：' + (err?.message || err)); }
+            if (built) {
+                log('NAI 在画图…');
+                const r = await generateImage({ positive: built.positive, negative: built.negative, chars: built.chars || [], width: size[0], height: size[1] });
+                const saved = await storeImage(r.image, `excerpt_${Date.now()}`);
+                if (!saved?.url) throw new Error('图片保存未返回地址');
+                card.url = saved.url; card.tags = marker; return;
+            }
+        }
+        let tags = '';
+        {
             log('AI 在想画面…');
             const C = exConf(card), where = C.id === 'slice' ? { circle: '圆形框里', arch: '拱门形的窗里' }[C.shape] || '卡片最上面' : { line: '整张卡背后当暗色背景', film: '宽银幕画面里（下面配字幕）', photo: '一张相纸里', book: '书页上的插图（会做成旧照片色）', notes: '卡片上方一条横幅里', recap: '卡片最上面（下面是时间线）', inner: '卡片最上面' }[C.id] || '卡片最上面';
             const sys = `你给一段小说 / 聊天的文字配一张插图，图会放在${where}。
@@ -2089,7 +2128,7 @@ function createExcerptController(deps) {
         st.busy = 'art'; draw();
         try {
             if (how === 'none') card.url = '';
-            else if (how === 'file') { const u = await new Promise(ok => { const r = new win.FileReader(); r.onload = () => ok(r.result); r.readAsDataURL(file); }); const saved = await storeImage(u, `excerpt_${Date.now()}`); card.url = saved?.url || u; if (EX_NO_IMAGE.has(card.style)) card.style = 'slice'; }
+            else if (how === 'file') { if (file.type && !/^image\//.test(file.type)) throw new Error('选的不是图片'); const u = await new Promise((ok, bad) => { const r = new win.FileReader(); r.onload = () => ok(r.result); r.onerror = () => bad(new Error('图片读不出来')); r.readAsDataURL(file); }); const saved = await storeImage(u, `excerpt_${Date.now()}`); card.url = saved?.url || u; if (EX_NO_IMAGE.has(card.style)) card.style = 'slice'; }
             else { if (EX_NO_IMAGE.has(card.style)) card.style = 'slice'; await drawArt(card, exPlain(card.md), { rewrite: how === 'rethink' }); }
             commit(); await refreshPreview(); log('');
         } catch (err) { log('图没换成：' + (err?.message || err)); }
@@ -2149,7 +2188,7 @@ function createExcerptController(deps) {
               ${exConf(card).needs === 'notes' ? `<label class="pc-field"><span>批注（一行一条：原句里的几个字｜批注）</span><textarea class="pc-textarea small" data-xextra="notes" style="min-height:90px">${esc((card.notes || []).map(n => `${n.at}｜${n.text}`).join('\n'))}</textarea></label><label class="pc-field"><span>批注的人</span><input class="pc-input" data-xextra="notesBy" value="${esc(card.notesBy || '')}"></label>` : ''}
               ${exConf(card).needs === 'inner' ? `<label class="pc-field"><span>心声（一行一对：说出口的｜没说出口的）</span><textarea class="pc-textarea small" data-xextra="inner" style="min-height:120px">${esc((card.inner || []).map(p => `${p.say}｜${p.think}`).join('\n'))}</textarea></label>` : ''}
               ${exConf(card).needs === 'recap' ? `<label class="pc-field"><span>小标题</span><input class="pc-input" data-xextra="title" value="${esc(card.title || '')}"></label><label class="pc-field"><span>时间线（一行一条：楼号｜原句｜发生了什么）</span><textarea class="pc-textarea small" data-xextra="timeline" style="min-height:120px">${esc((card.timeline || []).map(x => `${x.floor}｜${x.line}｜${x.note}`).join('\n'))}</textarea></label>` : ''}
-              <label class="pc-field"><span>配图的画面（英文标签，改了点「照这个重画」）</span><textarea class="pc-textarea small" data-xtags style="min-height:60px">${esc(card.tags || '')}</textarea></label>
+              <label class="pc-field"><span>配图的画面（和聊天里的生图标记一样，能写 $角色名$；改了点「照这个重画」）</span><textarea class="pc-textarea small" data-xtags style="min-height:60px">${esc(card.tags || '')}</textarea></label>
               <div class="pc-chips wrap"><button class="pc-pill dashed tiny" data-x="artnai" ${b ? 'disabled' : ''}>照这个重画</button></div>
               <div class="pc-hint">**粗** *斜* {红:字} {绿:字} {蓝:字} ## 标题 --- 分割线。选中字再点上面的按钮。改完点「更新卡片」。</div>
               <div class="pc-actions"><button class="pc-btn dark" data-x="rerender">更新卡片</button></div>` : ''}` : ''}`;
@@ -2187,7 +2226,7 @@ function createExcerptController(deps) {
         mount.addEventListener('change', ev => {
             const t = ev.target;
             if (t.dataset.xs) { opts()[t.dataset.xs] = t.checked; commit(); syncSelect(); draw(); }
-            else if (t.matches('[data-xart]') && t.files?.[0]) { const f = t.files[0]; t.value = ''; changeArt('file', f); }
+            else if (t.matches('[data-xart]') && t.files?.[0]) { const f = t.files[0]; try { t.value = ''; } catch { /* */ } if (!ex().card) { log('先出一张卡，再放图'); return; } if (st.busy) { log('等这一步做完再放图'); return; } log(`收到「${f.name}」，正在换图…`); changeArt('file', f); }
         });
         mount.addEventListener('click', async ev => {
             const t = ev.target.closest('button, img[data-x]'); if (!t || !mount.contains(t)) return;
@@ -4049,7 +4088,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.2（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.3（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -4123,7 +4162,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.2';
+globalThis.__PC_VERSION = '0.9.3';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -9417,10 +9456,21 @@ function openWindow(view) {
             DOC.body.appendChild(tmp);
             tmp.addEventListener('change', async () => {
                 try {
-                    let handed = false;
-                    if (input.isConnected && tmp.files?.length) { try { input.files = tmp.files; handed = input.files?.length === tmp.files.length; } catch { handed = false; } }
-                    if (handed) input.dispatchEvent(new Event('change', { bubbles: true }));
-                    else await onChangeEv({ target: tmp });
+                    let handed = false, target = input;
+                    if (!target.isConnected) {
+                        // 选文件的时候面板重画了：按同样的 data-* 找现在页面上那个按钮
+                        const keys = Object.entries(input.dataset).filter(([k]) => k !== 'pcProxy');
+                        const kebab = k => k.replace(/[A-Z]/g, m => '-' + m.toLowerCase());
+                        const esc = v => (globalThis.CSS?.escape ? CSS.escape(v) : String(v).replace(/["\\]/g, '\\$&'));
+                        target = keys.length ? root.querySelector('input[type=file]' + keys.map(([k, v]) => `[data-${kebab(k)}="${esc(v)}"]`).join('')) : null;
+                    }
+                    if (target && tmp.files?.length) {
+                        try { target.files = tmp.files; } catch { /* 有的浏览器不让改 */ }
+                        if (target.files?.length !== tmp.files.length) { try { Object.defineProperty(target, 'files', { value: tmp.files, configurable: true }); } catch { /* */ } }
+                        handed = target.files?.length === tmp.files.length;
+                    }
+                    if (handed) target.dispatchEvent(new Event('change', { bubbles: true }));
+                    else { console.warn('[智库] 选好的文件没交回原来的按钮，交给面板总处理', input.dataset); await onChangeEv({ target: tmp }); }
                 } catch (e) { toastr.error(e.message, '智库'); } finally { tmp.remove(); }
             }, { once: true });
             tmp.click();
