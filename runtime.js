@@ -2688,7 +2688,8 @@ function createComicController(deps) {
         const sw = (key, text, small, def = false) => `<label class="pc-switch"><input type="checkbox" data-cw="${key}" ${(opts()[key] ?? def) ? 'checked' : ''}><span></span>${text}${small ? `<small>${small}</small>` : ''}</label>`;
         const draw = () => {
             const d = getData(), o = opts();
-            const groups = Object.values(d.groups || {}).filter(g => g.members?.length).sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh'));
+            const groups = Object.values(d.groups || {}).filter(g => g.members?.length || String(g.extra || g.raw || '').trim()).sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh'));
+            const pcSolo = Object.values(d.artists || {}).filter(a => String(a.tag || '').trim()).sort((a, b) => String(a.tag).localeCompare(String(b.tag), 'zh'));
             const st = style_();
             const neg = o.comicNeg ?? COMIC_DEFAULT_NEGATIVE;
             const posBad = comicPositiveConflicts(st.pos), negBad = comicNegativeConflicts([st.neg, neg].join(', '), { monochrome: o.comicColor === 'mono' });
@@ -2705,7 +2706,7 @@ function createComicController(deps) {
               <div class="pc-hint">${opts().comicSrc === 'inline' ? '楼层里「画成漫画」补分镜用的 AI' : '写分镜用的 AI'}：${esc(typeof __mod_translate !== 'undefined' ? __mod_translate.apiFor('comic').from || '' : '')}。要换接口、模型或者加要求，到智库「设置 → AI 预设 → 各个功能 → 漫画改编」。</div>
               <div class="pc-label">画风</div>
               <select class="pc-input" data-cstyle><option value="">跟正文画师串一样${d.active ? `（现在是「${esc(M.ticketName(d, d.active))}」）` : '（还没选）'}</option>
-                ${groups.map(g => `<option value="group:${esc(g.id)}" ${o.comicStyle === 'group:' + g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>
+                ${groups.length && pcSolo.length ? '<optgroup label="画师串">' : ''}${groups.map(g => `<option value="group:${esc(g.id)}" ${o.comicStyle === 'group:' + g.id ? 'selected' : ''}>${esc(g.name || '没起名的画师串')}</option>`).join('')}${groups.length && pcSolo.length ? '</optgroup>' : ''}${pcSolo.length ? `<optgroup label="单个画师">${pcSolo.map(a => `<option value="artist:${esc(a.id)}" ${o.comicStyle === 'artist:' + a.id ? 'selected' : ''}>${esc(String(a.tag).replace(/^artist:/, ''))}</option>`).join('')}</optgroup>` : ''}</select>
               <div class="pc-hint">漫画单独用一个画师串，不影响聊天插图。${posBad.length ? `<br><b>⚠ 这串里有人数词：${posBad.map(esc).join('、')}</b>，人数应该由每页自己写，建议去掉。` : ''}</div>
               <div class="pc-label">NovelAI 用哪个模型</div>
               ${seg('comicModel', [['v5', 'V5 Full'], ['v45', 'V4.5 Full'], ['follow', '跟生图设置']], 'v5')}
@@ -4089,7 +4090,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.7（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.8（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -4174,7 +4175,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.7';
+globalThis.__PC_VERSION = '0.9.8';
 
 // ───── model.js ─────
 const __mod_model = (() => {
