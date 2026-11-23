@@ -11,6 +11,7 @@ s=re.sub(r"globalThis.__PC_VERSION = '[\d.]+';\"\);",f"globalThis.__PC_VERSION =
 s=re.sub(r"'智库 · 原生扩展版 v[\d.]+'\);",f"'智库 · 原生扩展版 v{new}');",s,1)
 s=re.sub(r"(?<![_a-z])version:'[\d.]+'",f"version:'{new}'",s)
 s=re.sub(r"console.log\('Extension [\d.]+ built",f"console.log('Extension {new} built",s,1)
+s=re.sub(r"runtime\.js\?v=[\d.]+",f"runtime.js?v={new}",s)
 open(root+'tools/build-extension.mjs','w',encoding='utf-8',newline='\n').write(s)
 r=open(root+'README.md',encoding='utf-8').read()
 r=re.sub(r"版本 \*\*[\d.]+\*\*",f"版本 **{new}**",r,1)
