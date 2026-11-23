@@ -12,7 +12,7 @@ const C=vm.runInNewContext(between('const hasNsfwRating =','function buildChatPr
 C.chatId=()=>chat;C.getChar=k=>data.characters[k];
 const ui={studio:{open:{},loaded:false}};
 const sandbox={M,N,E,C,ui,getData:()=>data,commit:()=>{persisted=JSON.stringify(data);},T:{hasChinese:()=>false},esc:String,render(){},toastr:{warning:assert.fail,error:assert.fail},pcStoreImage:async()=>({url:'saved.png'}),pcRecordImage(){}};
-const api=vm.runInNewContext(between('function loadStudio()','function studioSource()')+between('function sceneZh()','function ucpOptions(')+between('async function doGenerate()','async function saveStudioResult()')+'\n({loadStudio,saveStudio,studioCast,setStudioCast,sceneSnapshot,applyScene,rememberScene,previewHtml,doGenerate})',sandbox);
+const api=vm.runInNewContext(between('function loadStudio()','function studioSource()')+between('function pcV5Zh()','function ucpOptions(')+between('async function doGenerate()','async function saveStudioResult()')+'\n({loadStudio,saveStudio,studioCast,setStudioCast,sceneSnapshot,applyScene,rememberScene,previewHtml,doGenerate})',sandbox);
 try{
  api.loadStudio();ui.studio.pos='artist:alpha';ui.studio.neg='blurry';api.applyScene({scene:'rain, window',sceneEn:'',sceneSrc:''});api.setStudioCast([{key:'a',pos:'L',outfit:'coat'},{key:'b',pos:'R'}]);
  await api.doGenerate();let req=requests.at(-1);assert.equal(req.parameters.v4_prompt.caption.char_captions.length,2);assert.match(req.input,/artist:alpha/);assert.match(req.input,/rain, window/);assert.match(req.parameters.v4_prompt.caption.char_captions[0].char_caption,/black coat/);assert.equal(req.parameters.v4_prompt.caption.char_captions[0].centers[0].x,0.3);assert.equal(E.runtime.lastSent.director,1);

@@ -4088,7 +4088,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.4（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.5（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -4173,7 +4173,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.4';
+globalThis.__PC_VERSION = '0.9.5';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -9722,7 +9722,9 @@ function applyArtistToStudio(ref) {
     saveStudio();
 }
 /** 固定提示词：有中文的先让 AI 转成标签，转过一次就记住，中文改了才重新转 */
-function sceneZh() { return T.hasChinese(ui.studio.scene || ''); }
+/** 用的是 V5、并且开着「V5 直接看中文」 */
+function pcV5Zh() { try { const n = N.settings(); return String(n.novelaimode || '').includes('nai-diffusion-5') && String(n.v5Chinese) !== 'false'; } catch { return false; } }
+function sceneZh() { return !pcV5Zh() && T.hasChinese(ui.studio.scene || ''); }
 function sceneReady() { const st = ui.studio; return !sceneZh() || !!(String(st.sceneEn || '').trim() && st.sceneSrc === String(st.scene || '').trim()); }
 function sceneStateText() { return sceneReady() ? '有中文，实际发的是下面 AI 转好的英文标签。' : ui.studio.sceneEn ? '中文改过了：生成时会先用 AI 重新转成标签。' : '有中文，NovelAI 看不懂：生成时会先用 AI 转成标签，转一次就记住。'; }
 function sceneTags() {
@@ -10105,6 +10107,7 @@ function sceneFold() {
     const st = ui.studio;
     const named = String(st.scene || '').trim() ? (st.scenes || []).find(p => sceneSig(p) === sceneSig(sceneSnapshot()))?.name : '';
     return fold('scene', named ? `固定提示词 · ${named}` : '固定提示词', st.sceneOn === false ? '不发送' : !String(st.scene || '').trim() ? '跟着发送 · 还没写' : !sceneReady() ? '跟着发送 · 生成时转成标签' : `跟着发送 · ${M.tokenize(sceneTags()).length} 个词`, `
+      ${String(N.settings().novelaimode || '').includes('nai-diffusion-5') ? `<label class="pc-switch"><input type="checkbox" data-st-check="v5Chinese" ${String(N.settings().v5Chinese) !== 'false' ? 'checked' : ''}><span></span>V5 直接看中文<small>V5 能看懂中文，中文原样发过去，不用 AI 转；关掉就照旧先转成英文标签</small></label>` : ''}
       <label class="pc-switch"><input type="checkbox" data-scene-on ${st.sceneOn !== false ? 'checked' : ''}><span></span>每次生成都带上<small>接在正面提示词后面、质量词前面一起发。不改你的正面提示词，也不进画师串。</small></label>
       <textarea id="pc-scene" class="pc-textarea small" data-bind="studio.scene" placeholder="中文英文都行。比如：坐在窗边喝咖啡，外面下雨 / 1boy, sitting, window, rain">${esc(st.scene || '')}</textarea>
       <label class="pc-label pc-mt-s">固定负面<span class="pc-dim small"> · 开着时接在负面提示词后面一起发，存下这段时一起存</span></label>
@@ -14626,6 +14629,7 @@ async function onChangeEv(ev) {
     if (el.dataset.stCheck) {
         N.settings()[el.dataset.stCheck] = el.checked ? 'true' : 'false';
         N.save();
+        if (el.dataset.stCheck === 'v5Chinese') render();
         return;
     }
     if (el.dataset.bindCheck) { setPath(ui, el.dataset.bindCheck, el.checked); if (ui.view === 'batch') render(); return; }
@@ -14683,7 +14687,7 @@ async function doGenerate() {
     try {
     if (!N.isReady()) { toastr.warning('先到设置里填 NovelAI key', '生成图片'); ui.view = 'settings'; render(); return; }
     if (!st.pos.trim() && !studioCast().length) { toastr.warning('正面提示词是空的', '生成图片'); return; }
-    if (T.hasChinese(st.pos.replace(/（[^（）]*）/g, ''))) {
+    if (!pcV5Zh() && T.hasChinese(st.pos.replace(/（[^（）]*）/g, ''))) {
         if (!(await confirmBox('正面提示词里有中文，NovelAI 看不懂中文。还是要生成吗？（中文描述可以写进下面的「固定提示词」，会自动转成标签）', { ok: '照样生成', cancel: '先不' }))) return;
     }
     if (st.sceneOn !== false && String(st.scene || '').trim() && !sceneReady()) {

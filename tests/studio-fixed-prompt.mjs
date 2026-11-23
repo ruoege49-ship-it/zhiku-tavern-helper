@@ -16,8 +16,8 @@ const E=vm.runInNewContext(between('const __mod_engine =','// ───── tr
     __mod_model:M,__mod_nai:N,__mod_store:{getData:()=>data,commit(){},urlToDataUrl:async()=>{throw Error('Unexpected image load');}},crypto:webcrypto,toastr:{warning(){}},
 });
 const ui={studio:{pos:'artist:alpha, window',neg:'blurry',scene:'window, rain, sitting',sceneOn:true}};
-const scene=vm.runInNewContext(between('function sceneZh()','function ucpOptions(')+'\n({studioParts,previewHtml})',{
-    ui,E,C:{chatId:()=>'chat',getChar:()=>null},T:{hasChinese:s=>/[\u3400-\u9fff]/.test(s)},esc:String
+const scene=vm.runInNewContext(between('function pcV5Zh()','function ucpOptions(')+'\n({studioParts,previewHtml})',{
+    ui,E,N,C:{chatId:()=>'chat',getChar:()=>null},T:{hasChinese:s=>/[\u3400-\u9fff]/.test(s)},esc:String
 });
 async function generate(){const preview=scene.previewHtml(config);await E.generate(scene.studioParts());const request=requests.at(-1).body;assert.equal(request.input??request.prompt,preview.pos);assert.equal(E.runtime.lastSent.prompt,preview.pos);return request;}
 try {
@@ -26,7 +26,11 @@ try {
     ui.studio.sceneOn=true;ui.studio.scene='坐在窗边';ui.studio.sceneSrc='坐在窗边';ui.studio.sceneEn='sitting, window';req=await generate();assert.equal(req.input,'artist:alpha, window, sitting');
     // Saved/restored studio fields still feed the actual request.
     ui.studio=JSON.parse(JSON.stringify(ui.studio));config.naiMode='tavern';req=await generate();assert.match(req.prompt,/sitting/);assert.equal(E.runtime.lastSent.vibes,null);assert.equal(E.runtime.lastSent.director,0);
-    config.naiMode='site';const key=N.encKey();data.vibeActive='v';data.vibeGroups.v={name:'夜景',vibes:[{encodings:{[key]:'encoded'},strength:0.6}]};
+    config.naiMode='site';config.novelaimode='nai-diffusion-5-full';ui.studio.scene='雨夜';ui.studio.sceneEn='rainy night';ui.studio.sceneSrc='雨夜';
+    req=await generate();assert.match(req.input,/雨夜/);
+    config.v5Chinese='false';req=await generate();assert.match(req.input,/rainy night/);assert(!req.input.includes('雨夜'));
+    config.v5Chinese='true';config.novelaimode='nai-diffusion-4-5-full';
+    const key=N.encKey();data.vibeActive='v';data.vibeGroups.v={name:'夜景',vibes:[{encodings:{[key]:'encoded'},strength:0.6}]};
     req=await generate();assert.equal(req.parameters.reference_image_multiple_cached.length,1);assert.equal(E.runtime.lastSent.vibes.n,1);assert.equal(E.runtime.lastSent.vibes.name,'夜景');
     const director=[{key:'r',data:'reference',type:'character',strength:0.6}];await E.generateFull({positive:'portrait',negative:'',director});req=requests.at(-1).body;
     assert.equal(req.parameters.director_reference_images_cached.length,1);assert(!req.parameters.reference_image_multiple_cached?.length);assert.equal(E.runtime.lastSent.director,1);assert.equal(E.runtime.lastSent.vibes,null);
