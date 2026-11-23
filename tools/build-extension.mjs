@@ -99,13 +99,14 @@ import {applySwitcherSearchCompatibility} from './switcher-search-compat.mjs';
 import {applyV5ZhCompatibility} from './v5-zh-compat.mjs';
 import {applyAnlasQuietCompatibility} from './anlas-quiet-compat.mjs';
 import {applyStaleStyleCompatibility} from './stale-style-compat.mjs';
+import {applyWeightSpaceCompatibility} from './weight-space-compat.mjs';
 import {fileURLToPath} from 'node:url';
 process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.9.6';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.9.6');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.9.7';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.9.7');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -5516,6 +5517,7 @@ s=applyTavern500Compatibility(s);
 s=applyInsetCompatibility(s);
 s=applyAnlasQuietCompatibility(s); // 0.9.6：查不到点数不吓人
 s=applyStaleStyleCompatibility(s); // 0.9.6：画师库详情页黑屏的保险
+s=applyWeightSpaceCompatibility(s); // 0.9.7：数字结尾的画师名，权重收尾 :: 前补空格
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
@@ -5529,10 +5531,10 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',(prefix+s+'\n}\n').replace(/\r\n/g, '\n'));
 // 0.9.6：runtime.js 带版本号加载，更新后浏览器不会再用旧缓存
-fs.writeFileSync(dir+'/index.js',fs.readFileSync('src/index.js','utf8').replace("import('./runtime.js')","import('./runtime.js?v=0.9.6')"));
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.9.6',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.9.6',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/index.js',fs.readFileSync('src/index.js','utf8').replace("import('./runtime.js')","import('./runtime.js?v=0.9.7')"));
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.9.7',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.9.7',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.9.6 built; storage keys and shared upload preserved.');
+console.log('Extension 0.9.7 built; storage keys and shared upload preserved.');

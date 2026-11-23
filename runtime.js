@@ -4089,7 +4089,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.6（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.7（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -4174,7 +4174,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.6';
+globalThis.__PC_VERSION = '0.9.7';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -4393,7 +4393,7 @@ function migrateNonArtists(d, fake) {
         const words = bad.map(m => {
             const word = d.artists[m.artistId].tag.replace(/^artist\s*:\s*/i, '').trim();
             const weight = Number.isFinite(Number(m.weight)) ? Number(m.weight) : 1;
-            return Math.abs(weight - 1) < 0.001 ? word : `${fmtWeight(weight)}::${word}::`;
+            return Math.abs(weight - 1) < 0.001 ? word : `${fmtWeight(weight)}::${(/[\d.]$/.test(String(word ?? '')) ? word + ' ' : word)}::`;
         });
         g.extra = [g.extra, ...words].filter(Boolean).join(', ');
     }
@@ -4496,7 +4496,7 @@ function tokenize(text) {
 
 function tokenToText(t) {
     if (t.raw) return t.raw;
-    return Math.abs(t.weight - 1) < 0.001 ? t.text : `${fmtWeight(t.weight)}::${t.text}::`;
+    return Math.abs(t.weight - 1) < 0.001 ? t.text : `${fmtWeight(t.weight)}::${(/[\d.]$/.test(String(t.text ?? '')) ? t.text + ' ' : t.text)}::`;
 }
 
 /** 画师串 → { members: [{tag, weight}], extra } */
@@ -4717,7 +4717,7 @@ function ticketString(data, ref) {
     const parts = t.item.members
         .map(m => ({ a: data.artists[m.artistId], w: Number(m.weight) || 1 }))
         .filter(x => x.a)
-        .map(({ a, w }) => Math.abs(w - 1) < 0.001 ? a.tag : `${fmtWeight(w)}::${a.tag}::`);
+        .map(({ a, w }) => Math.abs(w - 1) < 0.001 ? a.tag : `${fmtWeight(w)}::${(/[\d.]$/.test(String(a.tag ?? '')) ? a.tag + ' ' : a.tag)}::`);
     if (t.item.extra) parts.push(t.item.extra);
     return parts.join(', ');
 }
@@ -5662,6 +5662,7 @@ function negWeighted(text) { return [...String(text || '').matchAll(/(?:^|[^\w.]
 var pcBracesToasted = false;
 function buildParameters({ positive, negative, width, height, seed, chars = [], refs = null, director = null, comic = false }) {
     chars=normalizeNaiChars(chars);
+    positive = (positive == null ? positive : String(positive).replace(/([A-Za-z_\])}])(\d+(?:\.\d+)?)::/g, '$1$2 ::')); negative = (negative == null ? negative : String(negative).replace(/([A-Za-z_\])}])(\d+(?:\.\d+)?)::/g, '$1$2 ::')); chars = chars.map(c => ({ ...c, prompt: (c.prompt == null ? c.prompt : String(c.prompt).replace(/([A-Za-z_\])}])(\d+(?:\.\d+)?)::/g, '$1$2 ::')), uc: (c.uc == null ? c.uc : String(c.uc).replace(/([A-Za-z_\])}])(\d+(?:\.\d+)?)::/g, '$1$2 ::')) }));
     const s = comic ? comicSettings(settings()) : settings();
     const model = comic ? comicNaiModel(s) : s.novelaimode;
     const isV3 = model === 'nai-diffusion-3';
@@ -6251,6 +6252,7 @@ async function generateRequestInner(opts, recordNai = () => {}, responseInfo = {
     }
     const model = opts.comic ? comicNaiModel(s) : s.novelaimode;
     if (opts.comic && s.naiMode === 'tavern') throw new Error('漫画要用自己的 NovelAI key：酒馆通道画不了分人物和画进图里的文字。到智库「设置 → NovelAI」改成自己填 key');
+    opts = { ...opts, positive: (opts.positive == null ? opts.positive : String(opts.positive).replace(/([A-Za-z_\])}])(\d+(?:\.\d+)?)::/g, '$1$2 ::')), negative: (opts.negative == null ? opts.negative : String(opts.negative).replace(/([A-Za-z_\])}])(\d+(?:\.\d+)?)::/g, '$1$2 ::')) };
     const params = buildParameters(opts);
     { const pcPos = params.v4_prompt?.caption?.base_caption; if (typeof pcPos === 'string' && pcPos !== opts.positive && countWeightBlocks(opts.positive) > countWeightBlocks(pcPos)) opts = { ...opts, positive: pcPos, negative: params.negative_prompt ?? opts.negative }; }
     // 垫图（img2img）：底图已经裁成这次的尺寸
@@ -6746,7 +6748,7 @@ const joinTags = arr => arr.map(x => stripNotes(x).trim().replace(/^,+|,+$/g, ''
 function dropRepeats(text, ...before) {
     const seen = new Set(M.tokenize(before.filter(Boolean).join(', ')).map(t => t.text.toLowerCase()));
     return M.tokenize(text).filter(t => { const k = t.text.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; })
-        .map(t => t.raw || (Math.abs(t.weight - 1) < 0.001 ? t.text : `${M.fmtWeight(t.weight)}::${t.text}::`)).join(', ');
+        .map(t => t.raw || (Math.abs(t.weight - 1) < 0.001 ? t.text : `${M.fmtWeight(t.weight)}::${(/[\d.]$/.test(String(t.text ?? '')) ? t.text + ' ' : t.text)}::`)).join(', ');
 }
 /**
  * 正面 = 正面提示词 + 固定提示词 + 质量词（后两个去掉和前面重复的）
@@ -6755,7 +6757,7 @@ function dropRepeats(text, ...before) {
 /** (tag:1.3) → 1.3::tag::；不带数字的括号（比如 rourou (been)）不动 */
 function sdWeights(text) {
     let t = String(text || ''), prev;
-    do { prev = t; t = t.replace(/\(([^()]*?(?:\([^()]*\)[^()]*?)*?):\s*(-?\d+(?:\.\d+)?)\s*\)/g, (_, tag, w) => `${Number(w)}::${tag.trim()}::`); } while (t !== prev);
+    do { prev = t; t = t.replace(/\(([^()]*?(?:\([^()]*\)[^()]*?)*?):\s*(-?\d+(?:\.\d+)?)\s*\)/g, (_, tag, w) => `${Number(w)}::${(/[\d.]$/.test(String(tag.trim() ?? '')) ? tag.trim() + ' ' : tag.trim())}::`); } while (t !== prev);
     return t;
 }
 function composeStudio({ pos = '', neg = '', scene = '' }, s = N.settings()) {
@@ -6978,8 +6980,8 @@ async function makeSampleFor(ref, templateId, { soloWeight = getData().options.s
     const tokens = M.tokenize(original);
     const eligible = [1.2, 1.5, 2].includes(w) && tokens.filter(t=>t.isArtist).length === 1;
     const fixed = eligible ? tokens.map(t => {
-        if (t.isArtist) return M.fmtWeight(t.weight * w) + '::' + t.text + '::';
-        return t.raw || (Math.abs(t.weight - 1) < 0.001 ? t.text : M.fmtWeight(t.weight) + '::' + t.text + '::');
+        if (t.isArtist) return M.fmtWeight(t.weight * w) + '::' + (/[\d.]$/.test(String(t.text ?? '')) ? t.text + ' ' : t.text) + '::';
+        return t.raw || (Math.abs(t.weight - 1) < 0.001 ? t.text : M.fmtWeight(t.weight) + '::' + (/[\d.]$/.test(String(t.text ?? '')) ? t.text + ' ' : t.text) + '::');
     }).join(', ') : original;
     const image = await generateSample({ fixed, template: tpl, neg: M.ticketNeg(d, ref) });
     await saveImageTo(ref, image, { nsfw: tpl.nsfw, templateId: tpl.id });
@@ -6999,14 +7001,14 @@ async function makeBatchImage(job) {
     const neg0 = ref ? M.ticketNeg(d, ref) : '';
     const w = Number(job.soloWeight ?? d.options.sampleSoloWeight) || 1;
     const one = M.parseArtistString(fixed);
-    if (w !== 1 && one.members.length === 1 && Math.abs(one.members[0].weight - 1) < 0.001 && !new RegExp(`::\\s*${one.members[0].tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*::`).test(fixed)) fixed = fixed.replace(one.members[0].tag, `${w}::${one.members[0].tag}::`);
+    if (w !== 1 && one.members.length === 1 && Math.abs(one.members[0].weight - 1) < 0.001 && !new RegExp(`::\\s*${one.members[0].tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*::`).test(fixed)) fixed = fixed.replace(one.members[0].tag, `${w}::${(/[\d.]$/.test(String(one.members[0].tag ?? '')) ? one.members[0].tag + ' ' : one.members[0].tag)}::`);
     if (!job.char) return { image: await generateSample({ fixed, template: tpl, neg: neg0 }), saved: false };
     // 画角色：角色外貌 + 固定的衣服 + 模板的景别（照角色页「生成这个角色的图」）
     const shot = tpl.shot || 'bust';
     const SHOT = { head: '1.4::portrait::, close-up, upper body, looking at viewer', bust: '1.4::upper body::, looking at viewer', full: '1.2::full body::, standing, looking at viewer' };
     const CUT = shot === 'full' ? /^(upper body|portrait|close-up|cowboy shot|bust)$/i
         : /^(full body|standing|feet|barefoot|wide shot|very wide shot)$|\b(shoes|boots|loafers|sneakers|heels|sandals|slippers|socks|kneehighs|thighhighs|pantyhose|legwear|footwear|leggings)\b/i;
-    const cut = t => M.tokenize(t || '').filter(x => !CUT.test(x.text.trim())).map(x => x.raw || (Math.abs(x.weight - 1) < 0.001 ? x.text : `${M.fmtWeight(x.weight)}::${x.text}::`)).join(', ');
+    const cut = t => M.tokenize(t || '').filter(x => !CUT.test(x.text.trim())).map(x => x.raw || (Math.abs(x.weight - 1) < 0.001 ? x.text : `${M.fmtWeight(x.weight)}::${(/[\d.]$/.test(String(x.text ?? '')) ? x.text + ' ' : x.text)}::`)).join(', ');
     const builtIn = /^(?:sfw|nsfw)_(?:head|bust|full)$/.test(tpl.id);
     const frame = d.options.frameKeep ? '' : __mod_chars.frameOf([fixed, builtIn ? SHOT[shot] : tpl.positive].filter(Boolean).join(', '));
     job = { ...job, charTags: __mod_chars.frameTrim(job.charTags, frame).text };
@@ -8484,7 +8486,7 @@ function frameTrim(text, frame) {
     for (const t of M.tokenize(src)) {
         const w = String(t.text || '').toLowerCase().replace(/_/g, ' ').trim();
         const out = (shot && FRAME_FEET.test(w)) || ((shot === 'upper' || shot === 'head') && FRAME_LOWER.test(w)) || (shot === 'head' && FRAME_BODY.test(w)) || (chibi && CHIBI_DROP.test(w));
-        const raw = t.raw || (Math.abs(t.weight - 1) < 0.001 ? t.text : `${M.fmtWeight(t.weight)}::${t.text}::`);
+        const raw = t.raw || (Math.abs(t.weight - 1) < 0.001 ? t.text : `${M.fmtWeight(t.weight)}::${(/[\d.]$/.test(String(t.text ?? '')) ? t.text + ' ' : t.text)}::`);
         (out ? dropped : kept).push(out ? t.text : raw);
     }
     return { text: kept.join(', '), dropped };
@@ -10564,7 +10566,7 @@ function markStr(d, str) {
     if (!M.tokenize(str).some(t => t.isArtist && M.banInfo(d, t.text))) return esc(str);
     const out = [];
     for (const t of M.tokenize(str)) {
-        const raw = t.raw || (Math.abs(t.weight - 1) < 0.001 ? t.text : `${M.fmtWeight(t.weight)}::${t.text}::`);
+        const raw = t.raw || (Math.abs(t.weight - 1) < 0.001 ? t.text : `${M.fmtWeight(t.weight)}::${(/[\d.]$/.test(String(t.text ?? '')) ? t.text + ' ' : t.text)}::`);
         const ban = t.isArtist && M.banInfo(d, t.text);
         out.push(ban ? `<mark class="pc-ban" title="${esc(ban.note || '拉黑的画师')}">${esc(raw)}</mark>` : esc(raw));
     }
@@ -10577,7 +10579,7 @@ function lintPrompt(text) {
     const singleRe = /(^|[,\s{\[(])(-?\d+(?:\.\d+)?):(?!:)(\s*[^,:\n]+?)::/g;
     const singles = [...t0.matchAll(singleRe)];
     const t = t0.replace(singleRe, '$1$2::$3::');
-    const pcExtra = singles.map(m => `「${m[2]}:${m[3].trim()}::」少了一个冒号，应该是 ${m[2]}::${m[3].trim()}::`);
+    const pcExtra = singles.map(m => `「${m[2]}:${m[3].trim()}::」少了一个冒号，应该是 ${m[2]}::${(/[\d.]$/.test(String(m[3].trim() ?? '')) ? m[3].trim() + ' ' : m[3].trim())}::`);
     for (const m of t0.matchAll(/(^|[,\s])([a-z][a-z ]{2,}[a-z])!(?=\s*(,|$))/gi)) pcExtra.push(`「${m[2]}!」像是打错了（后面多了个 !）`);
 
     const issues = [], cut = [];
@@ -10648,7 +10650,7 @@ function randomString(d, n, weighted) {
     const pool = randomPool(d);
     for (let i = pool.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
     const W = [0.8, 0.9, 1, 1, 1.1, 1.2, 1.3];
-    return pool.slice(0, n).map(a => { const w = weighted ? W[Math.floor(Math.random() * W.length)] : 1; return Math.abs(w - 1) < 0.001 ? a.tag : `${M.fmtWeight(w)}::${a.tag}::`; }).join(', ');
+    return pool.slice(0, n).map(a => { const w = weighted ? W[Math.floor(Math.random() * W.length)] : 1; return Math.abs(w - 1) < 0.001 ? a.tag : `${M.fmtWeight(w)}::${(/[\d.]$/.test(String(a.tag ?? '')) ? a.tag + ' ' : a.tag)}::`; }).join(', ');
 }
 /** 组成 / 随机画师串：可以改、复制、存成画师组、直接设为正文画师串 */
 function openStringMaker({ text = '', random = false } = {}) {
@@ -12214,7 +12216,7 @@ async function charAction(act, el) {
                 // 半身 / 头像：去掉会把人拉成全身的词（鞋袜腿、全身、站着）；全身：去掉半身特写的词
                 const CUT = shot === 'full' ? /^(upper body|portrait|close-up|cowboy shot|bust)$/i
                     : /^(full body|standing|feet|barefoot|wide shot|very wide shot)$|\b(shoes|boots|loafers|sneakers|heels|sandals|slippers|socks|kneehighs|thighhighs|pantyhose|legwear|footwear|leggings)\b/i;
-                const cut = t => M.tokenize(t || '').filter(x => x.isArtist || !CUT.test(x.text.trim())).map(x => x.raw || (Math.abs(x.weight - 1) < 0.001 ? x.text : `${M.fmtWeight(x.weight)}::${x.text}::`)).join(', ');
+                const cut = t => M.tokenize(t || '').filter(x => x.isArtist || !CUT.test(x.text.trim())).map(x => x.raw || (Math.abs(x.weight - 1) < 0.001 ? x.text : `${M.fmtWeight(x.weight)}::${(/[\d.]$/.test(String(x.text ?? '')) ? x.text + ' ' : x.text)}::`)).join(', ');
                 // NSFW 正面加 adult；负面不动。填了动作 / 场景 / 背景就不加白底
                 const white = (ui.charTestBg || 'white') === 'white';
                 const pos = M.mergeTags(cut(d.active ? M.ticketString(d, d.active) : ''), nsfw ? 'nsfw, adult' : '', cut(C.fixedTags(c, { nsfw })), 'solo', SHOT[shot], extra, white ? 'simple background, white background' : '');
@@ -12597,7 +12599,7 @@ function artistOnly(text) {
         const inner = M.tokenize(t.text);
         return inner.map(x => ({ ...x, weight: t.weight * x.weight }));
     }).filter(t => t.isArtist || KEEP_STYLE.test(t.text.replace(/_/g, ' ').trim()))
-      .map(t => Math.abs(t.weight - 1) < 0.001 ? t.text : M.fmtWeight(t.weight) + '::' + t.text + '::').join(', ');
+      .map(t => Math.abs(t.weight - 1) < 0.001 ? t.text : M.fmtWeight(t.weight) + '::' + (/[\d.]$/.test(String(t.text ?? '')) ? t.text + ' ' : t.text) + '::').join(', ');
 }
 const lobbyBlock = () => { const o = getData().options; o.lobbyBlock ||= { users: [], posts: [] }; o.lobbyBlock.users ||= []; o.lobbyBlock.posts ||= []; return o.lobbyBlock; };
 const KIND_NAME = { artist: '单个画师', group: '画师组', character: '角色', outfit: '服装' };
@@ -13148,7 +13150,7 @@ async function onClick(ev, outside = false) {
                 if (!add) break;
                 if (el.dataset.act === 'insertai') st.pos = M.mergeTags(st.pos, add);
                 else {
-                    const artists = M.tokenize(st.pos).filter(t => t.isArtist).map(t => Math.abs(t.weight - 1) < 0.001 ? t.text : `${M.fmtWeight(t.weight)}::${t.text}::`);
+                    const artists = M.tokenize(st.pos).filter(t => t.isArtist).map(t => Math.abs(t.weight - 1) < 0.001 ? t.text : `${M.fmtWeight(t.weight)}::${(/[\d.]$/.test(String(t.text ?? '')) ? t.text + ' ' : t.text)}::`);
                     st.pos = M.mergeTags(artists.join(', '), st.lastExtra, add);
                 }
                 saveStudio(); render();
@@ -15161,7 +15163,7 @@ function startBatch() {
     const pcBanSkipped = [];
     for (const u of list) {
         const ref = findUnit(d, u);
-        const text = u.text || (Math.abs((u.weight ?? 1) - 1) < 0.001 ? u.tag : `${u.weight}::${u.tag}::`);
+        const text = u.text || (Math.abs((u.weight ?? 1) - 1) < 0.001 ? u.tag : `${u.weight}::${(/[\d.]$/.test(String(u.tag ?? '')) ? u.tag + ' ' : u.tag)}::`);
         const item = ref && M.resolveTicket(d, ref)?.item;
         if (M.bannedIn(d, item ? M.ticketString(d, ref) : text).length) { pcBanSkipped.push(u.name || text); continue; }
         for (const t of tpls) {
@@ -15290,7 +15292,7 @@ function showImg2Prompt(r, from) {
         const pos = box.querySelector('[data-i2p-pos]').value.trim();
         if (act === 'no') { box.closeModal(); return; }
         if (act === 'copy') { try { await navigator.clipboard.writeText(pos); toastr.success('复制好了', '看图写提示词', { timeOut: 1200 }); } catch { toastr.info('复制不了，长按文本框自己复制', '看图写提示词'); } return; }
-        const keep = M.parseArtistString(st.pos || '').members.map(m => Math.abs(m.weight - 1) < 0.001 ? m.tag : `${M.fmtWeight(m.weight)}::${m.tag}::`).join(', ');
+        const keep = M.parseArtistString(st.pos || '').members.map(m => Math.abs(m.weight - 1) < 0.001 ? m.tag : `${M.fmtWeight(m.weight)}::${(/[\d.]$/.test(String(m.tag ?? '')) ? m.tag + ' ' : m.tag)}::`).join(', ');
         if (act === 'replace') st.pos = M.replaceArtists(M.stripArtists(pos), [keep, st.lastExtra].filter(Boolean).join(', '));
         else if (act === 'append') st.pos = M.mergeTags(st.pos || '', M.stripArtists(pos));
         else if (act === 'all') st.pos = pos;
@@ -15391,7 +15393,7 @@ function showPose(r) {
             // 换构图：正面里原来的景别、机位、姿势词去掉，不然新旧两套一起发，看着像接在后面
             const POSE_WORD = /^(?:extreme close-up|close-up|portrait|upper body|cowboy shot|full body|wide shot|very wide shot|from (?:above|below|side|behind)|straight-on|dutch angle|pov|high angle|low angle|standing|sitting|kneeling|squatting|lying(?: on (?:back|side|stomach))?|on (?:back|side|stomach)|all fours|leaning (?:forward|back)|bent over|crossed legs|spread legs|knees up|looking (?:at viewer|back|away|down|up)|facing (?:viewer|away)|profile|head tilt|centered|off-center|rule of thirds|foreshortening|fisheye)$/i;
             const kept = M.tokenize(st.pos || '').filter(t => { const drop = !t.isArtist && POSE_WORD.test(t.text.trim()); if (drop) cut++; return !drop; });
-            if (cut) st.pos = kept.map(t => t.raw || (Math.abs(t.weight - 1) < 0.001 ? t.text : `${M.fmtWeight(t.weight)}::${t.text}::`)).join(', ');
+            if (cut) st.pos = kept.map(t => t.raw || (Math.abs(t.weight - 1) < 0.001 ? t.text : `${M.fmtWeight(t.weight)}::${(/[\d.]$/.test(String(t.text ?? '')) ? t.text + ' ' : t.text)}::`)).join(', ');
         }
         saveStudio(); box.closeModal(); ui.view = 'studio'; render();
         toastr.success(a === 'pos' ? '接在正面后面了' : `固定提示词换成这些了${cut ? `，正面里原来的 ${cut} 个姿势构图词去掉了` : ''}`, '姿势构图', { timeOut: 2500 });
@@ -15865,7 +15867,7 @@ async function openRegister() {
       <div class="pc-actions"><button class="pc-btn" data-m="cancel">算了</button><button class="pc-btn dark" data-m="ok">添加</button></div>`);
     box.addEventListener('click', ev => {
         const m = ev.target.closest('[data-m]')?.dataset.m;
-        if (m === 'fromfixed') box.querySelector('#pc-reg-text').value = M.tokenize(presetFixed).filter(t => t.isArtist).map(t => Math.abs(t.weight - 1) < 0.001 ? t.text : `${t.weight}::${t.text}::`).join(', ');
+        if (m === 'fromfixed') box.querySelector('#pc-reg-text').value = M.tokenize(presetFixed).filter(t => t.isArtist).map(t => Math.abs(t.weight - 1) < 0.001 ? t.text : `${t.weight}::${(/[\d.]$/.test(String(t.text ?? '')) ? t.text + ' ' : t.text)}::`).join(', ');
         if (m === 'cancel') box.closeModal();
         if (m === 'ok') {
             const text = box.querySelector('#pc-reg-text').value;
@@ -16013,7 +16015,7 @@ function importArtistsFromPresets() {
     const d = getData();
     let n = 0;
     for (const [name, p] of Object.entries(s.yushe || {})) {
-        const text = M.tokenize(p.fixedPrompt || '').filter(t => t.isArtist).map(t => Math.abs(t.weight - 1) < 0.001 ? t.text : `${t.weight}::${t.text}::`).join(', ');
+        const text = M.tokenize(p.fixedPrompt || '').filter(t => t.isArtist).map(t => Math.abs(t.weight - 1) < 0.001 ? t.text : `${t.weight}::${(/[\d.]$/.test(String(t.text ?? '')) ? t.text + ' ' : t.text)}::`).join(', ');
         if (!text || Object.values(d.groups).some(g => g.name === name)) continue;
         if (M.createFromString(d, { name, text, note: '从固定提示词预设导入' })) n++;
     }
