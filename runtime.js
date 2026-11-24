@@ -3588,12 +3588,27 @@ function readIllustrationPlan(prompt) {
     try { return JSON.parse(text); } catch { throw new Error('画面方案 JSON 不完整，请编辑本图提示词后重试'); }
 }
 
+/** 在正文里找 AI 抄的定位句：逐字找不到时，忽略空格、标点、大小写再找，返回正文里的原句；对不上返回 null */
+function pcLooseAnchor(story, anchor) {
+    story = String(story || ''); anchor = String(anchor || '');
+    const keep = c => /[\p{L}\p{N}]/u.test(c), low = c => { const l = c.toLowerCase(); return l.length === 1 ? l : c; };
+    let ns = ''; const map = [];
+    for (let i = 0; i < story.length; i++) { const c = story[i]; if (keep(c)) { ns += low(c); map.push(i); } }
+    let na = ''; for (const c of anchor) if (keep(c)) na += low(c);
+    if (na.length < 4) return null;
+    const find = t => { const k = ns.indexOf(t); return k < 0 ? null : story.slice(map[k], map[k + t.length - 1] + 1); };
+    let r = find(na); if (r) return r;
+    for (let len = na.length - 1; len >= Math.max(8, Math.ceil(na.length / 2)); len--) { r = find(na.slice(0, len)) || find(na.slice(-len)); if (r) return r; }
+    return null;
+}
+
 function compileIllustrationPlan(plan, roster, story) {
     const required = key => {
         if (typeof plan?.[key] !== 'string' || !plan[key].trim()) throw new Error(`画面方案缺少 ${key}`);
         return plan[key].trim();
     };
-    const source = required('source'), title = required('title'), moment = required('moment');
+    let source = required('source'); const title = required('title'), moment = required('moment');
+    if (typeof story === 'string' && !story.includes(source)) source = pcLooseAnchor(story, source) || source;
     if (source.length < 4 || (typeof story === 'string' && !story.includes(source))) throw new Error('画面定位句不在正文中，请重新选择瞬间');
     const rating = required('rating').toLowerCase();
     if (!['sfw', 'nsfw'].includes(rating)) throw new Error('画面分级必须是 sfw 或 nsfw');
@@ -3700,6 +3715,7 @@ function createIllustrationPlanner({ getContext, getData, settings, roster, askL
                 } else {
                     // Keep older user-written prompts usable, with an actual story anchor.
                     anchor=String(item?.source || item?.after || '').trim();
+                    if(!story.includes(anchor))anchor=pcLooseAnchor(story,anchor)||anchor;
                     if(anchor.length<4 || !story.includes(anchor))throw new Error('画面定位句不在正文中');
                     tags=cleanImageTags(item?.tags);resolveImageCharacters(tags,roster());
                 }
@@ -4090,7 +4106,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.8（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.9（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -4175,7 +4191,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.8';
+globalThis.__PC_VERSION = '0.9.9';
 
 // ───── model.js ─────
 const __mod_model = (() => {
