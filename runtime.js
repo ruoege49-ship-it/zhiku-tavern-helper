@@ -4143,7 +4143,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.11（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.12（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -4228,7 +4228,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.11';
+globalThis.__PC_VERSION = '0.9.12';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -8587,11 +8587,6 @@ function markerPrompt(prompt, { story } = {}) {
     // 画面和角色动作全是空的：多半是写画面的 AI 回复空了，不画（不然会按画师串随便画一张，和正文无关）
     if (!parsed.unknown?.length && !String(parsed.scene || '').replace(/\b(?:nsfw|sfw)\b|[,\s]/gi, '') && !(parsed.picks || []).some(p => String(p.tags || '').trim())) throw new Error('这张图没有画面描述，没画：多半是写画面的 AI 回复空了（带思考的模型把长度用完了）。到智库「设置 → 翻译和 AI」把「回复长度上限」调大，或者换个不带思考的模型');
     const rating = hasNsfwRating(parsed.scene) ? 'nsfw' : plan ? 'sfw' : undefined;
-    if (rating === 'nsfw') {
-        const minor = /\b(?:loli|lolicon|shota|shotacon|child|children|kid|kids|toddler|preteen|underage|infant|little girl|little boy|young girl|young boy|elementary school(?:er| student)?|kindergarten(?:er)?)\b/gi;
-        const strip = v => String(v || '').replace(minor, '').replace(/,\s*(?=,)/g, '').replace(/^\s*,\s*|\s*,\s*$/g, '').replace(/\s{2,}/g, ' ');
-        parsed.scene = strip(parsed.scene); for (const p of parsed.picks || []) p.tags = strip(p.tags);
-    }
     const built = buildChatPrompt(parsed.scene, parsed.picks, { nsfw: rating === 'nsfw' });
     return { ...built, positive: applyIllustrationRating(built.positive, rating), cast: parsed.cast };
 }

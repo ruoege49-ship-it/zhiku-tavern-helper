@@ -15,7 +15,7 @@ assert.match(out,/^我自己的开头。\n分级与画面描述分开处理：/)
 assert.equal(X.illustrationPrompt({illustPrompt:'完全自定义'}),'完全自定义');
 // 分级、去未成年词、裸体不穿固定衣服都接上了
 assert.match(rt,/const rating = hasNsfwRating\(parsed\.scene\) \? 'nsfw' : plan \? 'sfw' : undefined;/);
-assert.match(rt,/loli\|lolicon\|shota/);
+assert.doesNotMatch(rt,/lolicon/); // 0.9.12：不在程序里删标签
 assert.match(rt,/if \(c\.outfitMode === 'fixed' && !nude\)/);
 assert.equal(rt.split('fixedTags(p.char, { nsfw, nude: nsfw &&').length-1,2);
 console.log('nsfw-plan ok');
