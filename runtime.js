@@ -3532,7 +3532,10 @@ const DEFAULT_ILLUSTRATION_PROMPT = `你负责根据小说正文选择插图瞬�
 【内容分级】
 对应原文含成人性内容或私密部位裸露时，标记 nsfw，不得漏标，也不得标成 sfw。
 分级与画面描述分开处理：先按原文判断分级，再写画面标签。
-nsfw 画面要按原文如实写出当前镜头里看得见的裸露部位、性行为、体位、体液和衣着状态（如 nude、topless、clothes pulled aside、spread legs、sex、missionary、cum、nipples），用 danbooru 标签写全；不要因为是 nsfw 就把标签写得含糊、保守或只写气氛，也不要编原文没有的内容。
+nsfw 画面默认画成玩家视角的 POV 色情图：
+- 镜头写 pov（玩家是男性写 male pov，女性写 female pov）。玩家本人不放进 characters、不写外貌，只在 scene 里写画面中露出的玩家身体部位（pov hands、penis、pov crotch 等）。只有正文明确是别人之间、玩家不在场时，才不用 pov。
+- 必须写出当前镜头里看得见的性器官和私密部位（nipples、pussy、penis、anus 等），以及体位和姿势（missionary、cowgirl position、doggystyle、spread legs、on back、straddling 等），再加上性行为、体液和衣着状态（sex、vaginal、fellatio、cum、nude、clothes pulled aside 等），用 danbooru 标签写全。
+- 不要因为是 nsfw 就把标签写得含糊、保守或只写气氛，也不要编原文没有的性行为。
 nsfw 画面里的人物一律按成年人描写，不写 loli、shota、child 等表示未成年的词。
 不能仅因角色性别、亲密关系或普通拥抱，就判定为 nsfw。
 
@@ -3568,8 +3571,8 @@ function illustrationPrompt(options = {}) {
     if (!p.trim()) return DEFAULT_ILLUSTRATION_PROMPT;
     // 存下来的是旧版默认提示词（玩家没改过）：换成新的「写满张数」
     for (const line of ['遵循输入 imageLimit（玩家设置的最多张数），不自行固定张数。', '按输入 imageLimit 写满张数：正文够长就写满 imageLimit 张，分散在正文前中后不同位置；只有正文太短、实在找不出这么多不同瞬间时才少写。']) if (p.includes(line) && p.replace(line, '必须正好写满输入 imageLimit 张，分散在正文前中后不同位置。正文里的瞬间不够时自己编：同一场景换景别和角度（特写、背影、俯拍）、写在场人物的反应、补正文没细写但合理的前后一刻，直到写满为止，不能少写。') === DEFAULT_ILLUSTRATION_PROMPT) return DEFAULT_ILLUSTRATION_PROMPT;
-    // 0.9.11：旧提示词里「画面标签完整描述非露骨的可见信息」会让 NSFW 图画得很保守，这一句换成新的
-    { const oldLine = "分级与画面描述分开处理；画面标签完整描述非露骨的可见信息。"; if (p.includes(oldLine)) return p.replace(oldLine, "分级与画面描述分开处理：先按原文判断分级，再写画面标签。\nnsfw 画面要按原文如实写出当前镜头里看得见的裸露部位、性行为、体位、体液和衣着状态（如 nude、topless、clothes pulled aside、spread legs、sex、missionary、cum、nipples），用 danbooru 标签写全；不要因为是 nsfw 就把标签写得含糊、保守或只写气氛，也不要编原文没有的内容。\nnsfw 画面里的人物一律按成年人描写，不写 loli、shota、child 等表示未成年的词。"); }
+    // 旧提示词里「画面标签完整描述非露骨的可见信息」（0.9.10 及以前）或 0.9.11 版的 NSFW 段落：换成现在的
+    { const now = "分级与画面描述分开处理：先按原文判断分级，再写画面标签。\nnsfw 画面默认画成玩家视角的 POV 色情图：\n- 镜头写 pov（玩家是男性写 male pov，女性写 female pov）。玩家本人不放进 characters、不写外貌，只在 scene 里写画面中露出的玩家身体部位（pov hands、penis、pov crotch 等）。只有正文明确是别人之间、玩家不在场时，才不用 pov。\n- 必须写出当前镜头里看得见的性器官和私密部位（nipples、pussy、penis、anus 等），以及体位和姿势（missionary、cowgirl position、doggystyle、spread legs、on back、straddling 等），再加上性行为、体液和衣着状态（sex、vaginal、fellatio、cum、nude、clothes pulled aside 等），用 danbooru 标签写全。\n- 不要因为是 nsfw 就把标签写得含糊、保守或只写气氛，也不要编原文没有的性行为。\nnsfw 画面里的人物一律按成年人描写，不写 loli、shota、child 等表示未成年的词。"; for (const oldLine of ["分级与画面描述分开处理：先按原文判断分级，再写画面标签。\nnsfw 画面要按原文如实写出当前镜头里看得见的裸露部位、性行为、体位、体液和衣着状态（如 nude、topless、clothes pulled aside、spread legs、sex、missionary、cum、nipples），用 danbooru 标签写全；不要因为是 nsfw 就把标签写得含糊、保守或只写气氛，也不要编原文没有的内容。\nnsfw 画面里的人物一律按成年人描写，不写 loli、shota、child 等表示未成年的词。", "分级与画面描述分开处理；画面标签完整描述非露骨的可见信息。"]) if (p.includes(oldLine)) return p.replace(oldLine, now); }
     return p;
 }
 
@@ -4143,7 +4146,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.12（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.13（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -4228,7 +4231,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.12';
+globalThis.__PC_VERSION = '0.9.13';
 
 // ───── model.js ─────
 const __mod_model = (() => {
