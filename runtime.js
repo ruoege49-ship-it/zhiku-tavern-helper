@@ -3710,7 +3710,8 @@ function createIllustrationPlanner({ getContext, getData, settings, roster, askL
         const source = String(msg.mes || '');
         if (manual && (msg!==selection.msg || source!==selection.source || msg.swipe_id!==selection.swipe || chatKey(c)!==selection.chatKey)) throw new Error('聊天或原文已变化，请重新选择文字');
         if (!source.trim() || (!manual && parseImageMarkers(source,cfg.start,cfg.end).length)) return;
-        const story = manual?selectedImageStory(source,cfg):imageStoryText(source);
+        let story = manual?selectedImageStory(source,cfg):imageStoryText(source);
+        if (manual && story && !selectionTextMap(story).normalized.includes(selectionTextMap(selection.text).normalized)) story += '\n\n' + selection.text;
         if (!story) return;
         const req = request('after', story,selection?.text), signature = String(msg.swipe_id) + source + req.system + req.user;
         if (!manual && seen.get(msg) === signature) return;
@@ -3777,7 +3778,7 @@ function createIllustrationPlanner({ getContext, getData, settings, roster, askL
         if(!selection?.msg || selectedBusy.has(selection.msg))return;
         if(typeof selection.text!=='string'||selection.text.trim().length<4)throw new Error('请至少选择 4 个字符的正文');
         const location=locateSelectedText(selection.source,selection.text,{...settings(),occurrence:selection.occurrence??0});
-        if(!location||location.insertAt!==selection.insertAt||!selectionTextMap(selectedImageStory(selection.source,settings())).normalized.includes(selectionTextMap(selection.text).normalized))throw new Error('所选文字无法对应聊天原文，请重新选择');
+        if(!location||location.insertAt!==selection.insertAt)throw new Error('所选文字无法对应聊天原文，请重新选择');
         selectedBusy.add(selection.msg);
         try{return await after(selection.id,selection);}finally{selectedBusy.delete(selection.msg);}
     }
@@ -3829,17 +3830,69 @@ function selectionTextMap(text) {
     return {normalized,starts,ends};
 }
 
+/** 屏幕上的段落被显示正则删改过时，在原文里找最像的那一段：屏幕上的字要按顺序出现在原文里，原文多出来的字（被正则删掉的）扣分很少。
+ *  返回 {from,to}（原文里的位置），对不上返回 null */
+function pcAlignSelection(raw, text) {
+    raw = String(raw || '');
+    const keep = c => /[\p{L}\p{N}]/u.test(c), low = c => { const l = c.toLowerCase(); return l.length === 1 ? l : c; };
+    let ns = ''; const map = [];
+    for (let i = 0; i < raw.length;) {
+        if (raw[i] === '<') { const m = /^<!--[\s\S]*?-->|^<\/?[a-zA-Z][^>]*>/.exec(raw.slice(i, i + 400)); if (m) { i += m[0].length; continue; } }
+        const c = raw[i]; if (keep(c)) { ns += low(c); map.push(i); } i++;
+    }
+    let nd = ''; for (const c of String(text || '')) if (keep(c)) nd += low(c);
+    const M = nd.length, N = ns.length;
+    if (M < 4 || !N) return null;
+    const exact = ns.indexOf(nd);
+    if (exact >= 0) return { from: map[exact], to: map[exact + M - 1] + 1 };
+    // 用 4 个字一组的片段投票，找出原文里最可能的几处，再在附近细对齐
+    const votes = new Map();
+    for (let k = 0; k + 4 <= M; k += 2) {
+        const seed = nd.slice(k, k + 4);
+        for (let p = ns.indexOf(seed), n = 0; p >= 0 && n < 40; p = ns.indexOf(seed, p + 1), n++) {
+            const b = Math.max(0, Math.round((p - k) / 16));
+            votes.set(b, (votes.get(b) || 0) + 1);
+        }
+    }
+    const top = [...votes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([b]) => b * 16);
+    let best = null;
+    for (const guess of top) {
+        const lo = Math.max(0, guess - 40), hi = Math.min(N, guess + Math.ceil(M * 1.8) + 80);
+        // 半全局对齐：屏幕上的字都要用上，原文可以从任意处开始、任意处结束
+        let prev = new Float64Array(M + 1), prevS = new Int32Array(M + 1), cur = new Float64Array(M + 1), curS = new Int32Array(M + 1);
+        prevS[0] = lo; for (let j = 1; j <= M; j++) { prev[j] = -1.5 * j; prevS[j] = lo; }
+        for (let i = lo + 1; i <= hi; i++) {
+            cur[0] = 0; curS[0] = i;
+            const ch = ns[i - 1];
+            for (let j = 1; j <= M; j++) {
+                let v = prev[j - 1] + (ch === nd[j - 1] ? 2 : -2), st = prevS[j - 1];
+                const skipRaw = prev[j] - 0.6; if (skipRaw > v) { v = skipRaw; st = prevS[j]; }
+                const skipMine = cur[j - 1] - 1.5; if (skipMine > v) { v = skipMine; st = curS[j - 1]; }
+                cur[j] = v; curS[j] = st;
+            }
+            if (ch === nd[M - 1] && (!best || cur[M] > best.score)) best = { score: cur[M], start: curS[M], end: i };
+            [prev, cur] = [cur, prev]; [prevS, curS] = [curS, prevS];
+        }
+    }
+    if (!best || best.score < M * 1.2) return null;
+    let a = best.start; while (a < best.end && ns[a] !== nd[0] && a < best.start + 8) a++;
+    return { from: map[a] ?? map[best.start], to: map[best.end - 1] + 1 };
+}
+
 function locateSelectedText(source,text,{occurrence=0,start='image###',end='###'}={}) {
     let raw=String(source||'');
     for(const token of parseImageMarkers(raw,start,end).reverse())raw=raw.slice(0,token.index)+' '.repeat(token.raw.length)+raw.slice(token.index+token.raw.length);
     raw=raw.replace(/<(think|thinking|analysis|imgthink|details|image|script|style)\b[^>]*>[\s\S]*?<\/\1>/gi,m=>' '.repeat(m.length)).replace(/<!--[\s\S]*?-->/g,m=>' '.repeat(m.length));
+    const full=raw;
     const blocks=[...raw.matchAll(/<content\b[^>]*>([\s\S]*?)<\/content\s*>/gi)];
     if(blocks.length){let masked='',cursor=0;for(const block of blocks){masked+=' '.repeat(block.index-cursor)+block[0];cursor=block.index+block[0].length;}raw=masked+' '.repeat(raw.length-cursor);}
     const mapped=selectionTextMap(raw),needle=selectionTextMap(String(text||'')).normalized;
     if(needle.length<4)return null;
     let at=-1;
-    for(let n=0;n<=occurrence;n++){at=mapped.normalized.indexOf(needle,at+1);if(at<0)return null;}
-    const from=mapped.starts[at],to=mapped.ends[at+needle.length-1];
+    let from,to;
+    for(let n=0;n<=occurrence;n++){at=mapped.normalized.indexOf(needle,at+1);if(at<0)break;}
+    if(at>=0){from=mapped.starts[at];to=mapped.ends[at+needle.length-1];}
+    else{const hit=pcAlignSelection(raw,text)||(full!==raw?pcAlignSelection(full,text):null);if(!hit)return null;from=hit.from;to=hit.to;}
     // Finish the selected paragraph, before a closing content boundary or trailing status block.
     const tail=source.slice(to),boundary=tail.match(/\n|<\/(?:p|div|content)\s*>|<(?:details|image)\b/i);
     let insertAt=source.length;
@@ -3881,9 +3934,16 @@ function createSelectedImageController({document:doc,getContext,settings,generat
         if(!floor||text.length<4||!Number.isInteger(id)||!msg||msg.is_system){button.hidden=true;snapshot=null;return false;}
         const prefix=range.cloneRange();prefix.selectNodeContents(host);prefix.setEnd(range.startContainer,range.startOffset);
         const before=selectionTextMap(prefix.toString()).normalized,needle=selectionTextMap(text).normalized;
-        const occurrence=needle?before.split(needle).length-1:0;
+        let occurrence=needle?before.split(needle).length-1:0;
         const source=String(msg.mes||''),cfg=settings(),location=locateSelectedText(source,text,{...cfg,occurrence});
-        if(!location||!selectionTextMap(selectedImageStory(source,cfg)).normalized.includes(needle)){button.hidden=true;snapshot=null;return false;}
+        if(!location){button.hidden=true;snapshot=null;return false;}
+        if(!selectionTextMap(source).normalized.includes(needle)){
+            // 屏幕上的字被显示正则改过：用聊天原文里对应的这一段
+            const raw=source.slice(location.from,location.to).replace(/<[^>]+>/g,'').trim();
+            if(selectionTextMap(raw).normalized.length<4){button.hidden=true;snapshot=null;return false;}
+            text=raw;
+            for(let n=0;n<30;n++){const again=locateSelectedText(source,text,{...cfg,occurrence:n});if(!again)break;if(again.from===location.from){occurrence=n;Object.assign(location,again);break;}}
+        }
         snapshot={id,msg,source,swipe:msg.swipe_id,chatKey:key(c),text,occurrence,...location};button.hidden=false;return true;
     }
     function capture(){
@@ -3907,9 +3967,12 @@ function createSelectedImageController({document:doc,getContext,settings,generat
         if(!twice){if(selection&&!selection.isCollapsed)capture();return;}
         // 电脑上双击会顺手选中一个词，清掉，按整段处理
         selection?.removeAllRanges?.();
-        if(!host.contains(paragraph)||paragraph.querySelector(excluded))return;
+        if(!host.contains(paragraph))return;
         const range=doc.createRange();range.selectNodeContents(paragraph);
-        if(remember(range,range.toString().trim()))openDialog();
+        let text=range.toString().trim();
+        if(paragraph.querySelector(excluded)){const copy=paragraph.cloneNode(true);copy.querySelectorAll('.pc-marker-slot,.custom-pc-marker-slot,.pc-image-actions,button,input,textarea,select,img,video,audio,details,script,style').forEach(n=>n.remove());text=copy.textContent.trim();}
+        if(remember(range,text))openDialog();
+        else if(selectionTextMap(text).normalized.length>=4)notify('这段在聊天原文里对不上（可能被显示正则改得太多），换一段试试');
     }
     const schedule=()=>{clearTimeout(timer);timer=setTimeout(capture,120);};
     const preserve=e=>{if(e.type==='mousedown'||e.pointerType==='mouse')e.preventDefault();};
@@ -4146,7 +4209,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.13（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.14（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -4231,7 +4294,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.13';
+globalThis.__PC_VERSION = '0.9.14';
 
 // ───── model.js ─────
 const __mod_model = (() => {

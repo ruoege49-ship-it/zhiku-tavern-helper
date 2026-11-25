@@ -104,13 +104,14 @@ import {applyComicStyleListCompatibility} from './comic-style-list-compat.mjs';
 import {applyLooseAnchorCompatibility} from './loose-anchor-compat.mjs';
 import {applyAiFormatCompatibility} from './ai-format-compat.mjs';
 import {applyNsfwPlanCompatibility} from './nsfw-plan-compat.mjs';
+import {applySelectionAlignCompatibility} from './selection-align-compat.mjs';
 import {fileURLToPath} from 'node:url';
 process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.9.13';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.9.13');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.9.14';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.9.14');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -5526,6 +5527,7 @@ s=applyComicStyleListCompatibility(s); // 0.9.8：漫画画风能选所有画师
 s=applyLooseAnchorCompatibility(s); // 0.9.9：插图定位句差空格/标点也能对上
 s=applyAiFormatCompatibility(s); // 0.9.10：AI 格式差一点不再整段作废（漫画页、画面方案、插图位置、人名、JSON）
 s=applyNsfwPlanCompatibility(s); // 0.9.11：NSFW 插图不再被提示词限制成保守画面
+s=applySelectionAlignCompatibility(s); // 0.9.14：双击段落生图，显示正则改过字、<content> 外、带图的段落也能用
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
@@ -5539,10 +5541,10 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',(prefix+s+'\n}\n').replace(/\r\n/g, '\n'));
 // 0.9.6：runtime.js 带版本号加载，更新后浏览器不会再用旧缓存
-fs.writeFileSync(dir+'/index.js',fs.readFileSync('src/index.js','utf8').replace("import('./runtime.js')","import('./runtime.js?v=0.9.13')"));
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.9.13',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.9.13',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/index.js',fs.readFileSync('src/index.js','utf8').replace("import('./runtime.js')","import('./runtime.js?v=0.9.14')"));
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.9.14',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.9.14',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.9.13 built; storage keys and shared upload preserved.');
+console.log('Extension 0.9.14 built; storage keys and shared upload preserved.');
