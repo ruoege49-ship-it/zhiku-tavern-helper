@@ -1428,7 +1428,7 @@ function createVideoController(deps) {
           ${seg('videoSeg', [[3, '3 秒'], [5, '5 秒'], [8, '8 秒']], 5)}
           <div class="pc-label pc-mt">镜头数</div>
           ${seg('videoShots', [[0, '自动'], [4, '4'], [6, '6'], [8, '8'], [12, '12']], 0)}
-          <label class="pc-switch pc-mt"><input type="checkbox" data-vw="videoSheetRef" ${o.videoSheetRef !== false ? 'checked' : ''}><span></span>画首帧时带上三视图当角色参考<small>只有支持角色参考的 NovelAI 模型（V4.5）才生效，能让每个镜头里的人长得更一致</small></label>
+          <label class="pc-switch pc-mt"><input type="checkbox" data-vw="videoSheetRef" ${o.videoSheetRef !== false ? 'checked' : ''}><span></span>画首帧时带上三视图当角色参考<small>只有支持角色参考的 NovelAI 模型（V4.5、V5）才生效，能让每个镜头里的人长得更一致</small></label>
           <div class="pc-label pc-mt">额外要求（写分镜用）</div>
           <textarea class="pc-input" data-vstr="videoExtra" rows="2" placeholder="比如：多用特写，节奏慢一点，结尾要有远景">${esc(o.videoExtra || '')}</textarea>
 
@@ -3752,7 +3752,8 @@ function createIllustrationPlanner({ getContext, getData, settings, roster, askL
         if (!selected.length) { warn('没有可用的画面方案；请检查提示词输出格式或重新生成正文');forget();return; }
         // Locate against the original story once. Preserve order for images sharing an anchor.
         const insertions = new Map();
-        for(const shot of selected){const at=manual?safeImageInsertionPoint(source,selection.insertAt):imageInsertionPoint(source,shot.anchor);if(!Number.isInteger(at)||at<0||at>source.length)throw new Error('选段插入位置无效');insertions.set(at,[...(insertions.get(at)||[]),shot]);}
+        const framed=(()=>{try{return [...(globalThis.document?.querySelectorAll(`.mes[mesid="${Number(id)}"] .mes_text iframe`)||[])].some(f=>f.contentDocument?.body);}catch{return false;}})();
+        for(const shot of selected){const at=manual?(selection.frame?selection.insertAt:safeImageInsertionPoint(source,selection.insertAt)):(framed?(locateSelectedText(source,shot.anchor,cfg)?.insertAt??imageInsertionPoint(source,shot.anchor)):imageInsertionPoint(source,shot.anchor));if(!Number.isInteger(at)||at<0||at>source.length)throw new Error('选段插入位置无效');insertions.set(at,[...(insertions.get(at)||[]),shot]);}
         let next='',cursor=0;const positions=new Set(),shifts=[];
         for(const [at,shots] of [...insertions].sort((a,b)=>a[0]-b[0])){next+=source.slice(cursor,at);const before=next.length;for(const shot of shots){next+='\n';positions.add(next.length);next+=shot.raw+'\n';}shifts.push({at,length:next.length-before});cursor=at;}
         next+=source.slice(cursor);
@@ -3926,11 +3927,14 @@ function createSelectedImageController({document:doc,getContext,settings,generat
     const button=doc.createElement('button');button.type='button';button.className='pc-selection-image';button.textContent='为这段生图';button.hidden=true;mount(button);
     const current=s=>{const c=getContext();return !stopped&&key(c)===s.chatKey&&c.chat?.[s.id]===s.msg&&s.msg.mes===s.source&&s.msg.swipe_id===s.swipe;};
     const element=node=>node?.nodeType===1?node:node?.parentElement;
+    // 楼层正文在 iframe 里时，iframe 的 body 当作这一楼的正文区域
+    const hostOf=el=>el?.closest?.('.mes_text')||(el&&el.ownerDocument&&el.ownerDocument!==doc&&el.ownerDocument.defaultView?.frameElement?.closest?.('.mes_text')?el.ownerDocument.body:null);
+    const frames=new Set();
     const excluded='.pc-marker-slot,.custom-pc-marker-slot,.pc-image-actions,a,button,input,textarea,select,img,video,audio,details,script,style,[contenteditable="true"]';
     function remember(range,text){
-        const a=element(range.startContainer),b=element(range.endContainer),host=a?.closest('.mes_text');
-        if(!host||host!==b?.closest('.mes_text')||a.closest(excluded)||b.closest(excluded)){button.hidden=true;snapshot=null;return false;}
-        const floor=host.closest('.mes[mesid]'),id=Number(floor?.getAttribute('mesid')),c=getContext(),msg=c.chat?.[id];
+        const a=element(range.startContainer),b=element(range.endContainer),host=hostOf(a);
+        if(!host||host!==hostOf(b)||a.closest(excluded)||b.closest(excluded)){button.hidden=true;snapshot=null;return false;}
+        const floor=host.closest('.mes[mesid]')||host.ownerDocument?.defaultView?.frameElement?.closest('.mes[mesid]'),id=Number(floor?.getAttribute('mesid')),c=getContext(),msg=c.chat?.[id];
         if(!floor||text.length<4||!Number.isInteger(id)||!msg||msg.is_system){button.hidden=true;snapshot=null;return false;}
         const prefix=range.cloneRange();prefix.selectNodeContents(host);prefix.setEnd(range.startContainer,range.startOffset);
         const before=selectionTextMap(prefix.toString()).normalized,needle=selectionTextMap(text).normalized;
@@ -3944,11 +3948,11 @@ function createSelectedImageController({document:doc,getContext,settings,generat
             text=raw;
             for(let n=0;n<30;n++){const again=locateSelectedText(source,text,{...cfg,occurrence:n});if(!again)break;if(again.from===location.from){occurrence=n;Object.assign(location,again);break;}}
         }
-        snapshot={id,msg,source,swipe:msg.swipe_id,chatKey:key(c),text,occurrence,...location};button.hidden=false;return true;
+        snapshot={id,msg,source,swipe:msg.swipe_id,chatKey:key(c),text,occurrence,...location,frame:host.ownerDocument!==doc};button.hidden=false;return true;
     }
-    function capture(){
+    function capture(w=win){
         if(stopped||panel||busy)return;
-        const selection=win?.getSelection?.();
+        const selection=w?.getSelection?.();
         if(!selection||selection.isCollapsed||!selection.rangeCount){button.hidden=true;snapshot=null;return;}
         remember(selection.getRangeAt(0),selection.toString().trim());
     }
@@ -3956,25 +3960,25 @@ function createSelectedImageController({document:doc,getContext,settings,generat
     let lastTap=null;
     function clickParagraph(event){
         if(stopped||panel||busy||event.defaultPrevented)return;
-        const target=element(event.target),host=target?.closest('.mes_text');
+        const target=element(event.target),host=hostOf(target),view=target?.ownerDocument?.defaultView||win;
         if(!host||target.closest(excluded)){lastTap=null;return;}
         const block=target.closest('p,li,blockquote');
         const paragraph=block||(host.querySelector('p,li,blockquote')?null:host);
         const now=Date.now();
         const twice=!!paragraph&&(event.detail===2||(lastTap&&lastTap.paragraph===paragraph&&now-lastTap.at<400));
         lastTap=twice?null:{paragraph,at:now};
-        const selection=win?.getSelection?.();
-        if(!twice){if(selection&&!selection.isCollapsed)capture();return;}
+        const selection=view?.getSelection?.();
+        if(!twice){if(selection&&!selection.isCollapsed)capture(view);return;}
         // 电脑上双击会顺手选中一个词，清掉，按整段处理
         selection?.removeAllRanges?.();
         if(!host.contains(paragraph))return;
-        const range=doc.createRange();range.selectNodeContents(paragraph);
+        const range=(target.ownerDocument||doc).createRange();range.selectNodeContents(paragraph);
         let text=range.toString().trim();
         if(paragraph.querySelector(excluded)){const copy=paragraph.cloneNode(true);copy.querySelectorAll('.pc-marker-slot,.custom-pc-marker-slot,.pc-image-actions,button,input,textarea,select,img,video,audio,details,script,style').forEach(n=>n.remove());text=copy.textContent.trim();}
         if(remember(range,text))openDialog();
         else if(selectionTextMap(text).normalized.length>=4)notify('这段在聊天原文里对不上（可能被显示正则改得太多），换一段试试');
     }
-    const schedule=()=>{clearTimeout(timer);timer=setTimeout(capture,120);};
+    const schedule=e=>{const t=e?.target,w=(t?.nodeType===9?t:t?.ownerDocument)?.defaultView||win;clearTimeout(timer);timer=setTimeout(()=>capture(w),120);};
     const preserve=e=>{if(e.type==='mousedown'||e.pointerType==='mouse')e.preventDefault();};
     button.addEventListener('pointerdown',preserve);button.addEventListener('mousedown',preserve);
     function dismiss(){panel?.remove();panel=null;snapshot=null;button.hidden=true;}
@@ -4016,7 +4020,13 @@ function createSelectedImageController({document:doc,getContext,settings,generat
     const escape=e=>{if(e.key==='Escape')dismiss();};
     for(const event of ['selectionchange','pointerup','touchend','keyup'])doc.addEventListener(event,schedule);
     doc.addEventListener('keydown',escape);
-    return {capture,reset:dismiss,stop(){stopped=true;clearTimeout(timer);for(const event of ['selectionchange','pointerup','touchend','keyup'])doc.removeEventListener(event,schedule);doc.removeEventListener('keydown',escape);doc.removeEventListener('click',clickParagraph);dismiss();button.remove();style.remove();}};
+    /** 楼层 iframe 里的文档也挂上双击 / 选段监听 */
+    function attachFrame(fd){
+        if(stopped||!fd||fd===doc||frames.has(fd))return;
+        frames.add(fd);fd.addEventListener('click',clickParagraph);fd.addEventListener('keydown',escape);
+        for(const event of ['selectionchange','pointerup','touchend','keyup'])fd.addEventListener(event,schedule);
+    }
+    return {capture,attachFrame,reset:dismiss,stop(){stopped=true;for(const fd of frames){try{fd.removeEventListener('click',clickParagraph);fd.removeEventListener('keydown',escape);for(const event of ['selectionchange','pointerup','touchend','keyup'])fd.removeEventListener(event,schedule);}catch{}}frames.clear();clearTimeout(timer);for(const event of ['selectionchange','pointerup','touchend','keyup'])doc.removeEventListener(event,schedule);doc.removeEventListener('keydown',escape);doc.removeEventListener('click',clickParagraph);dismiss();button.remove();style.remove();}};
 }
 
 let illustrationLastRequest = null;
@@ -4209,7 +4219,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.14（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.15（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -4294,7 +4304,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.14';
+globalThis.__PC_VERSION = '0.9.15';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -5780,6 +5790,38 @@ function toBraces(text, max = 4) {
 /** 正面里写成负权重的词（-1.5::cel shading::）：转写时挪进负面 */
 function negWeighted(text) { return [...String(text || '').matchAll(/(?:^|[^\w.])-\d+(?:\.\d+)?::([\s\S]*?)::/g)].map(m => m[1].trim().replace(/^,\s*|,\s*$/g, '')).filter(Boolean); }
 var pcBracesToasted = false;
+/** V5 精确参考的桶尺寸：高 1024～4096（每 64 一档），宽取 100 万像素以内最大的 64 倍数，再加上横过来的（NovelAI 网页端的表） */
+const PC_V5_REF_BUCKETS = Array.from({ length: 49 }, (_, i) => 1024 + i * 64).flatMap(h => { const w = Math.floor(1048576 / h / 64) * 64; return w === h ? [[w, h]] : [[w, h], [h, w]]; });
+function pcV5RefBucket(w, h) { const r = Math.log(w / h); return PC_V5_REF_BUCKETS.reduce((a, b) => Math.abs(r - Math.log(b[0] / b[1])) < Math.abs(r - Math.log(a[0] / a[1])) ? b : a); }
+/** 4.5 的强度 0～1 换成 V5 的 1～5 */
+function pcV5RefStrength(v) { const n = Number(v); return Math.round(Math.min(5, Math.max(1, 1 + 4 * (Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0.6))) * 100) / 100; }
+/** 存着的参考图（4.5 补过白边）→ 去白边 → 铺满 V5 桶尺寸、居中裁切 → PNG；顺手把透明度 254/1 抹成 255/0（免得被当成隐写信息） */
+async function pcV5RefImage(b64) {
+    const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => bad(new Error('角色参考图打不开')); i.src = 'data:image/png;base64,' + b64; });
+    const W = img.naturalWidth, H = img.naturalHeight;
+    const src = document.createElement('canvas'); src.width = W; src.height = H;
+    const sc = src.getContext('2d', { willReadFrequently: true }); sc.drawImage(img, 0, 0);
+    let x0 = 0, y0 = 0, x1 = W - 1, y1 = H - 1;
+    if ([[1024, 1536], [1472, 1472], [1536, 1024]].some(([w, h]) => w === W && h === H)) {
+        const px = sc.getImageData(0, 0, W, H).data;
+        const white = (x, y) => { const k = (y * W + x) * 4; return px[k + 3] < 8 || (px[k] >= 244 && px[k + 1] >= 244 && px[k + 2] >= 244); };
+        const row = y => { for (let x = 0; x < W; x += 2) if (!white(x, y)) return false; return true; };
+        const col = x => { for (let y = 0; y < H; y += 2) if (!white(x, y)) return false; return true; };
+        while (y0 < y1 && row(y0)) y0++; while (y1 > y0 && row(y1)) y1--;
+        while (x0 < x1 && col(x0)) x0++; while (x1 > x0 && col(x1)) x1--;
+        if (x1 - x0 < 32 || y1 - y0 < 32) { x0 = 0; y0 = 0; x1 = W - 1; y1 = H - 1; }
+    }
+    const sw = x1 - x0 + 1, sh = y1 - y0 + 1, [bw, bh] = pcV5RefBucket(sw, sh);
+    const out = document.createElement('canvas'); out.width = bw; out.height = bh;
+    const oc = out.getContext('2d', { willReadFrequently: true }); oc.imageSmoothingQuality = 'high';
+    const k = Math.max(bw / sw, bh / sh), dw = sw * k, dh = sh * k;
+    oc.drawImage(src, x0, y0, sw, sh, (bw - dw) / 2, (bh - dh) / 2, dw, dh);
+    const data = oc.getImageData(0, 0, bw, bh);
+    for (let i = 3; i < data.data.length; i += 4) { if (data.data[i] === 254) data.data[i] = 255; else if (data.data[i] === 1) data.data[i] = 0; }
+    oc.putImageData(data, 0, 0);
+    return out.toDataURL('image/png').split(',')[1];
+}
+
 function buildParameters({ positive, negative, width, height, seed, chars = [], refs = null, director = null, comic = false }) {
     chars=normalizeNaiChars(chars);
     positive = (positive == null ? positive : String(positive).replace(/([A-Za-z_\])}])(\d+(?:\.\d+)?)::/g, '$1$2 ::')); negative = (negative == null ? negative : String(negative).replace(/([A-Za-z_\])}])(\d+(?:\.\d+)?)::/g, '$1$2 ::')); chars = chars.map(c => ({ ...c, prompt: (c.prompt == null ? c.prompt : String(c.prompt).replace(/([A-Za-z_\])}])(\d+(?:\.\d+)?)::/g, '$1$2 ::')), uc: (c.uc == null ? c.uc : String(c.uc).replace(/([A-Za-z_\])}])(\d+(?:\.\d+)?)::/g, '$1$2 ::')) }));
@@ -5851,13 +5893,14 @@ function buildParameters({ positive, negative, width, height, seed, chars = [], 
         if (!p.reference_image_multiple_cached?.length) delete p.reference_image_multiple_cached;
     }
     if (p.sampler === 'k_euler_ancestral') { p.deliberate_euler_ancestral_bug = false; p.prefer_brownian = true; }
-    if (director?.length && model.includes('4-5')) {
-        // 角色参考（只有 4.5 能用，而且不能和氛围一起用）
+    if (director?.length && (model.includes('4-5') || isV5)) {
+        // 角色参考（4.5 和 V5 能用，不能和氛围一起用）
         p.director_reference_images_cached = director.map(r => ({ cache_secret_key: r.key, data: r.data }));
-        p.director_reference_descriptions = director.map(r => ({ caption: { base_caption: r.type === 'both' ? 'character&style' : r.type === 'style' ? 'style' : 'character', char_captions: [] }, legacy_uc: false }));
+        p.director_reference_descriptions = director.map(r => ({ caption: { base_caption: r.type === 'both' ? (isV5 ? 'character&style_anyoutfit' : 'character&style') : r.type === 'style' ? 'style' : r.type === 'outfit' && isV5 ? 'costume' : 'character', char_captions: [] }, legacy_uc: false }));
         p.director_reference_information_extracted = director.map(() => 1);
-        p.director_reference_strength_values = director.map(r => r.strength);
-        p.director_reference_secondary_strength_values = director.map(r => Math.round((1 - r.strength) * 1000) / 1000);
+        p.director_reference_strength_values = director.map(r => isV5 ? pcV5RefStrength(r.strength) : r.strength);
+        // V5 没有保真度：NovelAI 网页端固定发 0
+        p.director_reference_secondary_strength_values = director.map(r => isV5 ? 0 : Math.round((1 - r.strength) * 1000) / 1000);
         refs = null;
     }
     if (refs?.images?.length) {
@@ -6373,6 +6416,7 @@ async function generateRequestInner(opts, recordNai = () => {}, responseInfo = {
     const model = opts.comic ? comicNaiModel(s) : s.novelaimode;
     if (opts.comic && s.naiMode === 'tavern') throw new Error('漫画要用自己的 NovelAI key：酒馆通道画不了分人物和画进图里的文字。到智库「设置 → NovelAI」改成自己填 key');
     opts = { ...opts, positive: (opts.positive == null ? opts.positive : String(opts.positive).replace(/([A-Za-z_\])}])(\d+(?:\.\d+)?)::/g, '$1$2 ::')), negative: (opts.negative == null ? opts.negative : String(opts.negative).replace(/([A-Za-z_\])}])(\d+(?:\.\d+)?)::/g, '$1$2 ::')) };
+    if (opts.director?.length && /nai-diffusion-5/.test(model)) opts = { ...opts, director: await Promise.all(opts.director.map(async r => ({ ...r, data: await pcV5RefImage(r.data) }))) };
     const params = buildParameters(opts);
     { const pcPos = params.v4_prompt?.caption?.base_caption; if (typeof pcPos === 'string' && pcPos !== opts.positive && countWeightBlocks(opts.positive) > countWeightBlocks(pcPos)) opts = { ...opts, positive: pcPos, negative: params.negative_prompt ?? opts.negative }; }
     // 垫图（img2img）：底图已经裁成这次的尺寸
@@ -6787,7 +6831,7 @@ function parseVibeFile(json) {
 
 function charRefSupported() {
     const s = settings();
-    return s.naiMode === 'gpt' ? String(s.gptRefs) !== 'false' : s.naiMode !== 'tavern' && s.novelaimode.includes('4-5') && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');
+    return s.naiMode === 'gpt' ? String(s.gptRefs) !== 'false' : s.naiMode !== 'tavern' && /4-5|nai-diffusion-5/.test(s.novelaimode) && !(s.naiMode === 'site' && String(s.naiSiteSimple) === 'true');
 }
 
 // ───────────── 局部重绘 ─────────────
@@ -8982,7 +9026,7 @@ const PC_THINK_RE=/<(think[\w-]*|thoughts?|reasoning|reason|cot|inner[_-]?though
 function pcMarkerSkipRanges(text){
     const t=String(text||''),out=[];
     for(const m of t.matchAll(PC_THINK_RE))out.push([m.index,m.index+m[0].length]);
-    for(const m of t.matchAll(/```[\s\S]*?(?:```|$)/g))out.push([m.index,m.index+m[0].length]);
+    for(const m of t.matchAll(/```[\s\S]*?(?:```|$)/g)){if(/<(?:!doctype\s+html|html\b|body\b)/i.test(m[0]))continue;out.push([m.index,m.index+m[0].length]);}
     for(const m of t.matchAll(/`[^`\n]+`/g))out.push([m.index,m.index+m[0].length]);
     return out;
 }
@@ -9055,7 +9099,14 @@ function createMarkerController({context,getData,generate,upload,notify,document
         if(!msg)return;
         decorateImages(id,msg);
         const tokens=parseImageMarkers(msg.mes,cfg.start,cfg.end);
-        const slots=doc.querySelectorAll(`.mes[mesid="${Number(id)}"] .mes_text :is(.pc-marker-slot,.custom-pc-marker-slot)`);
+        const slots=[...doc.querySelectorAll(`.mes[mesid="${Number(id)}"] .mes_text :is(.pc-marker-slot,.custom-pc-marker-slot,iframe)`)].flatMap(el=>{
+            if(el.tagName!=='IFRAME')return [el];
+            let fd=null;try{fd=el.contentDocument;}catch{}
+            if(!fd?.body)return [];
+            const found=[...fd.querySelectorAll(':is(.pc-marker-slot,.custom-pc-marker-slot)')];
+            if(found.length&&!fd.getElementById('pc-frame-style')){const st=fd.createElement('style');st.id='pc-frame-style';st.textContent='.pc-marker-slot{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:8px 0;font-size:12px;line-height:1.5;text-shadow:none}.pc-marker-slot details{flex:1;min-width:120px}.pc-marker-slot summary{cursor:pointer}.pc-marker-slot pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;scrollbar-width:none;font-size:12px}.pc-marker-slot pre::-webkit-scrollbar{display:none}.pc-marker-slot .pc-result-collapse{flex:0 0 100%;min-width:0}.pc-result-collapse>summary{cursor:pointer;opacity:.75}.pc-result-image{display:block;max-width:100%;max-height:520px;object-fit:contain;cursor:zoom-in;margin:6px 0}.pc-marker-generate{cursor:pointer;padding:6px 12px;border-radius:8px;color:inherit;background:transparent;border:1px solid #888;font:inherit;font-size:12px}.pc-marker-generate:disabled{opacity:.6;cursor:wait}.pc-version-nav{display:flex;gap:8px;align-items:center;justify-content:center;font-size:12px}.pc-version-nav button{font:inherit;color:inherit;background:transparent;border:1px solid #888;border-radius:999px;padding:2px 10px;cursor:pointer}';(fd.head||fd.documentElement).appendChild(st);}
+            return found;
+        });
         slots.forEach((slot,index)=>{
             slot.classList.add('pc-marker-slot');
             const token=tokens[index];if(!token)return;
@@ -11818,8 +11869,8 @@ function viewCharEdit(d) {
 
     <section class="pc-card pc-pad pc-mt">
       <b>长相参考</b>
-      <div class="pc-dim small">绑一组角色参考图，聊天生图带上${esc(c.name)}时，就照着这组图画出同一个人。只有 NAI 4.5 能用；用上时那张图不加氛围（NovelAI 不能两个一起用）。</div>
-      ${!N.charRefSupported() ? '<div class="pc-warn pc-mt-s">现在用不了：要选 NAI 4.5 模型，而且不能是「用酒馆里的 key」。</div>' : ''}
+      <div class="pc-dim small">绑一组角色参考图，聊天生图带上${esc(c.name)}时，就照着这组图画出同一个人。NAI 4.5 和 V5 能用；用上时那张图不加氛围（NovelAI 不能两个一起用）。</div>
+      ${!N.charRefSupported() ? '<div class="pc-warn pc-mt-s">现在用不了：要选 NAI 4.5 或 V5 模型，而且不能是「用酒馆里的 key」。</div>' : ''}
       ${(() => {
         const g = c.charRef && d.charRefGroups?.[c.charRef];
         const TYPES = [['character', '只参考长相'], ['both', '长相和画风'], ['style', '只参考画风']];
@@ -12421,10 +12472,10 @@ function viewCharRef(d) {
     return `${vibeTabs()}
     <section class="pc-card pc-pad pc-row-between pc-mt">
       <div class="pc-grow"><b class="pc-big">正在用：${cur ? esc(cur.name) : '不用角色参考'}</b>
-        <div class="pc-dim small">给一张角色图，让 NovelAI 照着画出同一个人。只有 NAI 4.5 能用；开着时氛围会暂停。</div></div>
+        <div class="pc-dim small">给一张角色图，让 NovelAI 照着画出同一个人。NAI 4.5 和 V5 能用；开着时氛围会暂停。</div></div>
       <button class="pc-add" data-act="crnew" aria-label="新建角色参考组">＋</button>
     </section>
-    ${!N.charRefSupported() ? '<div class="pc-card pc-pad pc-mt pc-warn-card">现在用不了：要选 NAI 4.5 模型，而且不能是「用酒馆里的 key」。</div>' : ''}
+    ${!N.charRefSupported() ? '<div class="pc-card pc-pad pc-mt pc-warn-card">现在用不了：要选 NAI 4.5 或 V5 模型，而且不能是「用酒馆里的 key」。</div>' : ''}
     <div class="pc-grid2 pc-mt">${groups.map(card).join('')}
       <article class="pc-ticket ${!cur ? 'active' : ''}" data-act="cruse" data-id="">
         <div class="pc-ticket-img"><span>不加参考</span></div>
@@ -14887,7 +14938,7 @@ function batchWhoCard(d) {
       ${rest.length ? `<div id="pc-bcharmore">${fold('bcharmore', cast.length ? '别的角色' : '角色', rest.length + ' 个' + (rest.filter(c => sel.has(c.key)).length ? ` · 选了 ${rest.filter(c => sel.has(c.key)).length}` : ''), `<label class="pc-search" style="margin:0 0 8px"><span class="pc-sr">搜名字</span>${ICON.search}<input data-bind="batchCharQ" value="${esc(ui.batchCharQ || '')}" placeholder="搜名字"></label>${rest.map(c => row(c).replace('<button ', q && !c.name.toLowerCase().includes(q) ? '<button style="display:none" ' : '<button ')).join('')}`)}</div>` : ''}
       ${!cast.length && !rest.length ? '<div class="pc-dim small">还没有写了外貌的角色，先到「角色」页写外貌。</div>' : ''}
       <div class="pc-label">角色参考</div>
-      <div class="pc-chips wrap"><button class="pc-pill tiny ${b.useRef !== false ? 'on' : 'dashed'}" data-act="batchuseref" data-v="1">绑了就带上</button><button class="pc-pill tiny ${b.useRef === false ? 'on' : 'dashed'}" data-act="batchuseref" data-v="0">不带</button><span class="pc-dim small" style="align-self:center">只有 NAI 4.5 能用</span></div>`}
+      <div class="pc-chips wrap"><button class="pc-pill tiny ${b.useRef !== false ? 'on' : 'dashed'}" data-act="batchuseref" data-v="1">绑了就带上</button><button class="pc-pill tiny ${b.useRef === false ? 'on' : 'dashed'}" data-act="batchuseref" data-v="0">不带</button><span class="pc-dim small" style="align-self:center">NAI 4.5 和 V5 能用</span></div>`}
     </section>`;
 }
 /** 批量里一张图属于哪一行（哪串画师）、哪一列（哪个角色 / 模板） */
@@ -16740,6 +16791,20 @@ async function start() {
     });
     const selectedImages = createSelectedImageController({document:DOC,getContext:()=>SillyTavern.getContext(),settings:()=>__mod_marker.settings(),generate:shot=>illustrationPlanner.selected(shot),notify:message=>toastr.info(message,'智库 · 选段生图'),modal:inner=>__mod_ui.modal(inner)});
     cleanups.push(() => selectedImages.stop());
+    {
+        // 酒馆助手把正文画进 iframe 时：双击 / 选段、生图标记的图片也要进 iframe
+        const hooked = new WeakSet();
+        const ready = f => { let fd = null; try { fd = f.contentDocument; } catch {} if (!fd?.body) return; selectedImages.attachFrame(fd); const id = Number(f.closest('.mes[mesid]')?.getAttribute('mesid')); if (Number.isInteger(id)) { try { __mod_marker.decorate(id); } catch {} } };
+        const hook = f => { if (hooked.has(f)) return; hooked.add(f); f.addEventListener('load', () => ready(f)); ready(f); };
+        let queued = false;
+        const scan = () => { queued = false; DOC.querySelectorAll('#chat .mes_text iframe').forEach(hook); };
+        const later = () => { if (!queued) { queued = true; (DOC.defaultView?.requestAnimationFrame || setTimeout)(scan); } };
+        const chatEl = DOC.getElementById('chat');
+        const watcher = chatEl && typeof MutationObserver === 'function' ? new MutationObserver(later) : null;
+        watcher?.observe(chatEl, { childList: true, subtree: true });
+        scan();
+        cleanups.push(() => watcher?.disconnect());
+    }
     const syncIllust = type => illustrationPlanner.sync(type);
     const illustAfter = id => illustrationPlanner.after(id);
     syncIllust();
