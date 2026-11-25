@@ -50,12 +50,23 @@ function hashText(s) {
 }
 
 /** 一条消息里的所有漫画页：按出现顺序，每页带上它前面的分镜规划 */
+/** AI 写的漫画页整理成标准写法：去掉代码块围栏和前言，全角 ＠，**@page** / - @panel / ### @page / @panel: P1 */
+function pcComicClean(v) {
+    let t = String(v ?? '').replace(/\r\n?/g, '\n').replace(/＠/g, '@');
+    t = t.split('\n').filter(l => !/^\s*(?:`{3,}|~{3,})[\w-]*\s*$/.test(l)).map(l => {
+        const m = /^\s*(?:#{1,6}\s*|[-*+]\s+|>\s*|\d+[.)、]\s*)*(?:\*\*|__)?\s*@(page|panel|character|negative|non_character|position|center)\b\s*(?:\*\*|__)?\s*[:：]?\s*(.*?)\s*(?:\*\*|__)?\s*$/i.exec(l);
+        return m ? '@' + m[1] + (m[2] ? ' ' + m[2] : '') : l;
+    }).join('\n').trim();
+    if (!t.startsWith('{')) { const k = t.search(/^@(?:page|position)\b/im); if (k > 0) t = t.slice(k); }
+    return t;
+}
+
 function comicBlocks(text) {
     const src = String(text || '');
     const blocks = [];
     let last = 0;
     for (const m of src.matchAll(COMIC_BLOCK)) {
-        const inner = m[1].trim();
+        const inner = pcComicClean(m[1]);
         if (!/^\s*@(?:page|position)\b/i.test(inner) && !/^\s*\{[\s\S]*"format"\s*:\s*"nai5-comic"/.test(inner)) { last = m.index + m[0].length; continue; }
         const between = src.slice(last, m.index);
         const plans = [...between.matchAll(PLAN_BLOCK)];
@@ -76,7 +87,7 @@ function roundPlan(text) {
 const clamp01 = n => Math.max(0, Math.min(1, n));
 /** 一段 Text: 前面是画面描述，后面是要画进去的原文 */
 function splitText(value) {
-    const text = String(value || '').trim(), m = /(?:^|\n)[ \t]*Text[ \t]*[:：]/i.exec(text);
+    const text = String(value || '').trim(), m = /(?:^|\n)[ \t]*(?:\*\*)?(?:Text|对白|台词|旁白|文字)(?:\*\*)?[ \t]*[:：](?:\*\*)?/i.exec(text);
     return m ? { visual: text.slice(0, m.index).trim(), text: text.slice(m.index + m[0].length).trim() } : { visual: text, text: '' };
 }
 
@@ -110,7 +121,7 @@ function readSections(body) {
 /** 一页漫画提示词 → 出图要用的东西 */
 function parseComicPage(inner) {
     let data;
-    const body = String(inner || '').trim();
+    const body = pcComicClean(inner);
     if (/^\s*\{/.test(body)) {
         try { const j = JSON.parse(body); data = { page: j.page || {}, panels: Array.isArray(j.panels) ? j.panels.map(p => ({ ...p, characters: (p.characters || []).map(c => ({ id: c.character_id || c.id, positive: c.positive, negative: c.negative, center: c.center })) })) : [], manual: j.position_mode === 'manual' }; }
         catch { return { ok: false, reason: '漫画页 JSON 不完整' }; }
@@ -279,7 +290,7 @@ function rewriteRequest(message, page, requirement) {
 /** AI 的回复里取出新的一页 */
 function parseRewrite(text) {
     const t = String(text || '');
-    const image = [...t.matchAll(COMIC_BLOCK)].map(m => m[1].trim()).find(x => parseComicPage(x).ok);
+    const image = [...t.matchAll(COMIC_BLOCK)].map(m => pcComicClean(m[1])).find(x => parseComicPage(x).ok);
     if (!image) throw new Error('AI 没有按格式写出这一页（缺少 <image>@page …</image>）');
     const plan = /<comic_plan\b[^>]*>([\s\S]*?)<\/comic_plan>/i.exec(t);
     return { image, plan: plan ? plan[1].trim() : '' };
@@ -606,7 +617,7 @@ function parseAdapt(text) {
     const out = [];
     let last = 0;
     for (const m of t.matchAll(COMIC_BLOCK)) {
-        const inner = m[1].trim();
+        const inner = pcComicClean(m[1]);
         if (parseComicPage(inner).ok) {
             const plan = [...t.slice(last, m.index).matchAll(PLAN_BLOCK)].at(-1);
             out.push((plan ? `<comic_plan>\n${plan[1].trim()}\n</comic_plan>\n` : '') + `<image>\n${inner}\n</image>`);
@@ -1045,11 +1056,11 @@ function pcvPickVideo(outputs) {
 }
 /** AI 写的分镜 → 镜头列表 */
 function pcvParseShots(text) {
-    let s = String(text || '').replace(/```(?:json)?/gi, '').trim();
+    let s = String(text || '').replace(/<(think|thinking|reasoning|analysis)\b[^>]*>[\s\S]*?<\/\1>/gi, '').replace(/^[\s\S]*<\/(?:think|thinking|reasoning)>/i, '').replace(/```(?:json)?/gi, '').trim();
     const a = s.indexOf('{'), b = s.lastIndexOf('}');
     if (a < 0 || b < a) throw new Error('AI 没按格式写分镜（没找到 JSON）');
     let j;
-    try { j = JSON.parse(s.slice(a, b + 1)); } catch { throw new Error('AI 写的分镜 JSON 坏了，再写一次试试'); }
+    try { j = JSON.parse(s.slice(a, b + 1)); } catch { try { j = JSON.parse(s.slice(a, b + 1).replace(/,(\s*[}\]])/g, '$1')); } catch { throw new Error('AI 写的分镜 JSON 坏了，再写一次试试'); } }
     const raw = Array.isArray(j) ? j : j.shots;
     if (!Array.isArray(raw) || !raw.length) throw new Error('AI 写的分镜里没有镜头');
     const shots = raw.map((x, i) => ({
@@ -3607,44 +3618,47 @@ function compileIllustrationPlan(plan, roster, story) {
         if (typeof plan?.[key] !== 'string' || !plan[key].trim()) throw new Error(`画面方案缺少 ${key}`);
         return plan[key].trim();
     };
-    let source = required('source'); const title = required('title'), moment = required('moment');
+    let source = required('source'); const title = String(plan?.title ?? '').trim() || source.slice(0, 12), moment = String(plan?.moment ?? '').trim() || title;
     if (typeof story === 'string' && !story.includes(source)) source = pcLooseAnchor(story, source) || source;
     if (source.length < 4 || (typeof story === 'string' && !story.includes(source))) throw new Error('画面定位句不在正文中，请重新选择瞬间');
-    const rating = required('rating').toLowerCase();
-    if (!['sfw', 'nsfw'].includes(rating)) throw new Error('画面分级必须是 sfw 或 nsfw');
+    const ratingRaw = String(plan?.rating ?? '').trim().toLowerCase().replace(/^rating\s*[:：]\s*/, '');
+    const rating = /^(?:nsfw|explicit|questionable|r-?18\+?|adult|色情|成人)$/.test(ratingRaw) ? 'nsfw' : /^(?:sfw|safe|general|sensitive|normal|全年龄|普通)?$/.test(ratingRaw) ? 'sfw' : '';
+    if (!rating) throw new Error('画面分级必须是 sfw 或 nsfw');
     if (!Array.isArray(plan.characters)) throw new Error('画面方案缺少入画人物数组 characters');
     const clean = value => {
         if (value == null) return '';
-        if (typeof value !== 'string' || /[㐀-鿿豈-﫿$<>\n]/.test(value)) throw new Error('画面标签需要英文，人物名字请放在 name 字段');
+        if (Array.isArray(value)) value = value.join(', ');
+        if (typeof value !== 'string') value = typeof value === 'number' ? String(value) : '';
+        // 中文、换行、全角标点不再让整张图作废：中文括注去掉，全角逗号换成英文逗号，含中文的词扔掉
+        value = value.replace(/[（(][^()（）]*[㐀-鿿豈-﫿][^()（）]*[）)]/g, '').replace(/[$<>]/g, '').replace(/[\n，、；]/g, ',');
         // Count and rating are compiled once, from structured fields.
-        return value.split(/[,;]+/).map(s => s.trim()).filter(s => s && !/^(?:\d+(?:boys?|girls?|others?)|solo|no humans|sfw|nsfw)$/i.test(s)).join(', ');
+        return value.split(/[,;]+/).filter(t => !/[㐀-鿿豈-﫿]/.test(t)).map(s => s.trim()).filter(s => s && !/^(?:\d+(?:boys?|girls?|others?)|solo|no humans|sfw|nsfw)$/i.test(s)).join(', ');
     };
-    const composition = plan.composition;
-    if (!composition || typeof composition !== 'object') throw new Error('画面方案缺少镜头构图 composition');
-    for (const field of ['shot', 'camera', 'layout', 'lighting']) if (!clean(composition[field])) throw new Error(`镜头构图缺少 ${field}`);
+    const composition = plan.composition && typeof plan.composition === 'object' ? plan.composition : {};
     const picks = [], cast = [], seen = new Set(), counts = {girl:0,boy:0,other:0};
     for (let person of plan.characters) {
-        if (!person || typeof person.name !== 'string' || !person.name.trim() || /[$\n]/.test(person.name)) throw new Error('入画人物需要有效名字');
+        if (!person || typeof person.name !== 'string' || !person.name.replace(/[$\n]/g, '').trim()) continue;
+        person = { ...person, name: person.name.replace(/[$\n]/g, '').trim() };
         // registered 只是模型的判断：在角色页找得到才算登记；找不到、没开、没写外貌都照样画
         let char = person.registered === false ? null : resolveImageCharacters('$' + person.name + '-sfw-upperbody$', roster).picks[0]?.char;
         if (char && !char.unregistered) cast.push(char);
         else { char = { name: person.name, appearance: [], outfits: [], outfitMode: 'story', negative: '', unregistered: true }; person = { ...person, registered: false }; }
         const identity = char.key || person.name.normalize('NFKC').replace(/\s+/g, '').toLowerCase();
-        if (seen.has(identity)) throw new Error('同一人物在画面名单中出现两次，请合并动作');
+        if (seen.has(identity)) { if (cast.at(-1) === char && cast.indexOf(char) < cast.length - 1) cast.pop(); continue; }
         seen.add(identity);
         const registeredGender = (char.appearance || []).map(t => t.en?.trim().toLowerCase()).find(t => /^1(?:girl|boy|other)$/.test(t));
-        let gender = registeredGender?.slice(1) || String(person.gender || '').toLowerCase().replace(/s$/, '');
+        let gender = registeredGender?.slice(1) || (g => /^(?:girl|female|woman|women|lady|f|女|女性|女孩|少女)$/.test(g) ? 'girl' : /^(?:boy|male|man|men|m|男|男性|男孩|少年)$/.test(g) ? 'boy' : g)(String(person.gender || '').trim().toLowerCase().replace(/s$/, ''));
         if (!Object.hasOwn(counts, gender)) gender = 'other';
         counts[gender]++;
         // 站位缺了或写错就用默认的，不为这个卡住出图
-        const raw = person.position || {}, ok = n => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 1;
+        const raw = Object.fromEntries(Object.entries(person.position && typeof person.position === 'object' ? person.position : {}).map(([k, v]) => [k, k === 'depth' ? String(v ?? '').trim().toLowerCase() : (typeof v === 'string' && v.trim() !== '' && Number.isFinite(+v) ? +v : v)])), ok = n => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 1;
         const pos = { x: ok(raw.x) ? raw.x : (picks.length + 1) / (plan.characters.length + 1), y: ok(raw.y) ? raw.y : 0.5, depth: ['foreground','midground','background'].includes(raw.depth) ? raw.depth : '' };
         const tags = [person.registered ? '' : person.appearance, person.pose, person.action, person.expression, person.gaze,
             char.outfitMode === 'fixed' ? '' : person.outfit, pos.x<0.4?'on left':pos.x>0.6?'on right':'centered', pos.depth, person.tags].map(clean).filter(Boolean).join(', ');
         picks.push({ char, tags, x:pos.x, y:pos.y });
     }
     const count = picks.length ? Object.entries(counts).filter(([,n])=>n).map(([g,n])=>`${n}${g}${n>1?'s':''}`).join(', ') : 'no humans';
-    const scene = [rating, count, clean(required('scene')), ...['shot','camera','layout','lighting'].map(k=>clean(composition[k])), clean(plan.interaction)].filter(Boolean).join(', ');
+    const scene = [rating, count, clean(plan.scene), ...['shot','camera','layout','lighting'].map(k=>clean(composition[k])), clean(plan.interaction)].filter(Boolean).join(', ');
     return { scene, picks, cast, summary:{source,title,moment,rating} };
 }
 
@@ -3973,7 +3987,9 @@ function resolveImageCharacters(prompt, roster) {
     const normalize = s => String(s).normalize('NFKC').replace(/\s+/g, '').toLowerCase();
     const clean = s => s.trim().replace(/^[,;\s]+|[,;\s]+$/g, '');
     const matchCharacter = name => {
-        const found = roster.filter(row => imageCharacterNames(row.char).some(n => normalize(n) === normalize(name)));
+        const bare = v => normalize(v).replace(/[（(【\[][^）)】\]]*[）)】\]]/g, '');
+        let found = roster.filter(row => imageCharacterNames(row.char).some(n => normalize(n) === normalize(name)));
+        if (!found.length && bare(name)) found = roster.filter(row => imageCharacterNames(row.char).some(n => bare(n) === bare(name)));
         const enabled = found.filter(row => row.on);
         if (enabled.length > 1) throw new Error(`角色「${name}」匹配到多人，请在角色页设置不同的名字或别名`);
         // 没登记或没开的人照样画：不带外貌和参考图，按这张图里写的标签画
@@ -4082,6 +4098,22 @@ function safeImageInsertionPoint(text, at) {
     const hit=imageProtectedRanges(text).find(([a,b])=>at>a&&at<b);
     return hit?hit[0]:at;
 }
+/** 楼层原文里找定位句：跳过 HTML 标签、空格和标点；对不上时用最长的前段/后段。返回句尾在原文里的位置，找不到返回 -1 */
+function pcLooseIndex(text, sentence, from = 0, to = text.length) {
+    const keep = c => /[\p{L}\p{N}]/u.test(c), low = c => { const l = c.toLowerCase(); return l.length === 1 ? l : c; };
+    let ns = ''; const map = [];
+    for (let i = from; i < to;) {
+        if (text[i] === '<') { const m = /^<!--[\s\S]*?-->|^<\/?[a-zA-Z][^>]*>/.exec(text.slice(i, i + 400)); if (m) { i += m[0].length; continue; } }
+        const c = text[i]; if (keep(c)) { ns += low(c); map.push(i); } i++;
+    }
+    let na = ''; for (const c of String(sentence || '')) if (keep(c)) na += low(c);
+    if (na.length < 4) return -1;
+    const find = t => { const k = ns.indexOf(t); return k < 0 ? -1 : map[k + t.length - 1] + 1; };
+    let r = find(na); if (r >= 0) return r;
+    for (let len = na.length - 1; len >= Math.max(8, Math.ceil(na.length / 2)); len--) { r = find(na.slice(0, len)); if (r < 0) r = find(na.slice(-len)); if (r >= 0) return r; }
+    return -1;
+}
+
 function imageInsertionPoint(text, sentence) {
     const fences=imageProtectedRanges(text),inFence=at=>fences.some(([a,b])=>at>=a&&at<b);
     const blocks=[...text.matchAll(/<content\b[^>]*>([\s\S]*?)<\/content\s*>/gi)].filter(m=>!inFence(m.index));
@@ -4100,13 +4132,14 @@ function imageInsertionPoint(text, sentence) {
             from=i+term.length;
         }
     }
+    for(const range of ranges){const hit=pcLooseIndex(text,s,range.start,range.start+range.text.length);if(hit<0||inFence(hit-1))continue;const nl=text.indexOf('\n',hit);let at=Math.min(nl<0?text.length:nl,range.start+range.text.length);const boundary=fences.find(([a])=>a>=hit&&a<=at);if(boundary)at=boundary[0];if(!fences.some(([a,b])=>at>a&&at<b))return at;}
     const last=ranges.at(-1);let end=last.start+last.text.trimEnd().length;
     const first=fences.find(([a])=>a>=last.start&&a<=end);
     if(first)end=last.start+text.slice(last.start,first[0]).trimEnd().length;
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.9（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.10（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -4191,7 +4224,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.9';
+globalThis.__PC_VERSION = '0.9.10';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -7545,7 +7578,7 @@ function blockedResponse(j) {
 }
 const blockedError = () => new Error('模型拦截了这次内容（PROHIBITED_CONTENT）：请检查模型的内容限制。');
 function pickJson(raw) {
-    const t = String(raw || '').replace(/<think>[\s\S]*?<\/think>/g, '').replace(/```(?:json)?/g, '');
+    const t = String(raw || '').replace(/<(think|thinking|reasoning|analysis)\b[^>]*>[\s\S]*?<\/\1>/gi, '').replace(/^[\s\S]*<\/(?:think|thinking|reasoning)>/i, '').replace(/```(?:json)?/g, '');
     const a = t.indexOf('{'), b = t.lastIndexOf('}');
     let payload; try { payload = JSON.parse(t); } catch {}
     if (blockedResponse(payload)) throw blockedError();
