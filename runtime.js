@@ -3531,7 +3531,9 @@ const DEFAULT_ILLUSTRATION_PROMPT = `你负责根据小说正文选择插图瞬�
 
 【内容分级】
 对应原文含成人性内容或私密部位裸露时，标记 nsfw，不得漏标，也不得标成 sfw。
-分级与画面描述分开处理；画面标签完整描述非露骨的可见信息。
+分级与画面描述分开处理：先按原文判断分级，再写画面标签。
+nsfw 画面要按原文如实写出当前镜头里看得见的裸露部位、性行为、体位、体液和衣着状态（如 nude、topless、clothes pulled aside、spread legs、sex、missionary、cum、nipples），用 danbooru 标签写全；不要因为是 nsfw 就把标签写得含糊、保守或只写气氛，也不要编原文没有的内容。
+nsfw 画面里的人物一律按成年人描写，不写 loli、shota、child 等表示未成年的词。
 不能仅因角色性别、亲密关系或普通拥抱，就判定为 nsfw。
 
 【画面标签：SFW 和 NSFW 均适用】
@@ -3566,6 +3568,8 @@ function illustrationPrompt(options = {}) {
     if (!p.trim()) return DEFAULT_ILLUSTRATION_PROMPT;
     // 存下来的是旧版默认提示词（玩家没改过）：换成新的「写满张数」
     for (const line of ['遵循输入 imageLimit（玩家设置的最多张数），不自行固定张数。', '按输入 imageLimit 写满张数：正文够长就写满 imageLimit 张，分散在正文前中后不同位置；只有正文太短、实在找不出这么多不同瞬间时才少写。']) if (p.includes(line) && p.replace(line, '必须正好写满输入 imageLimit 张，分散在正文前中后不同位置。正文里的瞬间不够时自己编：同一场景换景别和角度（特写、背影、俯拍）、写在场人物的反应、补正文没细写但合理的前后一刻，直到写满为止，不能少写。') === DEFAULT_ILLUSTRATION_PROMPT) return DEFAULT_ILLUSTRATION_PROMPT;
+    // 0.9.11：旧提示词里「画面标签完整描述非露骨的可见信息」会让 NSFW 图画得很保守，这一句换成新的
+    { const oldLine = "分级与画面描述分开处理；画面标签完整描述非露骨的可见信息。"; if (p.includes(oldLine)) return p.replace(oldLine, "分级与画面描述分开处理：先按原文判断分级，再写画面标签。\nnsfw 画面要按原文如实写出当前镜头里看得见的裸露部位、性行为、体位、体液和衣着状态（如 nude、topless、clothes pulled aside、spread legs、sex、missionary、cum、nipples），用 danbooru 标签写全；不要因为是 nsfw 就把标签写得含糊、保守或只写气氛，也不要编原文没有的内容。\nnsfw 画面里的人物一律按成年人描写，不写 loli、shota、child 等表示未成年的词。"); }
     return p;
 }
 
@@ -4139,7 +4143,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.10（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.11（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -4224,7 +4228,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.10';
+globalThis.__PC_VERSION = '0.9.11';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -8455,11 +8459,11 @@ const tagText = list => (list || []).map(t => t.en).filter(Boolean).join(', ');
 function currentOutfit(c) { return c.outfits.find(o => o.id === c.outfitId) || c.outfits[0] || null; }
 /** 这个角色固定会发的标签（外貌 + 固定的衣服） */
 const fixedTagsAll = (...a) => fixedTags(...a);
-function fixedTags(c, { nsfw = false } = {}) {
+function fixedTags(c, { nsfw = false, nude = false } = {}) {
     const parts = [lookTags(c)];
     // NSFW 身体：只有这张图是 NSFW 时才加
     if (nsfw) parts.push(tagText(c.nsfwBody));
-    if (c.outfitMode === 'fixed') parts.push(tagText(currentOutfit(c)?.tags));
+    if (c.outfitMode === 'fixed' && !nude) parts.push(tagText(currentOutfit(c)?.tags));
     return parts.filter(Boolean).join(', ');
 }
 
@@ -8554,14 +8558,14 @@ function buildChatPrompt(scene, picks, { nsfw = hasNsfwRating(scene) } = {}) {
     const fixedTags = (c, o) => frameTrim(fixedTagsAll(c, o), frame).text;
     const chatNeg = [d.active ? M.ticketNeg(d, d.active) : '', d.options.chatNegative || '', frame && frame.chibi ? CHIBI_NEG : ''].filter(Boolean).join(', ');
     if (d.options.chatNoSplit || !canSplit() || picks.length === 0) {
-        const flat = M.mergeTags(base, ...picks.map(p => [fixedTags(p.char, { nsfw }), p.tags].filter(Boolean).join(', ')));
+        const flat = M.mergeTags(base, ...picks.map(p => [fixedTags(p.char, { nsfw, nude: nsfw && /\b(?:nude|naked|completely nude|topless|bottomless|undressing|undressed|no clothes|clothes removed)\b/i.test(String(p.tags || '')) }), p.tags].filter(Boolean).join(', ')));
         const { positive, negative } = E.composeStudio({ pos: flat, neg: [chatNeg, ...picks.flatMap(p => [p.char.negative, p.uc])].filter(Boolean).join(', ') });
         return { positive, negative, chars: [] };
     }
     const { positive, negative } = E.composeStudio({ pos: base, neg: chatNeg });
     return {
         positive, negative,
-        chars: picks.map(p => ({ prompt: soloize([frame && frame.chibi ? CHIBI_CHAR : '', fixedTags(p.char, { nsfw }), p.tags].filter(Boolean).join(', ')), uc: [p.char.negative, p.uc].filter(Boolean).join(', '), center: { x: snap(p.x), y: snap(p.y) } })),
+        chars: picks.map(p => ({ prompt: soloize([frame && frame.chibi ? CHIBI_CHAR : '', fixedTags(p.char, { nsfw, nude: nsfw && /\b(?:nude|naked|completely nude|topless|bottomless|undressing|undressed|no clothes|clothes removed)\b/i.test(String(p.tags || '')) }), p.tags].filter(Boolean).join(', ')), uc: [p.char.negative, p.uc].filter(Boolean).join(', '), center: { x: snap(p.x), y: snap(p.y) } })),
     };
 }
 
@@ -8582,7 +8586,12 @@ function markerPrompt(prompt, { story } = {}) {
     if (parsed.unknown?.length) toastr.info(`「${parsed.unknown.join('、')}」没在角色页登记（或这次聊天没开），按图里写的标签画`, '智库', { timeOut: 4000 });
     // 画面和角色动作全是空的：多半是写画面的 AI 回复空了，不画（不然会按画师串随便画一张，和正文无关）
     if (!parsed.unknown?.length && !String(parsed.scene || '').replace(/\b(?:nsfw|sfw)\b|[,\s]/gi, '') && !(parsed.picks || []).some(p => String(p.tags || '').trim())) throw new Error('这张图没有画面描述，没画：多半是写画面的 AI 回复空了（带思考的模型把长度用完了）。到智库「设置 → 翻译和 AI」把「回复长度上限」调大，或者换个不带思考的模型');
-    const rating = plan?.rating?.toLowerCase() || (hasNsfwRating(parsed.scene) ? 'nsfw' : undefined);
+    const rating = hasNsfwRating(parsed.scene) ? 'nsfw' : plan ? 'sfw' : undefined;
+    if (rating === 'nsfw') {
+        const minor = /\b(?:loli|lolicon|shota|shotacon|child|children|kid|kids|toddler|preteen|underage|infant|little girl|little boy|young girl|young boy|elementary school(?:er| student)?|kindergarten(?:er)?)\b/gi;
+        const strip = v => String(v || '').replace(minor, '').replace(/,\s*(?=,)/g, '').replace(/^\s*,\s*|\s*,\s*$/g, '').replace(/\s{2,}/g, ' ');
+        parsed.scene = strip(parsed.scene); for (const p of parsed.picks || []) p.tags = strip(p.tags);
+    }
     const built = buildChatPrompt(parsed.scene, parsed.picks, { nsfw: rating === 'nsfw' });
     return { ...built, positive: applyIllustrationRating(built.positive, rating), cast: parsed.cast };
 }
