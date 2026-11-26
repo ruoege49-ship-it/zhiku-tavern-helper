@@ -28,3 +28,8 @@ assert.match(rt,/\.pc-image-preview \.pc-image-dialog\.pc-c-panel\{display:flex;
 assert.match(rt,/close\.className='pc-c-close';close\.textContent='收起';/);
 assert.match(rt,/el\('div','pc-c-label','自己改'\)/);
 console.log('panel-c ok');
+// 0.9.18：「自己改」写中文先转英文标签（V5 直接看中文时不转）
+assert.match(rt,/function pcPromptHasZh\(p\)\{if\(pcV5Chinese\(\)\)return false;/);
+assert.match(rt,/async function pcPromptToTags\(p\)\{/);
+assert.match(rt,/send\.textContent='中文转标签中…'/);
+console.log('panel-zh ok');

@@ -4251,7 +4251,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.17（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.18（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -4336,7 +4336,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.17';
+globalThis.__PC_VERSION = '0.9.18';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -9198,6 +9198,22 @@ function createMarkerController({context,getData,generate,upload,notify,document
         slot._pcSync();
     }
     /** 修改提示词：上面自己改，下面告诉 AI 怎么改（留空就让 AI 换一个画面） */
+    /** 提示词里有没有要转的中文（全角括号里的备注不算；V5 直接看中文时不转） */
+    function pcV5Chinese(){try{const n=__mod_nai.settings();return String(n.novelaimode||'').includes('nai-diffusion-5')&&String(n.v5Chinese)!=='false';}catch{return false;}}
+    function pcPromptHasZh(p){if(pcV5Chinese())return false;return /[\u3400-\u9fff\uf900-\ufaff]/.test(String(p||'').replace(/（[^（）]*）/g,''));}
+    /** 只把含中文的几段转成英文标签，其余原样 */
+    async function pcPromptToTags(p){
+        const parts=String(p).replace(/（[^（）]*）/g,'').split(/([,;，；|\n])/);
+        const zh=/[\u3400-\u9fff\uf900-\ufaff]/;
+        await Promise.all(parts.map(async(t,i)=>{
+            if(i%2||!zh.test(t))return;
+            const m=/^(\s*[A-Za-z][\w ]*[:：]\s*)([\s\S]*)$/.exec(t),head=m?m[1].replace('：',':'):'',body=m?m[2]:t;
+            if(!zh.test(body))return;
+            const out=String(await __mod_translate.translateToTags(body.trim())||'').replace(/\s*\n\s*/g,', ').replace(/^[\s,]+|[\s,]+$/g,'');
+            parts[i]=(t.match(/^\s*/)[0]&&!head?' ':'')+head+out;
+        }));
+        return parts.map((t,i)=>i%2?({'，':',','；':';'}[t]||t):t).join('').replace(/,\s*,/g,',').trim();
+    }
     function pcPromptPanel(id,msg,token,index){
         const source=msg.mes,swipe=msg.swipe_id,{box,dismiss}=dialog();box.classList.add('pc-c-panel');
         const record=findRecord(msg,token),plan=msg.extra?.zhikuIllustrations?.find(item=>item.raw===token.raw)?.plan;
@@ -9213,10 +9229,18 @@ function createMarkerController({context,getData,generate,upload,notify,document
         send.onclick=async()=>{
             if(pending.has(msg))return;
             if(context().chat?.[id]!==msg||msg.mes!==source||msg.swipe_id!==swipe){notify('消息已变化，请重新打开','info');return;}
-            const prompt=input.value.trim();if(!prompt)return;
+            let prompt=input.value.trim().replace(/；/g,';');if(!prompt)return;
+            if(pcPromptHasZh(prompt)){
+                send.disabled=true;send.textContent='中文转标签中…';
+                try{prompt=await pcPromptToTags(prompt);}
+                catch(e){notify('中文转标签失败：'+(e?.message||e),'error');send.disabled=false;send.textContent='按这个出图';return;}
+                input.value=prompt;
+            }
             dismiss();await process(id,{manual:true,tokenIndex:index,promptOverride:prompt});
         };
-        box.append(el('div','pc-c-label','自己改'),input,actions(send));
+        box.append(el('div','pc-c-label','自己改'));
+        if(!pcV5Chinese())box.append(el('div','pc-c-hint','可以直接写中文，出图前会先转成英文标签'));
+        box.append(input,actions(send));
         if(replanner){
             const wish=el('input','pc-c-wish');wish.placeholder='比如：换成特写 / 她回头的那一下 / 换到窗边';
             const ai=el('button','pc-c-btn soft','让 AI 重写');
