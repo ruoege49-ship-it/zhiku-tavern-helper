@@ -4251,7 +4251,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.18（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.19（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -4336,7 +4336,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.18';
+globalThis.__PC_VERSION = '0.9.19';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -5061,20 +5061,32 @@ function recordLibraryDeletes(data, before) {
     const deleted = (data.options.libraryDeleted ||= {});
     for (const key of LIBRARY_MAPS) {
         for (const id of Object.keys(before?.[key] || {})) if (!Object.hasOwn(data[key] || {}, id)) (deleted[key] ||= {})[id] = data.options.savedAt;
-        for (const id of Object.keys(data[key] || {})) if (deleted[key]?.[id]) delete deleted[key][id];
+        for (const id of Object.keys(data[key] || {})) if (deleted[key]?.[id]) {
+            // 删过又加回来：记下复活时间，合并时比磁盘上的旧墓碑新，就不会再被删
+            ((data.options.libraryRevived ||= {})[key] ||= {})[id] = Math.max(Number(data.options.savedAt) || 0, Date.now(), Number(deleted[key][id]) + 1);
+            delete deleted[key][id];
+        }
     }
 }
 function mergeLibraryAdditions(data, other) {
     if (!other) return 0;
-    const deleted = (data.options.libraryDeleted ||= {});
+    const deleted = (data.options.libraryDeleted ||= {}), revived = (data.options.libraryRevived ||= {});
     let added = 0;
     for (const key of LIBRARY_MAPS) {
         const target = data[key] ||= {};
+        for (const [id, at] of Object.entries(other.options?.libraryRevived?.[key] || {})) {
+            if (!Number.isFinite(Number(at)) || Number(at) <= 0) continue;
+            (revived[key] ||= {})[id] = Math.max(Number(revived[key]?.[id]) || 0, Number(at));
+        }
         for (const [id, at] of Object.entries(other.options?.libraryDeleted?.[key] || {})) {
             if (!Number.isFinite(Number(at)) || Number(at) <= 0) continue;
+            if ((Number(revived[key]?.[id]) || 0) >= Number(at)) continue; // 删了之后又加回来过：这个墓碑过期了
             (deleted[key] ||= {})[id] = Math.max(Number(deleted[key]?.[id]) || 0, Number(at));
         }
-        for (const id of Object.keys(deleted[key] || {})) delete target[id];
+        for (const id of Object.keys(deleted[key] || {})) {
+            if ((Number(revived[key]?.[id]) || 0) >= Number(deleted[key][id])) { delete deleted[key][id]; continue; }
+            delete target[id];
+        }
         for (const [id, item] of Object.entries(other[key] || {})) {
             if (['__proto__', 'prototype', 'constructor'].includes(id) || deleted[key]?.[id] || Object.hasOwn(target, id)) continue;
             target[id] = structuredClone(item); added++;
