@@ -111,13 +111,14 @@ import {applyUserWorldbookCompatibility} from './user-worldbook-compat.mjs';
 import {applyReplanCompatibility} from './replan-compat.mjs';
 import {applyPlanDeleteCompatibility} from './plan-delete-compat.mjs';
 import {applySlotCCompatibility} from './slot-c-compat.mjs';
+import {applyPanelCCompatibility} from './panel-c-compat.mjs';
 import {fileURLToPath} from 'node:url';
 process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.9.16';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.9.16');
+patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.9.17';");
+patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.9.17');
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -5540,6 +5541,7 @@ s=applyUserWorldbookCompatibility(s); // 0.9.16：user 外貌也从角色卡世�
 s=applyReplanCompatibility(s); // 0.9.16：每张图多一个「换个画面」，让 AI 重写提示词
 s=applyPlanDeleteCompatibility(s); // 0.9.16：能连提示词删掉一张图，图居中
 s=applySlotCCompatibility(s); // 0.9.16：图的按钮改版（方案 C：角上 ···、小点换版本、修改提示词里能让 AI 改）
+s=applyPanelCCompatibility(s); // 0.9.17：「修改提示词」面板改成纸页风格
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
@@ -5553,10 +5555,10 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',(prefix+s+'\n}\n').replace(/\r\n/g, '\n'));
 // 0.9.6：runtime.js 带版本号加载，更新后浏览器不会再用旧缓存
-fs.writeFileSync(dir+'/index.js',fs.readFileSync('src/index.js','utf8').replace("import('./runtime.js')","import('./runtime.js?v=0.9.16')"));
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.9.16',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.9.16',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/index.js',fs.readFileSync('src/index.js','utf8').replace("import('./runtime.js')","import('./runtime.js?v=0.9.17')"));
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.9.17',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.9.17',private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.9.16 built; storage keys and shared upload preserved.');
+console.log('Extension 0.9.17 built; storage keys and shared upload preserved.');

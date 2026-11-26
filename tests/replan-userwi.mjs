@@ -23,3 +23,8 @@ assert.match(rt,/msg\.extra\.zhikuImages=shiftImageRecords\(rest,tokens,swipe,\[
 assert.match(rt,/\.mes_text \.pc-result-image\{[^}]*margin-left:auto;margin-right:auto\}/);
 assert.match(rt,/\.mes_text \.pc-chat-img\{[^}]*margin-left:auto;margin-right:auto\}/);
 console.log('replan-userwi ok');
+// 0.9.17：修改提示词面板纸页风格
+assert.match(rt,/\.pc-image-preview \.pc-image-dialog\.pc-c-panel\{display:flex;flex-direction:column/);
+assert.match(rt,/close\.className='pc-c-close';close\.textContent='收起';/);
+assert.match(rt,/el\('div','pc-c-label','自己改'\)/);
+console.log('panel-c ok');
