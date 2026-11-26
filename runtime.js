@@ -3713,7 +3713,9 @@ function createIllustrationPlanner({ getContext, getData, settings, roster, askL
         let story = manual?selectedImageStory(source,cfg):imageStoryText(source);
         if (manual && story && !selectionTextMap(story).normalized.includes(selectionTextMap(selection.text).normalized)) story += '\n\n' + selection.text;
         if (!story) return;
-        const req = request('after', story,selection?.text), signature = String(msg.swipe_id) + source + req.system + req.user;
+        const req = request('after', story,selection?.text);
+        if (selection?.replace) { try { const u = JSON.parse(req.user); u.previousImage = { note: selection.wish ? '用户想把这段正文的画面改成：' + selection.wish + '。按这个要求重新写这张图，没提到的地方保持合理' : '用户对这段正文上一次的画面不满意，请换一个不同的瞬间、构图、镜头或动作，不要照抄', ...(selection.previous || {}) }; u.imageLimit = 1; req.user = JSON.stringify(u); } catch {} }
+        const signature = String(msg.swipe_id) + source + req.system + req.user;
         if (!manual && seen.get(msg) === signature) return;
         if(!manual)seen.set(msg,signature);
         const forget=()=>{if(seen.get(msg)===signature)seen.delete(msg);};
@@ -3755,13 +3757,20 @@ function createIllustrationPlanner({ getContext, getData, settings, roster, askL
         const framed=(()=>{try{return [...(globalThis.document?.querySelectorAll(`.mes[mesid="${Number(id)}"] .mes_text iframe`)||[])].some(f=>f.contentDocument?.body);}catch{return false;}})();
         for(const shot of selected){const at=manual?(selection.frame?selection.insertAt:safeImageInsertionPoint(source,selection.insertAt)):(framed?(locateSelectedText(source,shot.anchor,cfg)?.insertAt??imageInsertionPoint(source,shot.anchor)):imageInsertionPoint(source,shot.anchor));if(!Number.isInteger(at)||at<0||at>source.length)throw new Error('选段插入位置无效');insertions.set(at,[...(insertions.get(at)||[]),shot]);}
         let next='',cursor=0;const positions=new Set(),shifts=[];
+        if(selection?.replace){
+            // 换个画面：新标记放在旧标记原来的位置
+            const r=selection.replace,shot=selected[0];selected.length=1;
+            if(source.slice(r.index,r.index+r.raw.length)!==r.raw)throw new Error('这张图的标记位置变了，刷新一下再试');
+            next=source.slice(0,r.index);positions.add(next.length);next+=shot.raw;cursor=r.index+r.raw.length;
+            shifts.push({at:r.index+1,length:shot.raw.length-r.raw.length});insertions.clear();
+        }
         for(const [at,shots] of [...insertions].sort((a,b)=>a[0]-b[0])){next+=source.slice(cursor,at);const before=next.length;for(const shot of shots){next+='\n';positions.add(next.length);next+=shot.raw+'\n';}shifts.push({at,length:next.length-before});cursor=at;}
         next+=source.slice(cursor);
         if(!current())return;
         const swipes=Array.isArray(msg.swipes)&&Number.isInteger(swipe)?msg.swipes:null,oldSwipe=swipes?.[swipe];
         const hadExtra=!!msg.extra;msg.extra||={};const oldPlans=msg.extra.zhikuIllustrations,oldImages=msg.extra.zhikuImages;
         if(manual&&oldImages)msg.extra.zhikuImages=shiftImageRecords(oldImages,parseImageMarkers(source,cfg.start,cfg.end),swipe,shifts);
-        msg.extra.zhikuIllustrations=[...(manual&&Array.isArray(oldPlans)?oldPlans:[]),...selected.filter(s=>s.plan).map(s=>({raw:s.raw,plan:s.plan}))];
+        msg.extra.zhikuIllustrations=[...(manual&&Array.isArray(oldPlans)?oldPlans.filter(p=>!selection?.replace||p.raw!==selection.replace.raw):[]),...selected.filter(s=>s.plan).map(s=>({raw:s.raw,plan:s.plan}))];
         msg.mes=next;if(swipes)swipes[swipe]=next;
         try{await getContext().saveChat();}
         catch(e){msg.mes=source;if(swipes)swipes[swipe]=oldSwipe;if(oldPlans===undefined)delete msg.extra.zhikuIllustrations;else msg.extra.zhikuIllustrations=oldPlans;if(oldImages===undefined)delete msg.extra.zhikuImages;else msg.extra.zhikuImages=oldImages;if(!hadExtra&&!Object.keys(msg.extra).length)delete msg.extra;forget();warn('自动插图存不进聊天：'+e.message);return;}
@@ -3783,7 +3792,30 @@ function createIllustrationPlanner({ getContext, getData, settings, roster, askL
         selectedBusy.add(selection.msg);
         try{return await after(selection.id,selection);}finally{selectedBusy.delete(selection.msg);}
     }
-    return {sync,after,selected,stop(){stopped=true;getContext().setExtensionPrompt?.('zhiku_illust','',1,0,false,0);}};
+    /** 换个画面：按这张图对应的正文段落重新写提示词，替换掉原来的标记 */
+    async function replan(id, token, wish = '') {
+        const c = getContext(), cfg = settings(), msg = c.chat?.[id];
+        if (!msg || !token?.raw) throw new Error('找不到这一楼');
+        if (selectedBusy.has(msg)) throw new Error('这一楼正在出图，等一下再换');
+        const source = String(msg.mes || '');
+        let at = Number(token.index);
+        if (source.slice(at, at + token.raw.length) !== token.raw) { at = source.indexOf(token.raw); if (at < 0) throw new Error('这张图的标记变了，刷新一下再试'); }
+        const rest = source.slice(0, at) + source.slice(at + token.raw.length);
+        const old = msg.extra?.zhikuIllustrations?.find(x => x.raw === token.raw)?.plan;
+        // 对应的正文：优先用上一次方案里的原句，没有就用标记前面最近的一段
+        let text = String(old?.source || '').trim();
+        if (!text || !locateSelectedText(rest, text, cfg)) {
+            const before = source.slice(0, at).replace(/<\/?(?:p|div|br|li|blockquote|content)\b[^>]*>/gi, '\n').replace(/<[^>]+>/g, '');
+            const paras = before.split(/\n+/).map(x => x.trim()).filter(x => selectionTextMap(x).normalized.length >= 4 && !parseImageMarkers(x, cfg.start, cfg.end).length && !x.includes(cfg.start));
+            text = paras.at(-1) || '';
+        }
+        if (!text) throw new Error('找不到这张图对应的正文段落');
+        const previous = old ? { title: old.title, moment: old.moment, scene: old.scene, composition: old.composition } : { prompt: token.raw };
+        selectedBusy.add(msg);
+        try { return await after(id, { id, msg, source, swipe: msg.swipe_id, chatKey: chatKey(c), text, occurrence: 0, insertAt: at, frame: true, replace: { raw: token.raw, index: at }, previous, wish: String(wish || '').trim() }); }
+        finally { selectedBusy.delete(msg); }
+    }
+    return {sync,after,selected,replan,stop(){stopped=true;getContext().setExtensionPrompt?.('zhiku_illust','',1,0,false,0);}};
 }
 
 
@@ -4219,7 +4251,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.15（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.16（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -4304,7 +4336,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.15';
+globalThis.__PC_VERSION = '0.9.16';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -8469,7 +8501,25 @@ async function descOfFull(c, { all = false, choose = null } = {}) {
         const pd = (cx.powerUserSettings || {}).persona_descriptions?.[String(c.key).replace(/^user:/, '')] || {};
         add('人设', pd.description);
         fromBook('人设世界书', await loadBook(pd.lorebook), parts.length ? c.name : '');
+        // 当前角色卡的世界书里写的 user 设定：条目名 / 关键词提到 user 或人设名字的默认带上，其余的打开「自己挑」时能勾
+        const userish = t => { t = String(t || ''); return /\{\{user\}\}|<user>|\buser\b|用户|玩家|主角/i.test(t) || (!!c.name && t.includes(c.name)); };
+        const fromCardBook = (title, entries) => {
+            const list = (Array.isArray(entries) ? entries : Object.values(entries || {})).filter(e => e && !e.disable && e.enabled !== false && String(e.content || '').trim());
+            for (const e of list) cands.push({ title, e, auto: [e.comment, ...(e.key || e.keys || [])].some(userish) });
+        };
+        const nowChar = cx.characterId != null ? cx.characters?.[cx.characterId] : null;
+        if (nowChar?.avatar) {
+            const card = await fullCard(nowChar.avatar), dd = card?.data || {};
+            if (dd.character_book?.entries) { fromCardBook(`「${card?.name || nowChar.name}」卡里的世界书`, dd.character_book.entries); used.push('卡里的世界书'); }
+            const bound = dd.extensions?.world, names = new Set();
+            if (bound) names.add(bound);
+            const chatBook = cx.chatMetadata?.world_info; if (chatBook) names.add(chatBook);
+            try { for (const o of document.querySelectorAll('#world_info option:checked')) if (o.textContent.trim()) names.add(o.textContent.trim()); } catch { /* 没有这个下拉框 */ }
+            if (pd.lorebook) names.delete(pd.lorebook);
+            for (const n of names) { fromCardBook(`世界书「${n}」`, await loadBook(n)); used.push(`世界书「${n}」`); }
+        }
         await flush();
+        globalThis.__zkLog?.('读设定', `${c.name}（user）：共 ${parts.join('').length} 字`, `来源：人设描述；${used.join('，') || '没有世界书'}`);
     } else {
         const side = c.kind === 'side';
         const card = await fullCard(side ? c.card : c.avatar);
@@ -9064,7 +9114,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
     const zkMsgUpdated=id=>{try{const c=context(),ev=c.eventTypes||c.event_types;if(ev?.MESSAGE_UPDATED)Promise.resolve(c.eventSource?.emit?.(ev.MESSAGE_UPDATED,id)).catch(()=>{});}catch{}};
     // 图存在本地浏览器时地址是 idb:xxx，要先换成能显示的地址；换不出来（存在别的设备上）就是空的
     function showUrl(url,apply,missing){Promise.resolve(resolveUrl(url)).then(u=>{if(u)apply(u);else missing?.();},()=>missing?.());}
-    let queue=Promise.resolve(), stopped=false;
+    let queue=Promise.resolve(), stopped=false, replanner=null;
     const pending=new WeakMap(), failed=new WeakMap();
     const imageBindings=new WeakSet(), overlays=new Set(), holds=new Set(), inflight=new Set(), keepOpen=new Set();
     function settings() {
@@ -9093,6 +9143,89 @@ function createMarkerController({context,getData,generate,upload,notify,document
     }
     function state(msg,token){return pending.get(msg)?.get(recordKey(msg,token))?.state;}
     function label(msg,token,record){return state(msg,token)|| (failed.get(msg)?.has(recordKey(msg,token))?'重试生成':record?.url?'重新生成':'生成图片');}
+    /** 方案 C：把 decorate 画好的槽改成「图 + 角上 ··· + 小点」，菜单收在 ··· 里 */
+    function pcSlotC(slot,{id,msg,token,index,record,button,details}){
+        slot.classList.add('pc-slot-c');
+        const own=slot.ownerDocument||doc;
+        const plan=msg.extra?.zhikuIllustrations?.find(item=>item.raw===token.raw)?.plan;
+        const title=String(plan?.title||'').trim();
+        const wrapper=slot.querySelector('.pc-result-collapse'),img=wrapper?.querySelector('img.pc-result-image')||null;
+        const make=(tag,cls,text)=>{const el=doc.createElement(tag);if(cls)el.className=cls;if(text!=null)el.textContent=text;if(tag==='button')el.type='button';return el;};
+        const menu=make('div','pc-c-menu');menu.hidden=true;
+        const more=make('button','pc-c-more','···');more.title='更多：重画、修改提示词、删掉';
+        more.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();menu.hidden=!menu.hidden;more.classList.toggle('on',!menu.hidden);});
+        const item=(text,hint,fn,cls)=>{const b=make('button','pc-c-item'+(cls?' '+cls:'')),t=make('span','',text),h=make('small','',hint||'');b.append(t,h);b.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(!b.disabled)fn(b,t);});return b;};
+        const redo=item(record?.url?'重画':'生成图片',record?.url?'同一段提示词再画一次':'',()=>{menu.hidden=true;more.classList.remove('on');void process(id,{manual:true,tokenIndex:index});});
+        const edit=item('修改提示词','自己改，或者告诉 AI 怎么改',()=>{menu.hidden=true;more.classList.remove('on');pcPromptPanel(id,msg,token,index);});
+        let armed=0;
+        const drop=item('删掉这张','连提示词一起',async(b,t)=>{
+            if(!armed){t.textContent='再点一次删掉';armed=setTimeout(()=>{armed=0;t.textContent='删掉这张';},3000);return;}
+            clearTimeout(armed);armed=0;b.disabled=true;t.textContent='删除中…';
+            try{await deletePlan(id,msg,token);}catch(e){notify(e?.message||String(e),'error');b.disabled=false;t.textContent='删掉这张';}
+        },'pc-c-del');
+        details?.remove();button.classList.add('pc-c-hidden');slot.prepend(button);
+        if(record?.url&&wrapper&&img){
+            let open=wrapper.open;
+            const frame=make('div','pc-c-frame'),status=make('div','pc-c-status');status.hidden=true;
+            frame.append(img,more,status);
+            const vs=Array.isArray(record.versions)?record.versions:[];
+            if(vs.length>1){
+                const cur=Math.max(0,vs.findIndex(v=>v.url===record.url)),dots=make('div','pc-c-dots');
+                vs.forEach((v,i)=>{const d=make('button','pc-c-dot'+(i===cur?' on':''));d.title=`第 ${i+1}/${vs.length} 版`;d.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(i!==cur)void switchVersion(id,msg,token,i);});dots.append(d);});
+                frame.append(dots);
+                // 左右滑图换版本
+                let sx=null,sy=0;
+                img.addEventListener('pointerdown',e=>{sx=e.clientX;sy=e.clientY;});
+                img.addEventListener('pointerup',e=>{if(sx==null)return;const dx=e.clientX-sx,dy=e.clientY-sy;sx=null;if(Math.abs(dx)>40&&Math.abs(dx)>Math.abs(dy)*1.5){const to=cur+(dx<0?1:-1);if(vs[to]){img._pcHeld=true;setTimeout(()=>{img._pcHeld=false;},400);void switchVersion(id,msg,token,to);}}});
+            }
+            const folded=make('button','pc-c-folded');
+            const fold=item('收起图片','',()=>{open=!open;sync();menu.hidden=true;more.classList.remove('on');});
+            const sync=()=>{frame.hidden=!open;folded.hidden=open;fold.firstChild.textContent=open?'收起图片':'展开图片';folded.textContent='图片已收起'+(title?' · '+title:'')+' · 点开';if(!open&&menu.hidden===false)menu.hidden=true;};
+            folded.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();open=true;sync();});
+            menu.append(redo,edit,fold,drop);
+            wrapper.replaceWith(frame);frame.after(folded,menu);
+            slot._pcSync=()=>{const busy=!!button.disabled;status.hidden=!busy;status.textContent=button.textContent;redo.disabled=busy;edit.disabled=busy;drop.disabled=busy;};
+            slot._pcMissing=()=>{const line=make('div','pc-c-row');line.append(make('span','pc-c-title','这张图存在别的设备 / 浏览器里，这里看不到'),more);frame.replaceWith(line);more.style.position='static';};
+            sync();
+        }else{
+            wrapper?.remove();
+            const row=make('div','pc-c-row');
+            row.append(make('span','pc-c-title',title||'生图标记'),button,more);button.classList.remove('pc-c-hidden');
+            menu.append(edit,drop);
+            slot.append(row,menu);
+            slot._pcSync=()=>{edit.disabled=drop.disabled=!!button.disabled;};
+        }
+        slot._pcSync();
+    }
+    /** 修改提示词：上面自己改，下面告诉 AI 怎么改（留空就让 AI 换一个画面） */
+    function pcPromptPanel(id,msg,token,index){
+        const source=msg.mes,swipe=msg.swipe_id,{box,dismiss}=dialog();box.classList.add('pc-c-panel');
+        const record=findRecord(msg,token),plan=msg.extra?.zhikuIllustrations?.find(item=>item.raw===token.raw)?.plan;
+        const el=(tag,cls,text)=>{const e=doc.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;if(tag==='button')e.type='button';return e;};
+        const head=el('div','pc-c-head','修改提示词'+(plan?.title?' · '+plan.title:''));
+        const note=plan?.source?el('div','pc-c-note','对应的正文：'+plan.source):null;
+        const input=el('textarea');input.rows=6;input.value=record?.prompt??token.prompt;
+        const send=el('button','','按这个出图');
+        send.onclick=async()=>{
+            if(pending.has(msg))return;
+            if(context().chat?.[id]!==msg||msg.mes!==source||msg.swipe_id!==swipe){notify('消息已变化，请重新打开','info');return;}
+            const prompt=input.value.trim();if(!prompt)return;
+            dismiss();await process(id,{manual:true,tokenIndex:index,promptOverride:prompt});
+        };
+        box.append(head);if(note)box.append(note);box.append(input,send);
+        if(replanner){
+            const sub=el('div','pc-c-sub','或者告诉 AI 想怎么改（留空就让 AI 自己换一个画面）');
+            const wish=el('input','pc-c-wish');wish.placeholder='比如：换成特写 / 她回头的那一下 / 换到窗边';
+            const ai=el('button','','让 AI 重写');
+            ai.onclick=async()=>{
+                if(ai.disabled)return;ai.disabled=true;send.disabled=true;ai.textContent='AI 重写中…';
+                try{const n=await replanner(Number(id),{raw:token.raw,index:token.index},wish.value.trim());dismiss();if(!n)notify('AI 这次没写出新的画面，再试一次','info');}
+                catch(e){notify(e?.message||String(e),'error');ai.disabled=false;send.disabled=false;ai.textContent='让 AI 重写';}
+            };
+            wish.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.isComposing){e.preventDefault();ai.click();}});
+            box.append(sub,wish,ai);
+        }
+    }
     function decorate(id) {
         if(!doc || stopped)return;
         const cfg=settings(),msg=context().chat?.[id];
@@ -9104,15 +9237,15 @@ function createMarkerController({context,getData,generate,upload,notify,document
             let fd=null;try{fd=el.contentDocument;}catch{}
             if(!fd?.body)return [];
             const found=[...fd.querySelectorAll(':is(.pc-marker-slot,.custom-pc-marker-slot)')];
-            if(found.length&&!fd.getElementById('pc-frame-style')){const st=fd.createElement('style');st.id='pc-frame-style';st.textContent='.pc-marker-slot{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:8px 0;font-size:12px;line-height:1.5;text-shadow:none}.pc-marker-slot details{flex:1;min-width:120px}.pc-marker-slot summary{cursor:pointer}.pc-marker-slot pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;scrollbar-width:none;font-size:12px}.pc-marker-slot pre::-webkit-scrollbar{display:none}.pc-marker-slot .pc-result-collapse{flex:0 0 100%;min-width:0}.pc-result-collapse>summary{cursor:pointer;opacity:.75}.pc-result-image{display:block;max-width:100%;max-height:520px;object-fit:contain;cursor:zoom-in;margin:6px 0}.pc-marker-generate{cursor:pointer;padding:6px 12px;border-radius:8px;color:inherit;background:transparent;border:1px solid #888;font:inherit;font-size:12px}.pc-marker-generate:disabled{opacity:.6;cursor:wait}.pc-version-nav{display:flex;gap:8px;align-items:center;justify-content:center;font-size:12px}.pc-version-nav button{font:inherit;color:inherit;background:transparent;border:1px solid #888;border-radius:999px;padding:2px 10px;cursor:pointer}';(fd.head||fd.documentElement).appendChild(st);}
+            if(found.length&&!fd.getElementById('pc-frame-style')){const st=fd.createElement('style');st.id='pc-frame-style';st.textContent='.pc-marker-slot{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:8px 0;font-size:12px;line-height:1.5;text-shadow:none}.pc-marker-slot details{flex:1;min-width:120px}.pc-marker-slot summary{cursor:pointer}.pc-marker-slot pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;scrollbar-width:none;font-size:12px}.pc-marker-slot pre::-webkit-scrollbar{display:none}.pc-marker-slot .pc-result-collapse{flex:0 0 100%;min-width:0}.pc-result-collapse>summary{cursor:pointer;opacity:.75}.pc-result-image{display:block;max-width:100%;max-height:520px;object-fit:contain;cursor:zoom-in;margin:6px auto}.pc-marker-generate{cursor:pointer;padding:6px 12px;border-radius:8px;color:inherit;background:transparent;border:1px solid #888;font:inherit;font-size:12px}.pc-marker-generate:disabled{opacity:.6;cursor:wait}.pc-version-nav{display:flex;gap:8px;align-items:center;justify-content:center;font-size:12px}.pc-version-nav button{font:inherit;color:inherit;background:transparent;border:1px solid #888;border-radius:999px;padding:2px 10px;cursor:pointer}.pc-marker-slot.pc-slot-c.pc-slot-c{display:block;width:auto;max-width:100%;margin:10px 0;padding:0;border:0;background:transparent;font-size:13px;line-height:1.5}.pc-slot-c .pc-c-hidden,.pc-slot-c [hidden]{display:none!important}.pc-slot-c .pc-c-frame{position:relative;width:fit-content;max-width:100%;margin:0 auto;border-radius:10px;overflow:hidden;line-height:0}.pc-slot-c .pc-c-frame .pc-result-image{display:block;margin:0;max-width:100%;max-height:520px;object-fit:contain;cursor:zoom-in}.pc-slot-c button.pc-c-more{position:absolute;top:8px;right:8px;width:auto;height:auto;min-height:0;margin:0;padding:0 10px 4px;border:0;border-radius:7px;background:rgba(0,0,0,.45);color:#fff;font:15px/1.4 sans-serif;letter-spacing:.12em;cursor:pointer;box-shadow:none;opacity:.9}.pc-slot-c button.pc-c-more.on{background:rgba(0,0,0,.7);opacity:1}.pc-slot-c .pc-c-dots{position:absolute;left:0;right:0;bottom:8px;display:flex;justify-content:center;gap:6px;line-height:0}.pc-slot-c button.pc-c-dot{width:7px;height:7px;min-height:0;margin:0;padding:0;border:0;border-radius:4px;background:rgba(255,255,255,.5);cursor:pointer;box-shadow:none}.pc-slot-c button.pc-c-dot.on{width:18px;background:#fff}.pc-slot-c .pc-c-status{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);padding:4px 14px;border-radius:7px;background:rgba(0,0,0,.6);color:#fff;font:13px/1.6 sans-serif;white-space:nowrap}.pc-slot-c .pc-c-row{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap}.pc-slot-c .pc-c-title{opacity:.72}.pc-marker-slot.pc-slot-c .pc-c-row .pc-marker-generate{width:auto;min-height:0;margin:0;padding:5px 14px;border:0;border-radius:8px;background:var(--SmartThemeBlurTintColor,rgba(128,128,128,.16));color:inherit;font:inherit;font-size:13px;line-height:1.5;box-shadow:none}.pc-marker-slot.pc-slot-c .pc-c-row .pc-marker-generate:hover{background:rgba(128,128,128,.24)}.pc-slot-c .pc-c-row button.pc-c-more{position:static;background:rgba(128,128,128,.18);color:inherit}.pc-slot-c button.pc-c-folded{display:block;width:auto;min-height:0;margin:0 auto;padding:6px 14px;border:0;border-radius:8px;background:rgba(128,128,128,.13);color:inherit;font:inherit;font-size:13px;cursor:pointer;box-shadow:none}.pc-slot-c .pc-c-menu{max-width:min(100%,420px);margin:8px auto 0;padding:4px 0;border-radius:10px;background:var(--SmartThemeBlurTintColor,rgba(128,128,128,.12));overflow:hidden}.pc-slot-c button.pc-c-item{display:flex;justify-content:space-between;align-items:baseline;gap:12px;width:100%;min-height:0;margin:0;padding:9px 14px;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;font-size:13.5px;text-align:left;cursor:pointer;box-shadow:none}.pc-slot-c button.pc-c-item:hover{background:rgba(128,128,128,.13)}.pc-slot-c button.pc-c-item:disabled{opacity:.45;cursor:default}.pc-slot-c button.pc-c-item small{font-size:12px;opacity:.6;text-align:right}.pc-slot-c button.pc-c-item.pc-c-del{color:#d9897e}.pc-image-dialog.pc-c-panel{justify-content:flex-start;align-items:stretch;width:min(96vw,560px)}.pc-c-panel .pc-c-head{flex-basis:100%;font-size:15px;margin-top:2px}.pc-c-panel .pc-c-note{flex-basis:100%;font-size:12px;opacity:.7;white-space:pre-wrap;overflow-wrap:anywhere}.pc-c-panel .pc-c-sub{flex-basis:100%;font-size:13px;margin-top:10px;opacity:.85}.pc-c-panel input.pc-c-wish{flex-basis:100%;width:100%;box-sizing:border-box;padding:8px 10px;border-radius:8px;border:0;font:14px/1.5 sans-serif}';(fd.head||fd.documentElement).appendChild(st);}
             return found;
         });
         slots.forEach((slot,index)=>{
             slot.classList.add('pc-marker-slot');
             const token=tokens[index];if(!token)return;
             const record=findRecord(msg,token);
-            const ready=token.raw+'|'+(record?.url||'');
-            if(slot.dataset.pcReady===ready) { const b=slot.querySelector('button');if(b){b.disabled=!!state(msg,token);b.textContent=label(msg,token,record);}return; }
+            const ready=token.raw+'|'+(record?.url||'')+(replanner?'|r':'');
+            if(slot.dataset.pcReady===ready) { const b=slot.querySelector('button');if(b){b.disabled=!!state(msg,token);b.textContent=label(msg,token,record);}slot._pcSync?.();return; }
             slot.dataset.pcReady=ready;
             slot.replaceChildren();
             const details=doc.createElement('details'),summary=doc.createElement('summary'),pre=doc.createElement('pre'),button=doc.createElement('button');
@@ -9124,7 +9257,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
             button.disabled=!!state(msg,token);button.textContent=label(msg,token,record);
             button.addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();if(button._pcHeld)return;void process(Number(id),{manual:true,tokenIndex:index});});
             slot.append(details,button);
-            const edit=()=>editPrompt(id,msg,token,index);
+            const edit=()=>pcPromptPanel(id,msg,token,index);
             bindHold(button,edit);
             if(record?.url){
                 const wrapper=doc.createElement('details');wrapper.className='pc-result-collapse';
@@ -9134,7 +9267,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
                 const syncTitle=()=>{if(!imageMissing)header.textContent=imageTitle+(wrapper.open?' · 点击折叠':' · 点击展开');};
                 wrapper.addEventListener('toggle',syncTitle);
                 const img=doc.createElement('img');img.className='pc-result-image';img.alt='生成图片';
-                showUrl(record.url,u=>{img.src=u;},()=>{imageMissing=true;header.textContent='这张图存在别的设备 / 浏览器里，这里看不到，可以点「重新生成」';img.remove();});
+                showUrl(record.url,u=>{img.src=u;},()=>{imageMissing=true;header.textContent='这张图存在别的设备 / 浏览器里，这里看不到，可以点「重新生成」';img.remove();slot._pcMissing?.();});
                 wrapper.append(header,img);slot.append(wrapper);
                 const vs=Array.isArray(record.versions)?record.versions:[];
                 if(vs.length>1){
@@ -9152,7 +9285,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
                 bindHold(img,edit);
                 button.textContent=label(msg,token,record);
             }
-
+            pcSlotC(slot,{id:Number(id),msg,token,index,record,button,details});
         });
     }
     function recordKey(msg,token){return String(msg.swipe_id??0)+':'+token.index+':'+token.raw;}
@@ -9210,6 +9343,28 @@ function createMarkerController({context,getData,generate,upload,notify,document
         return close;
     }
     function dialog(){const back=doc.createElement('div'),box=doc.createElement('div'),close=doc.createElement('button');back.className='pc-image-preview';box.className='pc-image-dialog';close.type='button';close.textContent='关闭';box.append(close);back.append(box);const dismiss=pcTopLayer(back,box);close.onclick=dismiss;back.onclick=e=>{if(e.target===back)dismiss();};return {box,dismiss};}
+    /** 删掉整张：把标记从这一楼原文里去掉，连带它的图和画面方案；后面的图记录跟着挪位置 */
+    async function deletePlan(id,msg,token){
+        if(pending.has(msg))throw new Error('请等本楼生成结束');
+        const c=context();if(c.chat?.[id]!==msg)throw new Error('聊天已变化，请重新操作');
+        const cfg=settings(),source=String(msg.mes||''),swipe=msg.swipe_id;
+        let at=Number(token.index);
+        if(source.slice(at,at+token.raw.length)!==token.raw){at=source.indexOf(token.raw);if(at<0)throw new Error('这张图的标记变了，刷新一下再试');}
+        const left=source.slice(0,at);let right=source.slice(at+token.raw.length);
+        // 标记单独占一行时，连它带进来的空行一起去掉
+        if(left.endsWith('\n')||!left)right=right.replace(/^\n{1,2}/,'');
+        const next=left+right,removed=source.length-next.length;
+        const tokens=parseImageMarkers(source,cfg.start,cfg.end).filter(t=>t.index!==at);
+        const oldImages=msg.extra?.zhikuImages,oldPlans=msg.extra?.zhikuIllustrations;
+        const swipes=Array.isArray(msg.swipes)&&Number.isInteger(swipe)?msg.swipes:null,oldSwipe=swipes?.[swipe];
+        if(oldImages){const rest={...oldImages},k=findRecordKey(msg,{...token,index:at});if(k)delete rest[k];msg.extra.zhikuImages=shiftImageRecords(rest,tokens,swipe,[{at:at+1,length:-removed}]);}
+        if(Array.isArray(oldPlans)&&!next.includes(token.raw))msg.extra.zhikuIllustrations=oldPlans.filter(p=>p.raw!==token.raw);
+        msg.mes=next;if(swipes)swipes[swipe]=next;
+        try{await c.saveChat();}
+        catch(e){msg.mes=source;if(swipes)swipes[swipe]=oldSwipe;if(oldImages)msg.extra.zhikuImages=oldImages;if(oldPlans)msg.extra.zhikuIllustrations=oldPlans;throw e;}
+        try{context().updateMessageBlock?.(id,msg);}catch{}
+        decorate(id);zkMsgUpdated(id);
+    }
     async function deleteResult(id,msg,token){
         if(pending.has(msg))throw new Error('请等本楼生成结束');
         if(context().chat?.[id]!==msg)throw new Error('聊天已变化，请重新操作');
@@ -9353,7 +9508,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
         });
         decorate(id);return (await Promise.all(jobs)).reduce((a,b)=>a+b,0);
     }
-    return {settings,syncRegex,process,decorate,decorateAll,refresh,applyImageDefault,stop(){stopped=true;for(const timer of holds)clearTimeout(timer);holds.clear();for(const el of overlays)el.remove();overlays.clear();if(doc)doc.querySelectorAll('.pc-image-actions').forEach(el=>el.remove());},idle(){return queue;}};
+    return {settings,syncRegex,process,decorate,decorateAll,refresh,applyImageDefault,setReplanner(fn){replanner=typeof fn==='function'?fn:null;try{decorateAll?.();}catch{}},stop(){stopped=true;for(const timer of holds)clearTimeout(timer);holds.clear();for(const el of overlays)el.remove();overlays.clear();if(doc)doc.querySelectorAll('.pc-image-actions').forEach(el=>el.remove());},idle(){return queue;}};
 }
 
 /** 本地图片库：存在用户自己的浏览器（IndexedDB）里，不占酒馆服务器。地址写成 idb:xxx */
@@ -11824,10 +11979,10 @@ function viewCharEdit(d) {
     ${c.kind !== 'free' && (family.length > 1 || c.kind !== 'user') ? `<div class="pc-chips">${family.map(f => `<button class="pc-pill ${f.key === c.key ? 'on' : 'dashed'}" data-act="openchar" data-key="${esc(f.key)}">${esc(f.name)}${f.kind === 'side' ? '（配角）' : ''}</button>${f.kind === 'side' ? `<button class="pc-x" data-act="delsidekey" data-key="${esc(f.key)}" aria-label="删掉配角${esc(f.name)}" title="删掉这个配角" style="margin:0 6px 0 -4px">×</button>` : ''}`).join('')}${card ? '<button class="pc-pill dashed" data-act="addside">＋ 配角</button>' : ''}</div>` : ''}
 
     <section class="pc-card pc-pad pc-mt">
-      <div class="pc-row-between"><b>固定外貌</b><span class="pc-chips" style="margin:0">${c.kind !== 'free' ? `<button class="pc-pill dashed tiny" data-act="readcard" ${busy ? 'disabled' : ''}>${busy === 'read' ? '读取中…' : c.kind === 'user' ? '从人设读' : c.kind === 'side' ? '从卡和世界书读' : '从角色卡读'}</button>` : ''}<label class="pc-pill dashed tiny">${busy === 'look' ? '<span class="pc-busy">看图中</span>' : '从图片读'}<input type="file" accept="image/*" data-lookimg hidden></label></span></div>
+      <div class="pc-row-between"><b>固定外貌</b><span class="pc-chips" style="margin:0">${c.kind !== 'free' ? `<button class="pc-pill dashed tiny" data-act="readcard" ${busy ? 'disabled' : ''}>${busy === 'read' ? '读取中…' : c.kind === 'user' ? '从人设和世界书读' : c.kind === 'side' ? '从卡和世界书读' : '从角色卡读'}</button>` : ''}<label class="pc-pill dashed tiny">${busy === 'look' ? '<span class="pc-busy">看图中</span>' : '从图片读'}<input type="file" accept="image/*" data-lookimg hidden></label></span></div>
       <div class="pc-dim small">头发、眼睛、脸、身材这类不会变的。第一个写 1boy 或 1girl。点标签可以改，× 删掉。</div>
-      ${c.kind !== 'free' ? `<details class="pc-fold pc-mt-s" data-cfold="readnote" ${c.readNote || ui.readNoteOpen ? 'open' : ''}><summary><b>读之前补几句</b><i>${c.readNote ? '读的时候会带上' : c.kind === 'user' ? '人设写得少就在这补' : '卡里写得少就在这补'}</i></summary><div class="pc-fold-in"><textarea class="pc-textarea small" data-readnote placeholder="比如：黑色长直发，左眼下有泪痣，185cm，身材偏瘦，总戴银框眼镜">${esc(c.readNote || '')}</textarea><div class="pc-dim small">写完点上面的「${c.kind === 'user' ? '从人设读' : c.kind === 'side' ? '从卡和世界书读' : '从角色卡读'}」，AI 会把这段和${c.kind === 'user' ? '人设' : '卡'}里的设定一起读。只想直接加几个标签，用下面「自己加」那一栏。</div></div></details>` : ''}
-      ${c.kind === 'char' || c.kind === 'side' ? `<button class="pc-pill dashed tiny pc-mt-s" data-act="readcast" ${busy ? 'disabled' : ''}>${busy === 'cast' ? '<span class="pc-busy">读取中</span>' : '读出这张卡里所有人（含世界书）'}</button><button class="pc-pill dashed tiny pc-mt-s" style="margin-left:6px" data-act="readchatcast" ${busy ? 'disabled' : ''}>${busy === 'chatcast' ? '<span class="pc-busy">读取中</span>' : '从聊天正文读出人物（最近 40 楼）'}</button><label class="pc-switch pc-mt-s"><input type="checkbox" data-pickwi ${d.options.pickWi ? 'checked' : ''}><span></span>读之前自己挑世界书条目<small>点「从角色卡读」「读出这张卡里所有人」时先列出世界书条目，勾哪几条就发哪几条</small></label>` : ''}
+      ${c.kind !== 'free' ? `<details class="pc-fold pc-mt-s" data-cfold="readnote" ${c.readNote || ui.readNoteOpen ? 'open' : ''}><summary><b>读之前补几句</b><i>${c.readNote ? '读的时候会带上' : c.kind === 'user' ? '人设写得少就在这补' : '卡里写得少就在这补'}</i></summary><div class="pc-fold-in"><textarea class="pc-textarea small" data-readnote placeholder="比如：黑色长直发，左眼下有泪痣，185cm，身材偏瘦，总戴银框眼镜">${esc(c.readNote || '')}</textarea><div class="pc-dim small">写完点上面的「${c.kind === 'user' ? '从人设和世界书读' : c.kind === 'side' ? '从卡和世界书读' : '从角色卡读'}」，AI 会把这段和${c.kind === 'user' ? '人设' : '卡'}里的设定一起读。只想直接加几个标签，用下面「自己加」那一栏。</div></div></details>` : ''}
+      ${c.kind === 'char' || c.kind === 'side' ? `<button class="pc-pill dashed tiny pc-mt-s" data-act="readcast" ${busy ? 'disabled' : ''}>${busy === 'cast' ? '<span class="pc-busy">读取中</span>' : '读出这张卡里所有人（含世界书）'}</button><button class="pc-pill dashed tiny pc-mt-s" style="margin-left:6px" data-act="readchatcast" ${busy ? 'disabled' : ''}>${busy === 'chatcast' ? '<span class="pc-busy">读取中</span>' : '从聊天正文读出人物（最近 40 楼）'}</button><label class="pc-switch pc-mt-s"><input type="checkbox" data-pickwi ${d.options.pickWi ? 'checked' : ''}><span></span>读之前自己挑世界书条目<small>点「从角色卡读」「读出这张卡里所有人」时先列出世界书条目，勾哪几条就发哪几条</small></label>` : ''}${c.kind === 'user' ? `<label class="pc-switch pc-mt-s"><input type="checkbox" data-pickwi ${d.options.pickWi ? 'checked' : ''}><span></span>读之前自己挑世界书条目<small>点「从人设和世界书读」时先列出人设世界书和当前角色卡世界书里的条目，勾哪几条就发哪几条；不挑的话，条目名或关键词提到 user、{{user}}、用户、玩家或人设名字的会带上</small></label>` : ''}
       <label class="pc-field pc-mt-s"><span>别名（逗号隔开）· 图片角色标记可使用名字或别名</span><input data-charalias value="${esc(c.aliases || '')}" placeholder="比如 小秋，秋秋"></label>
       <label class="pc-switch pc-mt-s"><input type="checkbox" data-charcanon ${c.canonOn ? 'checked' : ''}><span></span>同人角色：直接写原作角色名<small>原作里有的角色，写 danbooru 上的角色名，NovelAI 认得就会照原作的长相画。打开后外貌只发性别词 + 角色名，衣服照常。</small></label>
       ${c.canonOn ? `<label class="pc-field"><span>角色名标签（英文，可以带作品名）</span><input class="mono" data-charcanontag value="${esc(c.canonTag || '')}" placeholder="hatsune miku, vocaloid"></label>
@@ -16640,10 +16795,11 @@ async function start() {
     for (const id of ['pc-root', 'pc-stub', 'pc-chip', 'pc-menu-btn']) DOC.getElementById(id)?.remove();
 
     injectCss();
-    const compactStyle=DOC.createElement('style');compactStyle.id='pc-compact-image-style';compactStyle.textContent=".mes_text .pc-marker-slot{display:flex;gap:8px;margin:6px 0;padding:4px 8px;border-radius:6px;width:fit-content;max-width:100%;font-size:12px;line-height:1.5}.mes_text .pc-marker-slot summary,.mes_text .pc-image-actions summary{font-size:12px;cursor:pointer}.mes_text .pc-marker-generate,.mes_text .pc-image-actions button{font-size:12px;line-height:1.5;padding:3px 8px;min-height:28px;width:auto;margin:0}.mes_text .pc-marker-slot pre,.mes_text .pc-image-actions pre{font:12px/1.5 sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;max-height:140px;overflow:auto;scrollbar-width:none}.mes_text .pc-image-actions pre::-webkit-scrollbar{display:none}.mes_text .pc-chat-img{display:block;max-width:min(100%,360px);max-height:480px;object-fit:contain;cursor:zoom-in}.pc-image-actions{display:flex;align-items:start;gap:8px;flex-wrap:wrap;margin:4px 0 8px}.pc-image-actions details{max-width:100%}.pc-image-preview{position:fixed;top:0;right:0;bottom:0;left:0;z-index:40000;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center}html>.pc-image-preview{position:fixed!important;top:0!important;left:0!important;right:0!important;bottom:0!important;width:100vw!important;height:100vh!important;height:100dvh!important;max-width:none!important;max-height:none!important;margin:0!important;padding:0!important;transform:none!important;box-sizing:border-box!important;z-index:2147483600!important;overflow:auto;overscroll-behavior:contain}html>.pc-image-preview>button{position:absolute!important;top:max(12px,env(safe-area-inset-top))!important;right:12px!important;z-index:2147483601!important}html>.pc-image-preview .pc-image-dialog{max-height:calc(100dvh - 24px)}.pc-image-preview img{max-width:95vw;max-height:90vh;object-fit:contain}.pc-image-preview button{position:absolute;right:16px;top:16px;padding:8px 16px}";DOC.head.append(compactStyle);cleanups.push(()=>compactStyle.remove());
+    const compactStyle=DOC.createElement('style');compactStyle.id='pc-compact-image-style';compactStyle.textContent=".mes_text .pc-marker-slot{display:flex;gap:8px;margin:6px 0;padding:4px 8px;border-radius:6px;width:fit-content;max-width:100%;font-size:12px;line-height:1.5}.mes_text .pc-marker-slot summary,.mes_text .pc-image-actions summary{font-size:12px;cursor:pointer}.mes_text .pc-marker-generate,.mes_text .pc-image-actions button{font-size:12px;line-height:1.5;padding:3px 8px;min-height:28px;width:auto;margin:0}.mes_text .pc-marker-slot pre,.mes_text .pc-image-actions pre{font:12px/1.5 sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;max-height:140px;overflow:auto;scrollbar-width:none}.mes_text .pc-image-actions pre::-webkit-scrollbar{display:none}.mes_text .pc-chat-img{display:block;max-width:min(100%,360px);max-height:480px;object-fit:contain;cursor:zoom-in;margin-left:auto;margin-right:auto}.pc-image-actions{display:flex;align-items:start;gap:8px;flex-wrap:wrap;margin:4px 0 8px}.pc-image-actions details{max-width:100%}.pc-image-preview{position:fixed;top:0;right:0;bottom:0;left:0;z-index:40000;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center}html>.pc-image-preview{position:fixed!important;top:0!important;left:0!important;right:0!important;bottom:0!important;width:100vw!important;height:100vh!important;height:100dvh!important;max-width:none!important;max-height:none!important;margin:0!important;padding:0!important;transform:none!important;box-sizing:border-box!important;z-index:2147483600!important;overflow:auto;overscroll-behavior:contain}html>.pc-image-preview>button{position:absolute!important;top:max(12px,env(safe-area-inset-top))!important;right:12px!important;z-index:2147483601!important}html>.pc-image-preview .pc-image-dialog{max-height:calc(100dvh - 24px)}.pc-image-preview img{max-width:95vw;max-height:90vh;object-fit:contain}.pc-image-preview button{position:absolute;right:16px;top:16px;padding:8px 16px}";DOC.head.append(compactStyle);cleanups.push(()=>compactStyle.remove());
     const markerStyle=DOC.createElement('style');markerStyle.id='pc-marker-ui-style';
     markerStyle.textContent='.pc-marker-slot{display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap;margin:10px 0;padding:12px;border-radius:12px;background:var(--SmartThemeBlurTintColor,rgba(0,0,0,.15));border:1px solid var(--SmartThemeBorderColor,rgba(128,128,128,.35))}.pc-marker-slot details{flex:1;min-width:120px}.pc-marker-slot summary{cursor:pointer;font-size:14px}.pc-marker-slot pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;font-size:13px;margin:10px 0 0;scrollbar-width:none}.pc-marker-slot pre::-webkit-scrollbar{display:none}.pc-marker-generate{cursor:pointer;padding:6px 12px;border-radius:8px;color:inherit;background:var(--SmartThemeBlurTintColor,transparent);border:1px solid var(--SmartThemeBorderColor,#888);font:inherit}.pc-marker-generate:disabled{opacity:.6;cursor:wait}#pc-menu-btn .pc-menu-picture{display:inline-flex;align-items:center;justify-content:center;font-size:22px;width:26px;line-height:1}';
-    /* reference-marker-ui */ markerStyle.textContent += "/* Button styles adapted from st-chatu8/styles/send_data.css; original attribution retained in README. */\r\n.mes_text .pc-marker-slot .pc-marker-generate {\r\n    display: inline-block;\r\n    padding: 6px 12px;\r\n    background-color: var(--st-chatu8-accent-primary, #4a90d9);\r\n    color: var(--st-chatu8-text-highlight, white);\r\n    border: 1px solid var(--st-chatu8-border-color, transparent);\r\n    border-radius: 4px;\r\n    cursor: pointer;\r\n    font-size: 14px;\r\n    margin-left: 0;\r\n    font-family: inherit;\r\n    line-height: 1.4;\r\n    text-decoration: none;\r\n    box-sizing: border-box;\r\n    transition: all 0.3s ease;\r\n}\r\n\r\n.mes_text .pc-marker-slot .pc-marker-generate:hover {\r\n    background-color: var(--st-chatu8-accent-secondary, #357abd);\r\n}\r\n\r\n\r\n\r\n.mes_text .pc-marker-slot{display:flex;align-items:center;gap:6px;flex-wrap:wrap;width:auto;padding:0;border:0;background:transparent;margin:8px 0}\r\n.mes_text .pc-marker-slot>details:not(.pc-result-collapse){flex:0 1 auto;min-width:0;max-width:100%}\r\n.mes_text .pc-marker-slot summary{font-size:13px;line-height:1.4}\r\n.mes_text .pc-marker-slot pre{font:13px/1.5 sans-serif;max-height:140px;overflow:auto;white-space:pre-wrap;scrollbar-width:none}\r\n.mes_text .pc-marker-slot pre::-webkit-scrollbar{display:none}\r\n.mes_text .pc-marker-slot .pc-result-collapse{flex-basis:100%;margin:8px 0;border-radius:8px;background:transparent;border:none}\r\n.mes_text .pc-result-collapse>summary{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;user-select:none;background:linear-gradient(135deg,rgba(74,144,226,.15),rgba(74,144,226,.08));font-size:13px;color:#a8c8f0;border-radius:8px}\r\n.mes_text .pc-result-collapse>summary:before{content:'▸'}\r\n.mes_text .pc-result-collapse[open]>summary:before{content:'▾'}\r\n.mes_text .pc-result-image{display:block;max-width:100%;max-height:520px;object-fit:contain;cursor:zoom-in;touch-action:pan-y}\r\n.pc-image-preview{position:fixed;top:0;right:0;bottom:0;left:0;z-index:40000;background:rgba(0,0,0,.95);display:flex;align-items:center;justify-content:center}\r\n.pc-image-dialog{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:center;width:min(96vw,850px);max-height:96vh;overflow:auto;background:#1a1a2e;color:#fff;padding:12px;border-radius:8px;scrollbar-width:none}\r\n.pc-image-dialog::-webkit-scrollbar{display:none}\r\n.pc-image-dialog img{flex-basis:100%;max-width:100%;max-height:75vh;object-fit:contain}\r\n.pc-image-dialog textarea{flex-basis:100%;width:100%;min-height:160px;font:14px/1.5 sans-serif;scrollbar-width:none}\r\n.pc-image-dialog button{position:static;padding:6px 12px;min-height:32px;width:auto;font-size:14px}\r\n";
+    /* reference-marker-ui */ markerStyle.textContent += "/* Button styles adapted from st-chatu8/styles/send_data.css; original attribution retained in README. */\r\n.mes_text .pc-marker-slot .pc-marker-generate {\r\n    display: inline-block;\r\n    padding: 6px 12px;\r\n    background-color: var(--st-chatu8-accent-primary, #4a90d9);\r\n    color: var(--st-chatu8-text-highlight, white);\r\n    border: 1px solid var(--st-chatu8-border-color, transparent);\r\n    border-radius: 4px;\r\n    cursor: pointer;\r\n    font-size: 14px;\r\n    margin-left: 0;\r\n    font-family: inherit;\r\n    line-height: 1.4;\r\n    text-decoration: none;\r\n    box-sizing: border-box;\r\n    transition: all 0.3s ease;\r\n}\r\n\r\n.mes_text .pc-marker-slot .pc-marker-generate:hover {\r\n    background-color: var(--st-chatu8-accent-secondary, #357abd);\r\n}\r\n\r\n\r\n\r\n.mes_text .pc-marker-slot{display:flex;align-items:center;gap:6px;flex-wrap:wrap;width:auto;padding:0;border:0;background:transparent;margin:8px 0}\r\n.mes_text .pc-marker-slot>details:not(.pc-result-collapse){flex:0 1 auto;min-width:0;max-width:100%}\r\n.mes_text .pc-marker-slot summary{font-size:13px;line-height:1.4}\r\n.mes_text .pc-marker-slot pre{font:13px/1.5 sans-serif;max-height:140px;overflow:auto;white-space:pre-wrap;scrollbar-width:none}\r\n.mes_text .pc-marker-slot pre::-webkit-scrollbar{display:none}\r\n.mes_text .pc-marker-slot .pc-result-collapse{flex-basis:100%;margin:8px 0;border-radius:8px;background:transparent;border:none}\r\n.mes_text .pc-result-collapse>summary{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;user-select:none;background:linear-gradient(135deg,rgba(74,144,226,.15),rgba(74,144,226,.08));font-size:13px;color:#a8c8f0;border-radius:8px}\r\n.mes_text .pc-result-collapse>summary:before{content:'▸'}\r\n.mes_text .pc-result-collapse[open]>summary:before{content:'▾'}\r\n.mes_text .pc-result-image{display:block;max-width:100%;max-height:520px;object-fit:contain;cursor:zoom-in;touch-action:pan-y;margin-left:auto;margin-right:auto}\r\n.pc-image-preview{position:fixed;top:0;right:0;bottom:0;left:0;z-index:40000;background:rgba(0,0,0,.95);display:flex;align-items:center;justify-content:center}\r\n.pc-image-dialog{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:center;width:min(96vw,850px);max-height:96vh;overflow:auto;background:#1a1a2e;color:#fff;padding:12px;border-radius:8px;scrollbar-width:none}\r\n.pc-image-dialog::-webkit-scrollbar{display:none}\r\n.pc-image-dialog img{flex-basis:100%;max-width:100%;max-height:75vh;object-fit:contain}\r\n.pc-image-dialog textarea{flex-basis:100%;width:100%;min-height:160px;font:14px/1.5 sans-serif;scrollbar-width:none}\r\n.pc-image-dialog button{position:static;padding:6px 12px;min-height:32px;width:auto;font-size:14px}\r\n";
+    markerStyle.textContent += ".pc-marker-slot.pc-slot-c.pc-slot-c{display:block;width:auto;max-width:100%;margin:10px 0;padding:0;border:0;background:transparent;font-size:13px;line-height:1.5}.pc-slot-c .pc-c-hidden,.pc-slot-c [hidden]{display:none!important}.pc-slot-c .pc-c-frame{position:relative;width:fit-content;max-width:100%;margin:0 auto;border-radius:10px;overflow:hidden;line-height:0}.pc-slot-c .pc-c-frame .pc-result-image{display:block;margin:0;max-width:100%;max-height:520px;object-fit:contain;cursor:zoom-in}.pc-slot-c button.pc-c-more{position:absolute;top:8px;right:8px;width:auto;height:auto;min-height:0;margin:0;padding:0 10px 4px;border:0;border-radius:7px;background:rgba(0,0,0,.45);color:#fff;font:15px/1.4 sans-serif;letter-spacing:.12em;cursor:pointer;box-shadow:none;opacity:.9}.pc-slot-c button.pc-c-more.on{background:rgba(0,0,0,.7);opacity:1}.pc-slot-c .pc-c-dots{position:absolute;left:0;right:0;bottom:8px;display:flex;justify-content:center;gap:6px;line-height:0}.pc-slot-c button.pc-c-dot{width:7px;height:7px;min-height:0;margin:0;padding:0;border:0;border-radius:4px;background:rgba(255,255,255,.5);cursor:pointer;box-shadow:none}.pc-slot-c button.pc-c-dot.on{width:18px;background:#fff}.pc-slot-c .pc-c-status{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);padding:4px 14px;border-radius:7px;background:rgba(0,0,0,.6);color:#fff;font:13px/1.6 sans-serif;white-space:nowrap}.pc-slot-c .pc-c-row{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap}.pc-slot-c .pc-c-title{opacity:.72}.pc-marker-slot.pc-slot-c .pc-c-row .pc-marker-generate{width:auto;min-height:0;margin:0;padding:5px 14px;border:0;border-radius:8px;background:var(--SmartThemeBlurTintColor,rgba(128,128,128,.16));color:inherit;font:inherit;font-size:13px;line-height:1.5;box-shadow:none}.pc-marker-slot.pc-slot-c .pc-c-row .pc-marker-generate:hover{background:rgba(128,128,128,.24)}.pc-slot-c .pc-c-row button.pc-c-more{position:static;background:rgba(128,128,128,.18);color:inherit}.pc-slot-c button.pc-c-folded{display:block;width:auto;min-height:0;margin:0 auto;padding:6px 14px;border:0;border-radius:8px;background:rgba(128,128,128,.13);color:inherit;font:inherit;font-size:13px;cursor:pointer;box-shadow:none}.pc-slot-c .pc-c-menu{max-width:min(100%,420px);margin:8px auto 0;padding:4px 0;border-radius:10px;background:var(--SmartThemeBlurTintColor,rgba(128,128,128,.12));overflow:hidden}.pc-slot-c button.pc-c-item{display:flex;justify-content:space-between;align-items:baseline;gap:12px;width:100%;min-height:0;margin:0;padding:9px 14px;border:0;border-radius:0;background:transparent;color:inherit;font:inherit;font-size:13.5px;text-align:left;cursor:pointer;box-shadow:none}.pc-slot-c button.pc-c-item:hover{background:rgba(128,128,128,.13)}.pc-slot-c button.pc-c-item:disabled{opacity:.45;cursor:default}.pc-slot-c button.pc-c-item small{font-size:12px;opacity:.6;text-align:right}.pc-slot-c button.pc-c-item.pc-c-del{color:#d9897e}.pc-image-dialog.pc-c-panel{justify-content:flex-start;align-items:stretch;width:min(96vw,560px)}.pc-c-panel .pc-c-head{flex-basis:100%;font-size:15px;margin-top:2px}.pc-c-panel .pc-c-note{flex-basis:100%;font-size:12px;opacity:.7;white-space:pre-wrap;overflow-wrap:anywhere}.pc-c-panel .pc-c-sub{flex-basis:100%;font-size:13px;margin-top:10px;opacity:.85}.pc-c-panel input.pc-c-wish{flex-basis:100%;width:100%;box-sizing:border-box;padding:8px 10px;border-radius:8px;border:0;font:14px/1.5 sans-serif}";
     DOC.head.appendChild(markerStyle);cleanups.push(()=>markerStyle.remove());
     await loadData();
     if (getData().options.markerAuto === undefined) getData().options.markerAuto = true;
@@ -16789,6 +16945,8 @@ async function start() {
         onRequest: request => { illustrationLastRequest = request; },
         afterSave: async (id, selection = {}) => { addMesButtons(); return __mod_marker.process(id, selection.manual ? {manual:true,tokenIndices:selection.tokenIndices} : {}); },
     });
+    __mod_marker.setReplanner((id, token, wish) => illustrationPlanner.replan(id, token, wish));
+    cleanups.push(() => __mod_marker.setReplanner(null));
     const selectedImages = createSelectedImageController({document:DOC,getContext:()=>SillyTavern.getContext(),settings:()=>__mod_marker.settings(),generate:shot=>illustrationPlanner.selected(shot),notify:message=>toastr.info(message,'智库 · 选段生图'),modal:inner=>__mod_ui.modal(inner)});
     cleanups.push(() => selectedImages.stop());
     {
