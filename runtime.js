@@ -2676,7 +2676,7 @@ function createComicController(deps) {
         try { await saveChat(c); }
         catch (e) { restore(); notify('漫画改写保存失败：' + e.message); return; }
         if (!snap.current(next)) return;
-        if (where === 'mes') c.updateMessageBlock?.(id, msg);
+        if (where === 'mes') (pcGuardScroll(), c).updateMessageBlock?.(id, msg);
         render(id);
         if (nb) await generateOne(id, nb);
     }
@@ -3778,7 +3778,7 @@ function createIllustrationPlanner({ getContext, getData, settings, roster, askL
         if(stopped || chatKey(now)!==chatId || now.chat?.[id]!==msg || msg.swipe_id!==swipe)return;
         const tokenIndices=parseImageMarkers(next,cfg.start,cfg.end).map((t,i)=>positions.has(t.index)?i:-1).filter(i=>i>=0);
         // SillyTavern 1.14.0 public/scripts/st-context.js exports eventTypes and eventSource.
-        now.updateMessageBlock?.(id,msg);try{const ev=now.eventTypes||now.event_types;if(ev?.MESSAGE_UPDATED)await now.eventSource?.emit?.(ev.MESSAGE_UPDATED,id);}catch{}
+        (pcGuardScroll(), now).updateMessageBlock?.(id,msg);try{const ev=now.eventTypes||now.event_types;if(ev?.MESSAGE_UPDATED)await now.eventSource?.emit?.(ev.MESSAGE_UPDATED,id);}catch{}
         const latest=getContext();
         if(stopped||chatKey(latest)!==chatId||latest.chat?.[id]!==msg||msg.swipe_id!==swipe||msg.mes!==next)return;
         await afterSave(id,{manual,tokenIndices});
@@ -4251,7 +4251,7 @@ function imageInsertionPoint(text, sentence) {
     return safeImageInsertionPoint(text,end);
 }
 
-// 智库 · 原生扩展版 v0.9.19（二改自从前佬的智绘姬）
+// 智库 · 原生扩展版 v0.9.21（二改自从前佬的智绘姬）
 // 不需要智绘姬，填 NovelAI key 就能用。
 // NovelAI 请求格式参考了智绘姬（作者：从前跟你一样，https://github.com/damoshen123/st-chatu8，AFPL v9）。
 const P = (() => { try { if (window.parent && window.parent !== window && window.parent.document) return window.parent; } catch (e) { /* 跨域 */ } return window; })();
@@ -4269,6 +4269,79 @@ function pcFitFixed() {
     } catch {}
 }
 let pcFitHooked = false;
+/** 改楼层前调用：把视线钉在原来那一楼（用法：(pcGuardScroll(), c).updateMessageBlock(id, msg)） */
+function pcGuardScroll() {
+    try {
+        const doc = globalThis.document, chat = doc?.getElementById('chat');
+        if (!chat || chat.scrollHeight - chat.scrollTop - chat.clientHeight < 8) return; // 本来就在最底下：不用管
+        const top0 = chat.getBoundingClientRect().top, list = [...chat.querySelectorAll(':scope > .mes')];
+        const anchor = list.find(m => m.getBoundingClientRect().bottom > top0 + 10);
+        if (!anchor) return;
+        const mesid = anchor.getAttribute('mesid'), off = anchor.getBoundingClientRect().top - top0, token = {};
+        pcGuardScroll.cur = token;
+        let quit = false, last = Date.now();
+        const stop = () => { quit = true; };
+        for (const ev of ['wheel', 'touchmove', 'keydown', 'mousedown']) chat.addEventListener(ev, stop, { passive: true, once: true });
+        const find = () => chat.querySelector(`:scope > .mes[mesid="${mesid}"]`);
+        const fix = () => {
+            if (quit || pcGuardScroll.cur !== token) return;
+            const m = find(); if (!m) return;
+            const d = (m.getBoundingClientRect().top - chat.getBoundingClientRect().top) - off;
+            if (Math.abs(d) > 1) { chat.scrollTop += d; last = Date.now(); }
+        };
+        requestAnimationFrame(fix);
+        for (const t of [0, 60, 300, 800, 1500, 2500, 4000]) setTimeout(fix, t);
+        // 楼里的面板是异步长回来的：哪一楼高度变了就再对一次
+        let ro = null, mo = null;
+        try { ro = new ResizeObserver(fix); for (const m of chat.querySelectorAll(':scope > .mes')) ro.observe(m); } catch { ro = null; }
+        try { mo = new MutationObserver(() => { fix(); try { for (const m of chat.querySelectorAll(':scope > .mes')) ro?.observe(m); } catch {} }); mo.observe(chat, { childList: true, subtree: true }); } catch { mo = null; }
+        setTimeout(() => { ro?.disconnect(); mo?.disconnect(); if (pcGuardScroll.cur === token) pcGuardScroll.cur = null; }, 5000);
+    } catch { /* 钉不住就算了，不影响改楼层 */ }
+}
+/** 查点数：先试 image.novelai.net（浏览器能直连），不行再走 api.novelai.net */
+async function pcNaiSub(http, key) {
+    const opt = { headers: { Authorization: 'Bearer ' + key } };
+    try { const r = await http('https://image.novelai.net/user/subscription', opt); if (r && (r.ok || r.status === 401)) return r; } catch { /* 换另一个地址 */ }
+    return http('https://api.novelai.net/user/subscription', opt);
+}
+const PC_TPARAM_KEYS = ['steps', 'cfg', 'rescale', 'sampler', 'schedule'];
+/** 这个画师串 / 画师自己设了出图参数没有 */
+function pcHasTicketParams(it) { return !!it && PC_TPARAM_KEYS.some(k => String(it[k] ?? '').trim() !== ''); }
+/** 把画师串自己的参数盖在生图设置上（只盖填了的） */
+function pcApplyItemParams(s, it) {
+    if (!pcHasTicketParams(it)) return s;
+    const out = { ...s }, num = (v, lo, hi) => { const n = Number(v); return String(v ?? '').trim() !== '' && Number.isFinite(n) && n >= lo && n <= hi ? n : null; };
+    const steps = num(it.steps, 1, 50), cfg = num(it.cfg, 0, 30), rescale = num(it.rescale, 0, 1);
+    if (steps != null) out.novelai_steps = Math.round(steps);
+    if (cfg != null) out.nai3Scale = cfg;
+    if (rescale != null) out.cfg_rescale = rescale;
+    if (typeof it.sampler === 'string' && /^k_\w+$/.test(it.sampler)) out.novelai_sampler = it.sampler;
+    if (typeof it.schedule === 'string' && /^\w+$/.test(it.schedule)) out.Schedule = it.schedule;
+    return out;
+}
+/** 这次出图用的是哪个设了参数的画师串：正面里包含它的全部标签；命中多个取标签最多的 */
+function pcTicketParamsFor(positive) {
+    try {
+        const d = __mod_store.getData(), M = __mod_model;
+        if (!d) return null;
+        const norm = t => String(t).trim().toLowerCase().replace(/\s+/g, ' ').replace(/ ::/g, '::');
+        const tagsOf = str => String(str || '').split(/[,\n]/).map(norm).filter(Boolean);
+        const pos = tagsOf(positive), have = new Set(pos), artistsInPos = pos.filter(t => /^(?:-?\d+(?:\.\d+)?::)?\W*artist:/.test(t)).length;
+        const cands = [];
+        if (d.active) { const t = M.resolveTicket(d, d.active); if (pcHasTicketParams(t?.item)) cands.push([d.active, t.item]); }
+        for (const g of Object.values(d.groups || {})) if (pcHasTicketParams(g)) cands.push([{ type: 'group', id: g.id }, g]);
+        for (const a of Object.values(d.artists || {})) if (pcHasTicketParams(a)) cands.push([{ type: 'artist', id: a.id }, a]);
+        let best = null, bestN = 0;
+        for (const [ref, it] of cands) {
+            // 单个画师：只有它自己当正文画师串、或者正面里只有它一个画师时才算（不然组里的某一位会把整组的参数改掉）
+            if (ref.type === 'artist' && !(d.active?.type === 'artist' && d.active.id === ref.id) && artistsInPos > 1) continue;
+            const tags = tagsOf(M.ticketString(d, ref));
+            if (tags.length > bestN && tags.every(t => have.has(t))) { best = it; bestN = tags.length; }
+        }
+        return best;
+    } catch { return null; }
+}
+function pcWithTicketParams(s, positive) { const it = pcTicketParamsFor(positive); return it ? pcApplyItemParams(s, it) : s; }
 function pcFitHook() {
     if (pcFitHooked) return; pcFitHooked = true;
     const w = DOC.defaultView || globalThis;
@@ -4336,7 +4409,7 @@ const __shim = {
     get extension_settings() { return __ctx().extensionSettings; },
 };
 
-globalThis.__PC_VERSION = '0.9.19';
+globalThis.__PC_VERSION = '0.9.21';
 
 // ───── model.js ─────
 const __mod_model = (() => {
@@ -5867,9 +5940,11 @@ async function pcV5RefImage(b64) {
 }
 
 function buildParameters({ positive, negative, width, height, seed, chars = [], refs = null, director = null, comic = false }) {
+    const pcRawPos = positive;
     chars=normalizeNaiChars(chars);
     positive = (positive == null ? positive : String(positive).replace(/([A-Za-z_\])}])(\d+(?:\.\d+)?)::/g, '$1$2 ::')); negative = (negative == null ? negative : String(negative).replace(/([A-Za-z_\])}])(\d+(?:\.\d+)?)::/g, '$1$2 ::')); chars = chars.map(c => ({ ...c, prompt: (c.prompt == null ? c.prompt : String(c.prompt).replace(/([A-Za-z_\])}])(\d+(?:\.\d+)?)::/g, '$1$2 ::')), uc: (c.uc == null ? c.uc : String(c.uc).replace(/([A-Za-z_\])}])(\d+(?:\.\d+)?)::/g, '$1$2 ::')) }));
-    const s = comic ? comicSettings(settings()) : settings();
+    const pcS0 = typeof pcWithTicketParams === 'function' ? pcWithTicketParams(settings(), pcRawPos) : settings();
+    const s = comic ? comicSettings(pcS0) : pcS0;
     const model = comic ? comicNaiModel(s) : s.novelaimode;
     const isV3 = model === 'nai-diffusion-3';
     const isV5 = model.includes('nai-diffusion-5');
@@ -6714,7 +6789,7 @@ async function testConnection() {
             return { ok: true, text: '第三方站点没法提前检查，直接去生图页试一张' };
         }
         const key = authKey();
-        const r = await http('https://api.novelai.net/user/subscription', { headers: { Authorization: 'Bearer ' + key } });
+        const r = await pcNaiSub(http, key);
         if (r.status === 401) return { ok: false, text: 'key 不对' };
         if (!r.ok) return { ok: false, text: `NovelAI 返回 ${r.status}` };
         return { ok: true, text: '能用' + anlasText(await r.json()) };
@@ -6764,7 +6839,7 @@ async function anlasRefresh(force = false) {
             const key = authKey();
             if (!key) return pcAnlas;
             let r = null;
-            try { r = await http('https://api.novelai.net/user/subscription', { headers: { Authorization: 'Bearer ' + key } }); }
+            try { r = await pcNaiSub(http, key); }
             catch (e) {
                 // 直连被拦：问酒馆后端（酒馆里也填了 NovelAI key 才查得到）
                 try { const t = await http('/api/novelai/status', { method: 'POST', headers: getRequestHeaders(), body: '{}' }); if (t.ok) { const tj = await t.json(); if (tj?.trainingStepsLeft || tj?.subscription) r = { ok: true, json: async () => tj }; } } catch { /* 酒馆也不行 */ }
@@ -7272,7 +7347,7 @@ async function insertIntoLastMessage(dataUrl) {
     const { url } = await uploadImage(dataUrl, `chat_${Date.now()}`);
     const msg = c.chat[idx];
     msg.mes = `${msg.mes || ''}\n\n<img src="${url}" alt="画师库生成">`;
-    c.updateMessageBlock(idx, msg);
+    (pcGuardScroll(), c).updateMessageBlock(idx, msg);
     await c.saveChat();
 }
 
@@ -8804,7 +8879,7 @@ async function insertImage(mesId, dataUrl) {
     const msg = c.chat[mesId];
     const { url } = await uploadImage(dataUrl, `chat_${Date.now()}`);
     msg.mes = `${msg.mes || ''}\n\n<img src="${url}" alt="画师库生成" class="pc-chat-img">`;
-    c.updateMessageBlock(mesId, msg);
+    (pcGuardScroll(), c).updateMessageBlock(mesId, msg);
     await c.saveChat();
 }
 
@@ -9401,7 +9476,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
         msg.mes=next;if(swipes)swipes[swipe]=next;
         try{await c.saveChat();}
         catch(e){msg.mes=source;if(swipes)swipes[swipe]=oldSwipe;if(oldImages)msg.extra.zhikuImages=oldImages;if(oldPlans)msg.extra.zhikuIllustrations=oldPlans;throw e;}
-        try{context().updateMessageBlock?.(id,msg);}catch{}
+        try{(pcGuardScroll(), context()).updateMessageBlock?.(id,msg);}catch{}
         decorate(id);zkMsgUpdated(id);
     }
     async function deleteResult(id,msg,token){
@@ -9477,7 +9552,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
                 const next=source.slice(0,tag.index)+raw+source.slice(tag.index+tag[0].length);
                 const swipes=Array.isArray(msg.swipes)&&Number.isInteger(swipe)?msg.swipes:null,oldSwipe=swipes?.[swipe];
                 msg.mes=next;if(swipes)swipes[swipe]=next;
-                try {await context().saveChat();context().updateMessageBlock(id,msg);decorate(id);zkMsgUpdated(id);}
+                try {await context().saveChat();(pcGuardScroll(), context()).updateMessageBlock(id,msg);decorate(id);zkMsgUpdated(id);}
                 catch(e){msg.mes=source;if(swipes)swipes[swipe]=oldSwipe;notify(e.message||String(e),'error');}
             };
             img.addEventListener('contextmenu',e=>{e.preventDefault();bar.hidden=false;remove.focus();});
@@ -9498,7 +9573,7 @@ function createMarkerController({context,getData,generate,upload,notify,document
         const cfg=settings();
         for(const el of doc.querySelectorAll('.mes[mesid]')) {
             const id=Number(el.getAttribute('mesid')),msg=context().chat?.[id];
-            if(msg && parseImageMarkers(msg.mes,cfg.start,cfg.end).length){context().updateMessageBlock(id,msg);zkMsgUpdated(id);}
+            if(msg && parseImageMarkers(msg.mes,cfg.start,cfg.end).length){(pcGuardScroll(), context()).updateMessageBlock(id,msg);zkMsgUpdated(id);}
         }
         decorateAll();
     }
@@ -11321,6 +11396,25 @@ function chosenTemplates(scope) {
     return rs.flatMap(r => ss.map(sh => `${r}_${sh}`)).filter(id => getData().templates[id]);
 }
 
+/** 画师串 / 画师自己的出图参数 */
+function pcParamCard(ref, it) {
+    const s = N.settings(), at = `data-tparam="${ref.type}:${ref.id}"`, v = k => esc(String(it[k] ?? ''));
+    const nameOf = (list, x) => (list.find(m => m[0] === x) || [x, x])[1];
+    const set = [it.model && nameOf(N.MODELS, it.model), it.sampler && nameOf(N.SAMPLERS, it.sampler), String(it.steps ?? '').trim() && it.steps + ' 步', String(it.cfg ?? '').trim() && 'CFG ' + it.cfg, String(it.rescale ?? '').trim() && 'Rescale ' + it.rescale, it.schedule].filter(Boolean);
+    const sp = it.shareParams && typeof it.shareParams === 'object' ? it.shareParams : null;
+    return `<section class="pc-card pc-pad pc-mt"><details class="pc-fold" ${set.length ? 'open' : ''}><summary><b>出图参数</b><i>${esc(set.length ? set.join(' · ') : '跟设置走')}</i></summary><div class="pc-fold-in">
+      <div class="pc-hint">用这串出图时换成这些：正文插图、例图、生图页、角色页都算。空着的跟设置走（灰字是现在设置里的值）。漫画里自己设了参数的，以漫画的为准。步数超过 28 会多扣 Anlas。</div>
+      <label class="pc-field pc-mt-s"><span>模型（这串当正文画师串时自动切过去）</span><select class="pc-input" ${at} data-field="model"><option value="">不绑，跟设置走</option>${N.MODELS.map(([m, t]) => `<option value="${m}" ${it.model === m ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
+      <div class="pc-grid2 pc-mt-s" style="gap:8px">
+        <label class="pc-field"><span>采样器</span><select class="pc-input" ${at} data-field="sampler"><option value="">跟设置（${esc(nameOf(N.SAMPLERS, s.novelai_sampler))}）</option>${N.SAMPLERS.map(([m, t]) => `<option value="${m}" ${it.sampler === m ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
+        <label class="pc-field"><span>噪声计划</span><select class="pc-input" ${at} data-field="schedule"><option value="">跟设置（${esc(s.Schedule || 'karras')}）</option>${N.SCHEDULES.map(([m, t]) => `<option value="${m}" ${it.schedule === m ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
+        <label class="pc-field"><span>步数</span><input class="pc-input" type="number" min="1" max="50" ${at} data-field="steps" value="${v('steps')}" placeholder="${esc(String(s.novelai_steps))}"></label>
+        <label class="pc-field"><span>CFG</span><input class="pc-input" type="number" min="0" max="30" step="0.1" ${at} data-field="cfg" value="${v('cfg')}" placeholder="${esc(String(s.nai3Scale))}"></label>
+        <label class="pc-field"><span>Rescale</span><input class="pc-input" type="number" min="0" max="1" step="0.02" ${at} data-field="rescale" value="${v('rescale')}" placeholder="${esc(String(s.cfg_rescale))}"></label>
+      </div>
+      <div class="pc-actions wrap pc-mt-s">${sp ? `<button class="pc-pill dashed tiny" data-act="tparamshare" data-tp="${ref.type}:${ref.id}">填入分享里带的参数</button>` : ''}<button class="pc-pill dashed tiny" data-act="tparamnow" data-tp="${ref.type}:${ref.id}">填入现在设置里的</button>${set.length ? `<button class="pc-pill dashed tiny" data-act="tparamclear" data-tp="${ref.type}:${ref.id}">全部清空</button>` : ''}</div>
+    </div></details></section>`;
+}
 function viewArtist(d) {
     const a = d.artists[ui.detailId];
     if (!a) { ui.view = 'book'; return viewBook(d); }
@@ -11339,6 +11433,7 @@ function viewArtist(d) {
       <b class="pc-block pc-mt-s">备注</b>
       <textarea class="pc-textarea small" data-bind-artist="${a.id}" placeholder="适合什么题材、权重心得…">${esc(a.note)}</textarea>
     </section>
+    ${pcParamCard(ref, a)}
     <section class="pc-card pc-pad pc-mt">
       <b>在哪些画师组里</b>
       <div class="pc-chips wrap">${groups.map(g => `<button class="pc-pill gold" data-act="open" data-type="group" data-id="${g.id}">${esc(g.name)} ›</button>`).join('') || '<span class="pc-dim">还不在任何画师组里</span>'}</div>
@@ -11361,8 +11456,8 @@ function viewGroup(d) {
       <div class="pc-actions wrap"><button class="pc-pill dashed" data-act="editstring" data-id="${g.id}">改写原串</button>${N.countWeightBlocks(M.ticketString(d, { type: 'group', id: g.id })) ? `<button class="pc-pill dashed" data-act="bracestring" data-id="${g.id}">转成括号写法（V4.5）</button>` : ''}<button class="pc-pill dashed danger" data-act="delete" ${refAttr(ref)}>删除整串</button></div>
       <div class="pc-strrow"><p class="pc-quote small mono">${markStr(d, str)}</p><button class="pc-round dashed" data-act="copytext" data-text="${esc(str)}" aria-label="复制">${SYM.copy}</button></div>
       <label class="pc-field pc-mt-s"><span>负面（选这串时一起换上，可不填）</span><textarea class="pc-textarea small mono" data-bind-group="${g.id}" data-field="neg" placeholder="比如 1girl, text">${esc(g.neg || '')}</textarea></label>
-      <label class="pc-field pc-mt-s"><span>绑定模型（这串当正文画师串时自动换成这个模型）</span><select class="pc-input" data-bind-group="${g.id}" data-field="model"><option value="">不绑，跟设置走</option>${N.MODELS.map(([v, t]) => `<option value="${v}" ${g.model === v ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
     </section>
+    ${pcParamCard(ref, g)}
     <section class="pc-card pc-pad pc-mt">
       <b>标签</b><div class="pc-chips wrap">${tagChips(d, ref)}</div>
       <b class="pc-block pc-mt-s">备注</b>
@@ -13687,6 +13782,20 @@ async function onClick(ev, outside = false) {
                 toastr.success(`换成括号写法了${moved.length ? `，${moved.length} 处负权重挪进了负面` : ''}，发送前再看一眼`, '智库', { timeOut: 2500 });
                 break;
             }
+            case 'tparamshare': case 'tparamnow': case 'tparamclear': {
+                const [t, id] = String(el.dataset.tp || '').split(':'), it = (t === 'group' ? d.groups : d.artists)[id];
+                if (!it) break;
+                const act = el.dataset.act;
+                if (act === 'tparamclear') { for (const k of [...PC_TPARAM_KEYS, 'model']) delete it[k]; commit(); toastr.info('清空了，这串出图跟设置走', '智库', { timeOut: 2000 }); break; }
+                const s = N.settings(), sp = act === 'tparamshare' ? (it.shareParams || {}) : { model: '', sampler: s.novelai_sampler, steps: s.novelai_steps, cfg: s.nai3Scale, rescale: s.cfg_rescale, schedule: s.Schedule };
+                const put = (k, val) => { if (val != null && String(val).trim() !== '') it[k] = String(val); };
+                if (act === 'tparamshare' && sp.model && N.MODELS.some(m => m[0] === sp.model)) it.model = sp.model;
+                if (N.SAMPLERS.some(m => m[0] === sp.sampler)) put('sampler', sp.sampler);
+                if (N.SCHEDULES.some(m => m[0] === sp.schedule)) put('schedule', sp.schedule);
+                put('steps', sp.steps); put('cfg', sp.cfg); if (sp.rescale != null) put('rescale', sp.rescale);
+                commit(); toastr.success('填好了，可以再改', '智库', { timeOut: 2000 });
+                break;
+            }
             case 'bracestring': {
                 const g = d.groups[el.dataset.id];
                 if (!g) break;
@@ -14722,6 +14831,11 @@ function onInput(ev) {
     if (el.dataset.charcanontag !== undefined) { const c = C.getChar(ui.charKey); if (c) { c.canonTag = el.value.trim(); C.saveChar(c); } return; }
     if (el.dataset.charneg !== undefined) { const c = C.getChar(ui.charKey); if (c) { c.negative = el.value; C.saveChar(c); } return; }
     if (el.dataset.charalias !== undefined) { const c = C.getChar(ui.charKey); if (c) { c.aliases = el.value.trim(); C.saveChar(c); } return; }
+    if (el.dataset.tparam) {
+        const [t, id] = el.dataset.tparam.split(':'), it = (t === 'group' ? d.groups : d.artists)[id], k = el.dataset.field;
+        if (it && k) { const val = String(el.value ?? '').trim(); if (val === '') delete it[k]; else it[k] = val; commit({ silent: el.tagName !== 'SELECT' }); }
+        return;
+    }
     if (el.dataset.bindGroup) { d.groups[el.dataset.bindGroup][el.dataset.field] = el.value; commit({ silent: true }); return; }
     if (el.dataset.crstr !== undefined) {
         const [gid, i] = el.dataset.crstr.split(':');
@@ -14804,7 +14918,7 @@ async function onChangeEv(ev) {
     }
     if (el.dataset.sceneOn !== undefined) { ui.studio.sceneOn = el.checked; saveStudio(); render(); return; }
     if (el.dataset.bindCheck === 'studio.sceneExpand') { ui.studio.sceneExpand = el.checked; saveStudio(); }
-    if (el.dataset.bindGroup || el.dataset.bindArtist) { commit(); return; }
+    if (el.dataset.bindGroup || el.dataset.bindArtist || el.dataset.tparam) { commit(); return; }
     if (el.dataset.cast) { C.setCastOn(el.dataset.cast, el.checked); render(); return; }
     if (el.dataset.crtype) { const [g, i] = el.dataset.crtype.split(':'); d.charRefGroups[g].refs[Number(i)].type = el.value; commit({ silent: true }); return; }
     if (el.dataset.i2iimg !== undefined) {
@@ -15869,7 +15983,8 @@ function shareParams(ref) {
     const item = ref ? M.resolveTicket(d, ref)?.item : null;
     if (s.naiMode === 'gpt') return item?.model ? { model: item.model } : {};
     const n = v => Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : undefined;
-    return { model: item?.model || s.novelaimode || undefined, sampler: s.novelai_sampler || undefined, steps: n(s.novelai_steps), cfg: n(s.nai3Scale), rescale: Number(s.cfg_rescale) || 0, schedule: s.Schedule || undefined, width: n(s.novelai_width), height: n(s.novelai_height) };
+    const ps = item && typeof pcApplyItemParams === 'function' ? pcApplyItemParams(s, item) : s;
+    return { model: item?.model || s.novelaimode || undefined, sampler: ps.novelai_sampler || undefined, steps: n(ps.novelai_steps), cfg: n(ps.nai3Scale), rescale: Number(ps.cfg_rescale) || 0, schedule: ps.Schedule || undefined, width: n(s.novelai_width), height: n(s.novelai_height) };
 }
 const shareModelName = v => (N.MODELS.find(m => m[0] === v) || [v, v])[1];
 function shareImageParams(image = {}) {

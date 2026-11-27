@@ -114,13 +114,16 @@ import {applySlotCCompatibility} from './slot-c-compat.mjs';
 import {applyPanelCCompatibility} from './panel-c-compat.mjs';
 import {applyPanelZhCompatibility} from './panel-zh-compat.mjs';
 import {applyTombstoneCompatibility} from './tombstone-compat.mjs';
+import {applyScrollGuardCompatibility} from './scroll-guard-compat.mjs';
+import {applyTicketParamsCompatibility} from './ticket-params-compat.mjs';
 import {fileURLToPath} from 'node:url';
 process.chdir(fileURLToPath(new URL('../', import.meta.url)));
 const dir='.';
+const releaseVersion=JSON.parse(fs.readFileSync(dir+'/package.json','utf8')).version;
 let s=applyMarkers(JSON.parse(fs.readFileSync('zhiku.script.json','utf8')).content);
 function patch(a,b){assert.equal(s.split(a).length,2,a.slice(0,80));s=s.replace(a,()=>b);}
-patch("globalThis.__PC_VERSION = '0.6.3';", "globalThis.__PC_VERSION = '0.9.19';");
-patch('智库 · 酒馆助手脚本版 v0.6.3','智库 · 原生扩展版 v0.9.19');
+patch("globalThis.__PC_VERSION = '0.6.3';", `globalThis.__PC_VERSION = '${releaseVersion}';`);
+patch('智库 · 酒馆助手脚本版 v0.6.3',`智库 · 原生扩展版 v${releaseVersion}`);
 patch('    const run = () => {\n        saving = saving.then(writeNow)', '    const run = () => {\n        saveTimer = null;\n        saving = saving.then(writeNow)');
 patch('return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl };', 'return { getData, onChange, loadData, commit, replaceData, uploadImage, deleteImageFile, imgUrl, fileToDataUrl, urlToDataUrl, shrinkDataUrl, flush: () => saveTimer !== null ? commit({ immediate: true, silent: true }) : saving };');
 // Preserve nested API error messages and object details in both response paths.
@@ -5546,6 +5549,8 @@ s=applySlotCCompatibility(s); // 0.9.16：图的按钮改版（方案 C：角上
 s=applyPanelCCompatibility(s); // 0.9.17：「修改提示词」面板改成纸页风格
 s=applyPanelZhCompatibility(s); // 0.9.18：「自己改」写中文先转英文标签（V5 直接看中文时不转）
 s=applyTombstoneCompatibility(s); // 0.9.19：删过又加回来的人设/角色不再被旧墓碑删掉
+s=applyScrollGuardCompatibility(s); // 0.9.20：改楼层后视线不跳到底；查点数先走 image.novelai.net
+s=applyTicketParamsCompatibility(s); // 0.9.21：每个画师串 / 画师能单独设出图参数
 const prefix=`// Generated from the full script; edit build-extension.mjs and shared-upload.js.
 export function createRuntime() {
 let stopped = false;
@@ -5559,10 +5564,10 @@ function clearTimeout(id) { window.clearTimeout(id); timers.delete(id); }
 `;
 fs.writeFileSync(dir+'/runtime.js',(prefix+s+'\n}\n').replace(/\r\n/g, '\n'));
 // 0.9.6：runtime.js 带版本号加载，更新后浏览器不会再用旧缓存
-fs.writeFileSync(dir+'/index.js',fs.readFileSync('src/index.js','utf8').replace("import('./runtime.js')","import('./runtime.js?v=0.9.19')"));
-fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:'0.9.19',homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
-fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:'0.9.19',private:true,type:'module'},null,2)+'\n');
+fs.writeFileSync(dir+'/index.js',fs.readFileSync('src/index.js','utf8').replace("import('./runtime.js')",`import('./runtime.js?v=${releaseVersion}')`));
+fs.writeFileSync(dir+'/manifest.json',JSON.stringify({display_name:'智库',loading_order:100,js:'index.js',author:'if love',version:releaseVersion,homePage:'https://github.com/ruoege49-ship-it/zhiku-tavern-helper',auto_update:true,minimum_client_version:'1.14.0',dependencies:[],hooks:{enable:'onEnable',disable:'onDisable',delete:'onDelete'}},null,2)+'\n');
+fs.writeFileSync(dir+'/package.json',JSON.stringify({name:'zhiku-tavern-helper',version:releaseVersion,private:true,type:'module'},null,2)+'\n');
 fs.writeFileSync(dir+'/capability-contract.json',JSON.stringify({schemaVersion:1,minimum:{sillytavern:'1.14.0',tavernHelper:null},requirements:[{id:'host-context',owner:'sillytavern',symbol:'SillyTavern.getContext',required:true,fallback:null}]},null,2));
 assert(!s.includes('getButtonEvent('));
 for(const key of ['piaoce_data.json','piaoce_nai','piaoce_uid','data-share-form'])assert(s.includes(key));
-console.log('Extension 0.9.19 built; storage keys and shared upload preserved.');
+console.log(`Extension ${releaseVersion} built; storage keys and shared upload preserved.`);
